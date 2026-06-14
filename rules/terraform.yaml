@@ -1,0 +1,10 @@
+rules:
+  - id: terraform-provider-version-pins
+    severity: error
+    description: Terraform providers and community modules must use explicit version constraints.
+  - id: terraform-docs-markers
+    severity: warning
+    description: Generated module READMEs should include terraform-docs markers.
+  - id: prefer-community-modules
+    severity: preference
+    description: Prefer maintained terraform-aws-modules where appropriate.

@@ -1,0 +1,4 @@
+rules:
+  - id: standard-tags
+    severity: preference
+    description: Generated resources should include Project, Environment, ManagedBy, Owner, and Repository tags.

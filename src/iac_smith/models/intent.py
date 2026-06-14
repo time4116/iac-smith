@@ -1,0 +1,31 @@
+from enum import StrEnum
+
+from pydantic import BaseModel, Field
+
+
+class SupportedIntent(StrEnum):
+    BASELINE = "baseline"
+    VPC_FOUNDATION = "vpc_foundation"
+    EKS_FARGATE = "eks_fargate"
+    ECS_FARGATE = "ecs_fargate"
+    UNSUPPORTED = "unsupported"
+
+
+class EnvironmentScope(StrEnum):
+    NON_PROD_ONLY = "non_prod_only"
+    PROD_ONLY = "prod_only"
+    BOTH = "both"
+
+
+class InfrastructureIntent(BaseModel):
+    raw_request: str
+    supported_intent: SupportedIntent
+    environment_scope: EnvironmentScope
+    environments: list[str]
+    region: str = "us-west-2"
+    requires_new_vpc: bool = False
+    features: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    blocked: bool = False
+    block_reason: str | None = None
