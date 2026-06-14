@@ -1,0 +1,4 @@
+rules:
+  - id: pr-required-sections
+    severity: error
+    description: PR descriptions must include source issue, summary, assumptions, files, validation, warnings, target environments, apply behavior, and no-apply confirmation.

@@ -1,0 +1,32 @@
+[project]
+name = "iac-smith"
+version = "0.1.0"
+description = "AWS-focused agentic IaC workflow that turns freeform GitHub issues into Terraform/Terragrunt pull requests."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "langgraph>=0.2.60",
+    "pydantic>=2.10.0",
+    "pyyaml>=6.0.2",
+    "httpx>=0.28.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "ruff>=0.8.0",
+]
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

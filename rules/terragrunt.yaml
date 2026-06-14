@@ -1,0 +1,7 @@
+rules:
+  - id: terragrunt-dynamic-state-key
+    severity: error
+    description: Terragrunt remote state keys must use path_relative_to_include, not one-off hardcoded keys.
+  - id: terragrunt-standard-live-layout
+    severity: preference
+    description: Use live/<environment>/<stack>/terragrunt.hcl layout.

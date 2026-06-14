@@ -1,0 +1,7 @@
+rules:
+  - id: aws-backend-s3-encrypted
+    severity: error
+    description: Backend S3 buckets must enable encryption, versioning, and public access blocking.
+  - id: aws-default-region-warning
+    severity: warning
+    description: Disclose when the AWS region is defaulted from configuration.
