@@ -246,6 +246,14 @@ live/
 
 The actual generated structure should be determined by the request and ruleset.
 
+### Module Scope Rules
+
+`foundation` means shared AWS primitives that downstream resources depend on. Examples include VPCs, subnets, route tables, internet/NAT gateways, common network security boundaries, and other cross-stack building blocks.
+
+Application or workload modules should not hide foundational resources inside narrowly named modules. For example, `modules/ecs-fargate` should not create the VPC directly. It should depend on outputs from `modules/foundation` through `live/<env>/foundation` unless the issue explicitly asks for a different repo pattern.
+
+Generated module names must describe the primary ownership boundary of the code inside them. If a requested stack needs both foundation resources and workload-specific resources, IaC Smith should split them into appropriately scoped modules instead of placing a broad mix of resources under one specific module name.
+
 ## Existing Repo Support
 
 MVP target repo starts empty, but IaC Smith should be designed for future existing-repo support.

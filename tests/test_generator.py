@@ -310,6 +310,8 @@ def test_ecs_fargate_uses_foundation_module_for_vpc():
     assert "modules/ecs-fargate/main.tf" in files
     assert 'source  = "terraform-aws-modules/vpc/aws"' in files["modules/foundation/main.tf"]
     assert 'source  = "terraform-aws-modules/vpc/aws"' not in files["modules/ecs-fargate/main.tf"]
+    assert "shared AWS primitives" in files["modules/foundation/README.md"]
+    assert "Workload modules should consume its outputs" in files["modules/foundation/README.md"]
 
 
 def test_ecs_fargate_live_stack_depends_on_foundation_outputs():
