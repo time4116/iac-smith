@@ -1,5 +1,6 @@
 import json
 
+import botocore.exceptions
 import pytest
 
 from iac_smith.dynamic_terraform import (
@@ -22,12 +23,18 @@ class FakeBody:
 
 
 class FakeBedrockRuntime:
-    def __init__(self, files: dict[str, str]):
+    def __init__(self, files: dict[str, str], failures_before_success: int = 0):
         self.files = files
+        self.failures_before_success = failures_before_success
         self.calls = []
 
     def invoke_model(self, **kwargs):
         self.calls.append(kwargs)
+        if len(self.calls) <= self.failures_before_success:
+            raise botocore.exceptions.ReadTimeoutError(
+                endpoint_url="https://bedrock-runtime.us-west-2.amazonaws.com/model/test/invoke",
+                error="timed out",
+            )
         return {
             "body": FakeBody(
                 json.dumps(
@@ -222,3 +229,61 @@ def test_bedrock_terraform_generator_returns_model_generated_files_without_rende
     body = json.loads(runtime.calls[0]["body"])
     assert body["temperature"] == 0
     assert "workload-modules-depend-on-foundation" in body["messages"][0]["content"]
+
+
+def test_bedrock_terraform_generator_retries_transient_read_timeouts():
+    files = {
+        "modules/ecs-fargate/main.tf": (
+            'resource "aws_ecs_cluster" "this" { name = var.name_prefix }\n'
+        ),
+        "modules/ecs-fargate/variables.tf": 'variable "name_prefix" { type = string }\n',
+        "modules/ecs-fargate/outputs.tf": (
+            'output "cluster_name" { value = aws_ecs_cluster.this.name }\n'
+        ),
+        "live/non-prod/ecs-fargate/terragrunt.hcl": (
+            'terraform { source = "../../../modules/ecs-fargate" }\n'
+        ),
+    }
+    runtime = FakeBedrockRuntime(files, failures_before_success=1)
+    generator = BedrockTerraformGenerator(
+        model_id="anthropic.test-model",
+        bedrock_runtime=runtime,
+    )
+
+    result = generator.generate_files(
+        intent=_intent(),
+        change_plan=_plan(),
+        repo_patterns=RepoPatterns(),
+        ruleset=_ruleset(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+
+    assert result == files
+    assert len(runtime.calls) == 2
+
+
+def test_bedrock_terraform_generator_uses_extended_bedrock_timeout(monkeypatch):
+    created_clients = []
+
+    class FakeBoto3:
+        def client(self, service_name, **kwargs):
+            created_clients.append((service_name, kwargs))
+            return FakeBedrockRuntime(
+                {
+                    "modules/ecs-fargate/main.tf": "main",
+                    "modules/ecs-fargate/variables.tf": "variables",
+                    "modules/ecs-fargate/outputs.tf": "outputs",
+                    "live/non-prod/ecs-fargate/terragrunt.hcl": "terragrunt",
+                }
+            )
+
+    monkeypatch.setitem(__import__("sys").modules, "boto3", FakeBoto3())
+    generator = BedrockTerraformGenerator(model_id="anthropic.test-model")
+
+    _ = generator.bedrock_runtime
+
+    service_name, kwargs = created_clients[0]
+    assert service_name == "bedrock-runtime"
+    assert kwargs["region_name"] == "us-west-2"
+    assert kwargs["config"].read_timeout >= 180
+    assert kwargs["config"].retries["max_attempts"] >= 3
