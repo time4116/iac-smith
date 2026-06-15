@@ -23,6 +23,8 @@ def _plan(stack_name: str) -> ChangePlan:
         environments=["non-prod"],
         files_to_generate=[
             "README.md",
+            ".github/workflows/terraform-pr-check.yml",
+            ".github/workflows/terraform-apply.yml",
             "live/terragrunt.hcl",
             "live/non-prod/terragrunt.hcl",
             f"live/non-prod/{stack_name}/terragrunt.hcl",
@@ -86,6 +88,8 @@ def _multi_env_plan(stack_name: str) -> ChangePlan:
         environments=["non-prod", "prod"],
         files_to_generate=[
             "README.md",
+            ".github/workflows/terraform-pr-check.yml",
+            ".github/workflows/terraform-apply.yml",
             "live/terragrunt.hcl",
             "live/non-prod/terragrunt.hcl",
             "live/prod/terragrunt.hcl",
@@ -130,13 +134,13 @@ def test_each_env_terragrunt_owns_its_own_backend_resources():
     non_prod_tg = files["live/non-prod/terragrunt.hcl"]
     prod_tg = files["live/prod/terragrunt.hcl"]
 
-    assert "iac-smith-demo-infra-non-prod-tfstate" in non_prod_tg
-    assert "iac-smith-demo-infra-non-prod-tflock" in non_prod_tg
-    assert "iac-smith-demo-infra-prod-tfstate" not in non_prod_tg
+    assert "iac-smith-state-non-prod-322264632107" in non_prod_tg
+    assert "iac-smith-lock-non-prod" in non_prod_tg
+    assert "iac-smith-state-prod-322264632107" not in non_prod_tg
 
-    assert "iac-smith-demo-infra-prod-tfstate" in prod_tg
-    assert "iac-smith-demo-infra-prod-tflock" in prod_tg
-    assert "iac-smith-demo-infra-non-prod-tfstate" not in prod_tg
+    assert "iac-smith-state-prod-322264632107" in prod_tg
+    assert "iac-smith-lock-prod" in prod_tg
+    assert "iac-smith-state-non-prod-322264632107" not in prod_tg
 
     # Both env files carry the state key
     key = 'key            = "${path_relative_to_include()}/terraform.tfstate"'
@@ -211,3 +215,65 @@ def test_generate_baseline_does_not_create_stack_module():
 
     assert "bootstrap/backend/non-prod/main.tf" in files
     assert not any(path.startswith("modules/") for path in files)
+
+
+def test_generated_vpc_based_modules_have_non_empty_default_azs():
+    files = generate_files(
+        intent=_intent("ecs_fargate"),
+        change_plan=_plan("ecs-fargate"),
+        repo_patterns=RepoPatterns(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+
+    variables_tf = files["modules/ecs-fargate/variables.tf"]
+    assert 'default     = ["us-west-2a", "us-west-2b"]' in variables_tf
+    assert "default     = []" not in variables_tf
+
+
+def test_env_terragrunt_generates_backend_tf_without_module_backend_block():
+    files = generate_files(
+        intent=_intent("ecs_fargate"),
+        change_plan=_plan("ecs-fargate"),
+        repo_patterns=RepoPatterns(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+
+    env_tg = files["live/non-prod/terragrunt.hcl"]
+    module_main = files["modules/ecs-fargate/main.tf"]
+
+    assert "generate = {" in env_tg
+    assert 'path      = "backend.tf"' in env_tg
+    assert 'backend "s3"' not in module_main
+
+
+def test_backend_names_match_bootstrap_iam_policy_scope():
+    plan = _plan("ecs-fargate")
+    files = generate_files(
+        intent=_intent("ecs_fargate"),
+        change_plan=plan,
+        repo_patterns=RepoPatterns(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+
+    env_tg = files["live/non-prod/terragrunt.hcl"]
+    assert 'bucket         = "iac-smith-state-non-prod-322264632107"' in env_tg
+    assert 'dynamodb_table = "iac-smith-lock-non-prod"' in env_tg
+    assert "iac-smith-demo-infra-non-prod-tfstate" not in env_tg
+    assert "iac-smith-demo-infra-non-prod-tflock" not in env_tg
+
+
+def test_pr_check_workflow_uses_valid_terragrunt_action_inputs():
+    files = generate_files(
+        intent=_intent("ecs_fargate"),
+        change_plan=_plan("ecs-fargate"),
+        repo_patterns=RepoPatterns(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+
+    workflow = files[".github/workflows/terraform-pr-check.yml"]
+    assert "uses: autero1/action-terragrunt@v3" in workflow
+    assert "terragrunt-version:" in workflow
+    assert "terragrunt_version:" not in workflow
+    assert "-depth 2" not in workflow
+    assert "-lock-timeout=20m" in workflow
+    assert "secrets.AWS_ROLE_ARN_NON_PROD" in workflow

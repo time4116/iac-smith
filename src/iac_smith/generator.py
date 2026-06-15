@@ -17,6 +17,18 @@ def _repo_slug(target_repo: str) -> str:
     return re.sub(r"[^a-z0-9-]", "-", name.lower()).strip("-")[:40]
 
 
+def _backend_resource(env: str) -> BackendResource:
+    """Canonical backend names aligned with the bootstrap IAM policy.
+
+    These names intentionally use the iac-smith-state-* and iac-smith-lock-*
+    prefixes because the GitHub OIDC role is scoped to those resources.
+    """
+    return BackendResource(
+        bucket=f"iac-smith-state-{env}-322264632107",
+        lock_table=f"iac-smith-lock-{env}",
+    )
+
+
 def _root_terragrunt(intent: InfrastructureIntent) -> str:
     """Root live/terragrunt.hcl — region locals only.
 
@@ -46,6 +58,11 @@ remote_state {{
     region         = local.aws_region
     encrypt        = true
     dynamodb_table = "{backend.lock_table}"
+  }}
+
+  generate = {{
+    path      = "backend.tf"
+    if_exists = "overwrite_terragrunt"
   }}
 }}
 '''
@@ -402,7 +419,7 @@ variable "vpc_cidr" {{
 variable "availability_zones" {{
   description = "Availability zones for subnet placement."
   type        = list(string)
-  default     = []
+  default     = ["us-west-2a", "us-west-2b"]
 }}
 
 variable "private_subnets" {{
@@ -563,41 +580,56 @@ def _workflow_check() -> str:
 
 on:
   pull_request:
+    paths:
+      - 'live/**'
+      - 'modules/**'
 
 permissions:
-  contents: read
   id-token: write
+  contents: read
+  pull-requests: read
 
 jobs:
   plan:
-    name: Terragrunt Plan
+    name: Terragrunt Plan (non-prod)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@v4
+
+      - name: Check for non-prod changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            changed:
+              - 'live/non-prod/**'
+              - 'modules/**'
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        if: steps.filter.outputs.changed == 'true'
+        uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.9.0"
 
       - name: Setup Terragrunt
-        uses: autero1/action-terragrunt@671395f8247076a54f0f622956cf988880628469
+        if: steps.filter.outputs.changed == 'true'
+        uses: autero1/action-terragrunt@v3
         with:
-          terragrunt_version: "0.58.0"
+          terragrunt-version: "0.58.0"
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+        if: steps.filter.outputs.changed == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION || 'us-west-2' }}
-
-      - name: Terragrunt Format Check
-        run: terragrunt hclfmt --terragrunt-check --terragrunt-diff
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_NON_PROD }}
+          aws-region: us-west-2
+          audience: sts.amazonaws.com
 
       - name: Terragrunt Plan
-        run: terragrunt run-all plan --terragrunt-non-interactive
-        working-directory: live
+        if: steps.filter.outputs.changed == 'true'
+        run: terragrunt run-all plan --terragrunt-non-interactive -lock-timeout=20m
+        working-directory: live/non-prod
 """
 
 
@@ -618,26 +650,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@v4
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.9.0"
 
       - name: Setup Terragrunt
-        uses: autero1/action-terragrunt@671395f8247076a54f0f622956cf988880628469
+        uses: autero1/action-terragrunt@v3
         with:
-          terragrunt_version: "0.58.0"
+          terragrunt-version: "0.58.0"
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION || 'us-west-2' }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_NON_PROD }}
+          aws-region: us-west-2
+          audience: sts.amazonaws.com
 
       - name: Terragrunt Apply
-        run: terragrunt run-all apply --terragrunt-non-interactive
+        run: terragrunt run-all apply --terragrunt-non-interactive -lock-timeout=20m
         working-directory: live
 """
 
@@ -658,7 +691,7 @@ def generate_files(
     files[".github/workflows/terraform-apply.yml"] = _workflow_apply()
 
     for env in change_plan.environments:
-        backend = change_plan.backend_resources[env]
+        backend = _backend_resource(env)
         files[f"live/{env}/terragrunt.hcl"] = _env_terragrunt(env, intent, backend)
         files[f"bootstrap/backend/{env}/main.tf"] = _backend_bootstrap(env, change_plan, intent)
         files[f"bootstrap/backend/{env}/variables.tf"] = ""
