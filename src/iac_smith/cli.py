@@ -145,6 +145,7 @@ def push_branch(repo_path: Path, branch: str, token: str) -> None:
             "-c",
             f"http.https://github.com/.extraheader={_git_auth_header(token)}",
             "push",
+            "-f",
             "-u",
             "origin",
             branch,

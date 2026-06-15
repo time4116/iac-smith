@@ -91,3 +91,24 @@ def test_select_github_token_prefers_project_specific_token():
     )
 
     assert token == "workflow-token"
+
+
+def test_push_branch_uses_force_flag(monkeypatch):
+    from pathlib import Path
+
+    calls = []
+
+    def fake_run(command, cwd=None):
+        calls.append((command, cwd))
+
+    monkeypatch.setattr("iac_smith.cli._run", fake_run)
+    from iac_smith.cli import push_branch
+
+    push_branch(Path("/dummy/repo"), "my-branch", "my-token")
+
+    assert len(calls) == 1
+    cmd, cwd = calls[0]
+    assert "push" in cmd
+    assert "-f" in cmd or "--force" in cmd
+    assert "my-branch" in cmd
+    assert cwd == Path("/dummy/repo")
