@@ -21,6 +21,16 @@ def test_load_ruleset_normalizes_severity_and_counts_rules():
     }
 
 
+def test_foundation_scope_rules_are_machine_loadable():
+    ruleset = load_ruleset(_RULES_DIR)
+    rules_by_id = {rule.id: rule for rule in ruleset.rules}
+
+    assert "foundation-module-scope" in rules_by_id
+    assert "downstream stacks depend on" in rules_by_id["foundation-module-scope"].description
+    assert "workload-modules-depend-on-foundation" in rules_by_id
+    assert "module-name-scope-alignment" in rules_by_id
+
+
 def test_load_ruleset_returns_empty_when_directory_does_not_exist(tmp_path):
     ruleset = load_ruleset(tmp_path / "nonexistent")
     assert ruleset.rules == []

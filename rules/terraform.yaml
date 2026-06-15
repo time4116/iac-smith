@@ -8,3 +8,12 @@ rules:
   - id: prefer-community-modules
     severity: preference
     description: Prefer maintained terraform-aws-modules where appropriate.
+  - id: foundation-module-scope
+    severity: warning
+    description: Foundation modules own shared AWS primitives that downstream stacks depend on, such as VPCs, subnets, route tables, NAT gateways, internet gateways, and common network boundaries.
+  - id: workload-modules-depend-on-foundation
+    severity: warning
+    description: Workload-specific modules should not hide foundation resources inside narrowly scoped names like ecs-fargate; they should depend on foundation outputs unless the issue explicitly requests another established repo pattern.
+  - id: module-name-scope-alignment
+    severity: warning
+    description: Generated module names must match the primary ownership boundary of the resources inside them; split broad mixed-resource stacks into appropriately scoped modules.
