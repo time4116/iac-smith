@@ -1,6 +1,7 @@
-import os
-from typing import dict, Any, list
+from typing import Any, dict, list
+
 from iac_smith.models.intent import IntentExtraction
+
 
 class IaCGenerator:
     def __init__(self, target_repo_path: str):
@@ -8,30 +9,37 @@ class IaCGenerator:
 
     def generate(self, extraction: IntentExtraction, plan: dict[str, Any]) -> list[dict[str, str]]:
         files = []
-        env = extraction.environment or "non-prod"
-        
+
         # 1. Generate core IaC files from plan
         for file_path, content in plan.get("files_to_create", {}).items():
-            files.append({
-                "path": file_path,
-                "content": self._apply_secure_defaults(file_path, content)
-            })
+            files.append(
+                {"path": file_path, "content": self._apply_secure_defaults(file_path, content)}
+            )
 
         # 2. Add Local State Fallback helper (Lesson from PR 4)
-        files.append({
-            "path": "local_state.hcl",
-            "content": 'remote_state { backend = "local" config = { path = "terraform.tfstate" } }'
-        })
+        files.append(
+            {
+                "path": "local_state.hcl",
+                "content": (
+                    'remote_state { backend = "local" config = { path = "terraform.tfstate" } }'
+                ),
+            }
+        )
 
         # 3. Add Matrix-based non-stomping workflows
-        files.append({
-            "path": ".github/workflows/terraform-pr-check.yml",
-            "content": self._get_pr_check_workflow()
-        })
-        
+        files.append(
+            {
+                "path": ".github/workflows/terraform-pr-check.yml",
+                "content": self._get_pr_check_workflow(),
+            }
+        )
+
         return files
 
     def _apply_secure_defaults(self, path: str, content: str) -> str:
+        has_backend = 'backend "s3"' in content or 'backend "local"' in content
+        if path.endswith(".tf") and not has_backend:
+            content = 'terraform {\n  backend "s3" {}\n}\n\n' + content
         if (path.endswith(".tf") or path.endswith(".hcl")) and "public_access" in content:
             content = content.replace("public_access = true", "public_access = false")
         return content
@@ -87,9 +95,5 @@ jobs:
       - name: Terragrunt Plan
         if: steps.filter.outputs.changed == 'true'
         working-directory: live/non-prod
-        run: |
-          if ! terragrunt run-all plan --terragrunt-non-interactive -lock-timeout=1m; then
-            echo "::warning title=S3 Initializaton Failed::Falling back to local state plan for discovery."
-            find . -name "terragrunt.hcl" -depth 2 -exec terragrunt plan --terragrunt-non-interactive --terragrunt-config ../../../local_state.hcl {} +
-          fi
+        run: terragrunt run-all plan --terragrunt-non-interactive -lock-timeout=20m
 """
