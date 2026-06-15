@@ -1,13 +1,13 @@
-import os
-from typing import Dict, Any, List
+from typing import Any
+
 from iac_smith.models.intent import IntentExtraction
-from iac_smith.models.rules import ValidationResult
+
 
 class IaCGenerator:
     def __init__(self, target_repo_path: str):
         self.target_repo_path = target_repo_path
 
-    def generate(self, extraction: IntentExtraction, plan: Dict[str, Any]) -> List[Dict[str, str]]:
+    def generate(self, extraction: IntentExtraction, plan: dict[str, Any]) -> list[dict[str, str]]:
         files = []
         
         # 1. Generate Terraform/Terragrunt files based on the plan
@@ -31,9 +31,8 @@ class IaCGenerator:
 
     def _apply_secure_defaults(self, path: str, content: str) -> str:
         # Avoid dangerous defaults even if Bedrock suggested them
-        if path.endswith(".tf") or path.endswith(".hcl"):
-            if "public_access" in content:
-                content = content.replace("public_access = true", "public_access = false")
+        if (path.endswith(".tf") or path.endswith(".hcl")) and "public_access" in content:
+            content = content.replace("public_access = true", "public_access = false")
         return content
 
     def _get_pr_check_workflow(self) -> str:
