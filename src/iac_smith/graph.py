@@ -106,17 +106,28 @@ def change_planner(state: IaCSmithState) -> IaCSmithState:
 
 def make_code_generator(file_generator_fn: FileGenerator):
     def code_generator_node(state: IaCSmithState) -> IaCSmithState:
-        if state.get("generated_files"):
+        # If we have generated files and we are not in a validation-repair loop, reuse them.
+        # However, if have_failed is set on validation, we must re-generate with repair context.
+        validation_errors = []
+        validation = state.get("validation")
+        if validation and validation.status == ValidationStatus.FAILED:
+            validation_errors = validation.errors
+
+        # If we are already validated or have no errors but files exist, return.
+        if state.get("generated_files") and not validation_errors:
             return {**state, "status": "generated"}
+
+        # Perform Bedrock generation or recovery attempt
+        generated_files = file_generator_fn(
+            intent=state["intent"],
+            change_plan=state["change_plan"],
+            repo_patterns=state["repo_patterns"],
+            ruleset=state.get("ruleset"),
+            target_repo=state["target_repo"],
+        )
         return {
             **state,
-            "generated_files": file_generator_fn(
-                intent=state["intent"],
-                change_plan=state["change_plan"],
-                repo_patterns=state["repo_patterns"],
-                ruleset=state.get("ruleset"),
-                target_repo=state["target_repo"],
-            ),
+            "generated_files": generated_files,
             "status": "generated",
         }
 
@@ -132,8 +143,22 @@ def validation_runner(state: IaCSmithState) -> IaCSmithState:
             status=ValidationStatus.FAILED,
             errors=["Generated files are required before static review and PR creation."],
         )
-    status = "blocked" if validation.status == ValidationStatus.FAILED else "validated"
-    return {**state, "validation": validation, "status": status}
+
+    # Let's read and increment the global retry attempts count if validation failed
+    repair_attempts = state.get("repair_attempts", 0)
+    if validation.status == ValidationStatus.FAILED:
+        repair_attempts += 1
+
+    status = "validated"
+    if validation.status == ValidationStatus.FAILED:
+        status = "blocked" if repair_attempts >= 3 else "needs_repair"
+
+    return {
+        **state,
+        "validation": validation,
+        "repair_attempts": repair_attempts,
+        "status": status,
+    }
 
 
 def pr_writer(state: IaCSmithState) -> IaCSmithState:
@@ -158,8 +183,12 @@ def route_after_intent(state: IaCSmithState) -> str:
 
 
 def route_after_validation(state: IaCSmithState) -> str:
-    validation = state.get("validation")
-    return "end" if validation and validation.status == ValidationStatus.FAILED else "pr_writer"
+    status = state.get("status")
+    if status == "needs_repair":
+        return "code_generator"
+    if status == "blocked":
+        return "end"
+    return "pr_writer"
 
 
 def build_graph(
@@ -194,7 +223,11 @@ def build_graph(
     graph.add_conditional_edges(
         "validation_runner",
         route_after_validation,
-        {"end": END, "pr_writer": "pr_writer"},
+        {
+            "end": END,
+            "pr_writer": "pr_writer",
+            "code_generator": "code_generator",
+        },
     )
     graph.add_edge("pr_writer", END)
     return graph.compile()

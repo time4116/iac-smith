@@ -193,7 +193,19 @@ def test_graph_ignores_unlabeled_issue_before_intent_parsing():
 
 
 def test_graph_blocks_failed_static_review_before_pr_writer():
-    graph = _graph()
+    # To test that persistent failures get blocked after reaching the max retry threshold,
+    # we inject a fake file generator that always returns a failing Terragrunt file.
+    def broken_generator(*args, **kwargs):
+        return {
+            "environments/non-prod/example/terragrunt.hcl": (
+                'remote_state { config = { key = "fixed.tfstate" } }'
+            )
+        }
+
+    graph = build_graph(
+        intent_parser_fn=_fake_intent_parser,
+        file_generator_fn=broken_generator,
+    )
     result = graph.invoke(
         IaCSmithState(
             issue_number=15,
@@ -213,3 +225,45 @@ def test_graph_blocks_failed_static_review_before_pr_writer():
     assert result["status"] == "blocked"
     assert "pr_body" not in result
     assert result["validation"].status.value == "failed"
+    assert result["repair_attempts"] == 3
+
+
+def test_graph_validation_runner_successfully_repairs_transient_failure():
+    attempts_called = 0
+
+    def recovering_generator(*args, **kwargs):
+        nonlocal attempts_called
+        attempts_called += 1
+        if attempts_called == 1:
+            # First attempt: returns a failed/broken state key
+            return {
+                "environments/non-prod/example/terragrunt.hcl": (
+                    'remote_state { config = { key = "fixed.tfstate" } }'
+                )
+            }
+        # Second attempt: returns healed/repaired state key
+        repaired_key = (
+            'remote_state { config = { key = "${path_relative_to_include()}/terraform.tfstate" } }'
+        )
+        return {"environments/non-prod/example/terragrunt.hcl": repaired_key}
+
+    graph = build_graph(
+        intent_parser_fn=_fake_intent_parser,
+        file_generator_fn=recovering_generator,
+    )
+
+    result = graph.invoke(
+        IaCSmithState(
+            issue_number=16,
+            issue_title="Create EKS Fargate infra",
+            issue_body="Create AWS infrastructure for a non-prod EKS Fargate setup in us-west-2.",
+            issue_url="https://github.com/time4116/iac-smith/issues/16",
+            labels=["iac-smith"],
+            target_repo="time4116/iac-smith-demo-infra",
+        )
+    )
+
+    assert result["status"] == "pr_ready"
+    assert result["validation"].status.value == "passed"
+    assert result["repair_attempts"] == 1
+    assert attempts_called == 2

@@ -24,3 +24,4 @@ class IaCSmithState(TypedDict, total=False):
     pr_body: str | None
     status: str
     block_reason: str | None
+    repair_attempts: int
