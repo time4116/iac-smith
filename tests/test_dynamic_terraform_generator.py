@@ -379,6 +379,51 @@ def test_bedrock_terraform_generator_repairs_file_after_static_review_failure():
     assert "path_relative_to_include" in repair_body["messages"][0]["content"]
 
 
+def test_bedrock_terraform_generator_logs_generation_and_repair_progress():
+    bad_terragrunt = 'remote_state { config = { key = "fixed.tfstate" } }\n'
+    fixed_terragrunt = (
+        'remote_state { config = { key = "${path_relative_to_include()}/terraform.tfstate" } }\n'
+    )
+    files = {
+        "live/non-prod/ecs-fargate/terragrunt.hcl": bad_terragrunt,
+        "modules/ecs-fargate/main.tf": (
+            'resource "aws_ecs_cluster" "this" { name = var.name_prefix }\n'
+        ),
+        "modules/ecs-fargate/variables.tf": 'variable "name_prefix" { type = string }\n',
+        "modules/ecs-fargate/outputs.tf": (
+            'output "cluster_name" { value = aws_ecs_cluster.this.name }\n'
+        ),
+    }
+    messages: list[str] = []
+    runtime = FakeBedrockRuntime(
+        files,
+        repairs={"live/non-prod/ecs-fargate/terragrunt.hcl": fixed_terragrunt},
+    )
+    generator = BedrockTerraformGenerator(
+        model_id="anthropic.test-model",
+        bedrock_runtime=runtime,
+        logger=messages.append,
+    )
+
+    generator.generate_files(
+        intent=_intent(),
+        change_plan=_plan(),
+        repo_patterns=RepoPatterns(),
+        ruleset=_ruleset(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+
+    assert messages[0] == "IaC Smith: generating 4 planned file(s) with Bedrock."
+    assert "IaC Smith: generating file 1/4: live/non-prod/ecs-fargate/terragrunt.hcl" in messages
+    assert any("static review failed" in message for message in messages)
+    assert "IaC Smith: repairing file 1/4: live/non-prod/ecs-fargate/terragrunt.hcl" in messages
+    assert (
+        "IaC Smith: static review passed for live/non-prod/ecs-fargate/terragrunt.hcl after repair."
+        in messages
+    )
+    assert messages[-1] == "IaC Smith: generated 4 file(s)."
+
+
 def test_bedrock_terraform_generator_stops_after_unrepaired_static_review_failure():
     files = {
         "live/non-prod/ecs-fargate/terragrunt.hcl": (

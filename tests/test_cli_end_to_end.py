@@ -86,3 +86,40 @@ def test_run_iac_smith_generates_commits_and_opens_pr(tmp_path: Path):
     assert (tmp_path / "modules" / "vpc-foundation" / "main.tf").exists()
     assert pr_client.calls[0]["repo"] == "time4116/iac-smith-demo-infra"
     assert pr_client.calls[0]["head"] == result.branch
+
+
+def test_run_iac_smith_logs_progress_to_stdout(tmp_path: Path, capsys):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    (tmp_path / "README.md").write_text("# existing\n")
+    subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "chore: init"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    run_iac_smith(
+        env={
+            "IAC_SMITH_SOURCE_REPO": "time4116/iac-smith",
+            "IAC_SMITH_ISSUE_NUMBER": "42",
+            "IAC_SMITH_TARGET_REPO": "time4116/iac-smith-demo-infra",
+            "IAC_SMITH_ALLOWED_TARGET_REPO": "time4116/iac-smith-demo-infra",
+            "IAC_SMITH_TARGET_REPO_PATH": str(tmp_path),
+            "IAC_SMITH_SKIP_PUSH": "1",
+        },
+        issue_client=FakeIssueClient(),
+        pr_client=FakePullRequestClient(),
+        intent_parser_fn=_fake_intent_parser,
+        file_generator_fn=_fake_file_generator,
+    )
+
+    out = capsys.readouterr().out
+    assert "IaC Smith: using target repo path" in out
+    assert "IaC Smith: fetched issue #42: Create non-prod VPC" in out
+    assert "IaC Smith: running graph." in out
+    assert "IaC Smith: graph finished with status pr_ready." in out
+    assert "IaC Smith: creating branch" in out
+    assert "IaC Smith: opening pull request." in out

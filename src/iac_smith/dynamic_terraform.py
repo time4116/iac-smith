@@ -1,5 +1,6 @@
 import json
 import os
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
@@ -206,6 +207,7 @@ class BedrockTerraformGenerator:
         read_timeout_seconds: int = 240,
         max_attempts: int = 3,
         max_repair_attempts: int = 1,
+        logger: Callable[[str], None] | None = None,
     ) -> None:
         self.model_id = model_id or os.getenv("BEDROCK_MODEL_ID", "")
         if not self.model_id:
@@ -214,6 +216,11 @@ class BedrockTerraformGenerator:
         self.read_timeout_seconds = read_timeout_seconds
         self.max_attempts = max_attempts
         self.max_repair_attempts = max_repair_attempts
+        self.logger = logger
+
+    def _log(self, message: str) -> None:
+        if self.logger:
+            self.logger(message)
 
     @property
     def bedrock_runtime(self) -> BedrockRuntime:
@@ -311,7 +318,10 @@ class BedrockTerraformGenerator:
         repo_patterns: RepoPatterns,
         ruleset: Ruleset | None,
         target_repo: str,
+        file_index: int,
+        total_files: int,
     ) -> str:
+        self._log(f"IaC Smith: generating file {file_index}/{total_files}: {path}")
         content = self._generate_planned_file(
             path=path,
             intent=intent,
@@ -323,10 +333,16 @@ class BedrockTerraformGenerator:
         for _attempt in range(self.max_repair_attempts + 1):
             validation = static_review_generated_files({**generated_files, path: content})
             if validation.status != ValidationStatus.FAILED:
+                if _attempt:
+                    self._log(f"IaC Smith: static review passed for {path} after repair.")
+                else:
+                    self._log(f"IaC Smith: static review passed for {path}.")
                 return content
+            self._log(f"IaC Smith: static review failed for {path}: {'; '.join(validation.errors)}")
             if _attempt >= self.max_repair_attempts:
                 joined_errors = "; ".join(validation.errors)
                 raise ValueError(f"Generated file `{path}` failed static review: {joined_errors}")
+            self._log(f"IaC Smith: repairing file {file_index}/{total_files}: {path}")
             content = self._generate_planned_file(
                 path=path,
                 intent=intent,
@@ -349,7 +365,9 @@ class BedrockTerraformGenerator:
         target_repo: str,
     ) -> dict[str, str]:
         generated_files: dict[str, str] = {}
-        for path in change_plan.files_to_generate:
+        total_files = len(change_plan.files_to_generate)
+        self._log(f"IaC Smith: generating {total_files} planned file(s) with Bedrock.")
+        for file_index, path in enumerate(change_plan.files_to_generate, start=1):
             generated_files[path] = self._generate_reviewed_file(
                 path=path,
                 generated_files=generated_files,
@@ -358,5 +376,8 @@ class BedrockTerraformGenerator:
                 repo_patterns=repo_patterns,
                 ruleset=ruleset,
                 target_repo=target_repo,
+                file_index=file_index,
+                total_files=total_files,
             )
+        self._log(f"IaC Smith: generated {len(generated_files)} file(s).")
         return generated_files
