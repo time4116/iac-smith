@@ -15,7 +15,7 @@ def test_pr_body_uses_planned_environment_names_when_repo_patterns_override_inte
     plan = ChangePlan(
         stack_name="vpc",
         environments=["dev", "staging", "prod"],
-        files_to_generate=["live/dev/vpc/terragrunt.hcl"],
+        files_to_generate=["environments/dev/vpc/terragrunt.hcl"],
         backend_resources={
             "dev": BackendResource(bucket="iac-smith-dev-tfstate", lock_table="iac-smith-dev-lock")
         },

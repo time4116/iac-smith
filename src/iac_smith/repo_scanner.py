@@ -14,17 +14,17 @@ def _read_text(path: Path) -> str:
 
 
 def _discover_environments(root: Path) -> list[str]:
-    """Discover environment directories under live/ heuristically.
+    """Discover environment directories under environments/ heuristically.
 
-    Any immediate subdirectory of live/ that either contains a terragrunt.hcl
+    Any immediate subdirectory of environments/ that either contains a terragrunt.hcl
     file or contains further subdirectories (i.e. isn't a leaf stack dir) is
     treated as an environment. This avoids the old hard-coded name allowlist.
     """
-    live = root / "live"
-    if not live.exists():
+    envs_path = root / "environments"
+    if not envs_path.exists():
         return []
     envs = []
-    for child in sorted(live.iterdir()):
+    for child in sorted(envs_path.iterdir()):
         if not child.is_dir():
             continue
         has_hcl = (child / "terragrunt.hcl").exists()
@@ -46,15 +46,15 @@ def _discover_module_sources(root: Path) -> list[str]:
 def _discover_existing_stack_paths(root: Path) -> list[str]:
     """Return relative paths of stack directories already in the repo.
 
-    Includes both live/{env}/{stack} paths and modules/{stack} paths so the
+    Includes both environments/{env}/{stack} paths and modules/{stack} paths so the
     change planner can skip regenerating module scaffolds that already exist.
     """
     paths: set[str] = set()
-    live = root / "live"
-    if live.exists():
-        for path in live.rglob("terragrunt.hcl"):
+    envs_path = root / "environments"
+    if envs_path.exists():
+        for path in envs_path.rglob("terragrunt.hcl"):
             rel = path.relative_to(root).as_posix()
-            if rel != "live/terragrunt.hcl" and path.parent != live:
+            if rel != "environments/terragrunt.hcl" and path.parent != envs_path:
                 paths.add(path.parent.relative_to(root).as_posix())
     modules = root / "modules"
     if modules.exists():
@@ -69,7 +69,7 @@ def _discover_representative_files(
 ) -> dict[str, str]:
     """Capture bounded examples so the model can follow existing repo conventions."""
     candidates: list[Path] = []
-    for pattern in ["live/**/terragrunt.hcl", "modules/**/*.tf", "modules/**/README.md"]:
+    for pattern in ["environments/**/terragrunt.hcl", "modules/**/*.tf", "modules/**/README.md"]:
         candidates.extend(sorted(root.glob(pattern)))
 
     samples: dict[str, str] = {}
@@ -96,7 +96,7 @@ def scan_repo_patterns(root: str | Path) -> RepoPatterns:
 
     uses_terragrunt = bool(terragrunt_files)
     uses_terraform = bool(terraform_files)
-    if (repo_root / "live").exists():
+    if (repo_root / "environments").exists():
         preferred_layout = "terragrunt_live_modules"
     else:
         preferred_layout = "iac_smith_default"

@@ -25,9 +25,9 @@ def _plan(stack_name: str) -> ChangePlan:
             "README.md",
             ".github/workflows/terraform-pr-check.yml",
             ".github/workflows/terraform-apply.yml",
-            "live/terragrunt.hcl",
-            "live/non-prod/terragrunt.hcl",
-            f"live/non-prod/{stack_name}/terragrunt.hcl",
+            "environments/terragrunt.hcl",
+            "environments/non-prod/terragrunt.hcl",
+            f"environments/non-prod/{stack_name}/terragrunt.hcl",
             f"modules/{stack_name}/main.tf",
             f"modules/{stack_name}/variables.tf",
             f"modules/{stack_name}/outputs.tf",
@@ -63,21 +63,21 @@ def test_generate_vpc_files_are_repo_aware_and_pass_static_review():
     assert 'source  = "terraform-aws-modules/vpc/aws"' in files["modules/vpc/main.tf"]
     # remote_state lives in env-level file, NOT root
     state_key = 'key            = "${path_relative_to_include()}/terraform.tfstate"'
-    assert state_key not in files["live/terragrunt.hcl"]
-    assert state_key in files["live/non-prod/terragrunt.hcl"]
-    assert 'include "root"' in files["live/non-prod/vpc/terragrunt.hcl"]
+    assert state_key not in files["environments/terragrunt.hcl"]
+    assert state_key in files["environments/non-prod/terragrunt.hcl"]
+    assert 'include "root"' in files["environments/non-prod/vpc/terragrunt.hcl"]
     assert static_review_generated_files(files).errors == []
 
 
 def test_root_terragrunt_has_no_remote_state_block():
-    """Root live/terragrunt.hcl must only define region locals — no backend config."""
+    """Root environments/terragrunt.hcl must only define region locals — no backend config."""
     files = generate_files(
         intent=_intent("vpc_foundation"),
         change_plan=_plan("vpc"),
         repo_patterns=RepoPatterns(),
         target_repo="time4116/iac-smith-demo-infra",
     )
-    root = files["live/terragrunt.hcl"]
+    root = files["environments/terragrunt.hcl"]
     assert "remote_state" not in root
     assert "aws_region" in root
 
@@ -90,11 +90,11 @@ def _multi_env_plan(stack_name: str) -> ChangePlan:
             "README.md",
             ".github/workflows/terraform-pr-check.yml",
             ".github/workflows/terraform-apply.yml",
-            "live/terragrunt.hcl",
-            "live/non-prod/terragrunt.hcl",
-            "live/prod/terragrunt.hcl",
-            f"live/non-prod/{stack_name}/terragrunt.hcl",
-            f"live/prod/{stack_name}/terragrunt.hcl",
+            "environments/terragrunt.hcl",
+            "environments/non-prod/terragrunt.hcl",
+            "environments/prod/terragrunt.hcl",
+            f"environments/non-prod/{stack_name}/terragrunt.hcl",
+            f"environments/prod/{stack_name}/terragrunt.hcl",
             f"modules/{stack_name}/main.tf",
             f"modules/{stack_name}/variables.tf",
             f"modules/{stack_name}/outputs.tf",
@@ -131,8 +131,8 @@ def test_each_env_terragrunt_owns_its_own_backend_resources():
         target_repo="time4116/iac-smith-demo-infra",
     )
 
-    non_prod_tg = files["live/non-prod/terragrunt.hcl"]
-    prod_tg = files["live/prod/terragrunt.hcl"]
+    non_prod_tg = files["environments/non-prod/terragrunt.hcl"]
+    prod_tg = files["environments/prod/terragrunt.hcl"]
 
     assert "iac-smith-state-non-prod-322264632107" in non_prod_tg
     assert "iac-smith-lock-non-prod" in non_prod_tg
@@ -193,7 +193,7 @@ def test_generate_stack_terragrunt_source_path_is_always_correct_depth():
         target_repo="time4116/iac-smith-demo-infra",
     )
 
-    tg = files["live/non-prod/vpc/terragrunt.hcl"]
+    tg = files["environments/non-prod/vpc/terragrunt.hcl"]
     assert 'source = "../../../modules/vpc"' in tg
 
 
@@ -201,8 +201,8 @@ def test_generate_baseline_does_not_create_stack_module():
     plan = _plan("baseline")
     plan.files_to_generate = [
         "README.md",
-        "live/terragrunt.hcl",
-        "live/non-prod/terragrunt.hcl",
+        "environments/terragrunt.hcl",
+        "environments/non-prod/terragrunt.hcl",
         "bootstrap/backend/non-prod/main.tf",
     ]
 
@@ -241,7 +241,7 @@ def test_env_terragrunt_generates_backend_tf_without_module_backend_block():
         target_repo="time4116/iac-smith-demo-infra",
     )
 
-    env_tg = files["live/non-prod/terragrunt.hcl"]
+    env_tg = files["environments/non-prod/terragrunt.hcl"]
     module_main = files["modules/ecs-fargate/main.tf"]
 
     assert "generate = {" in env_tg
@@ -258,7 +258,7 @@ def test_backend_names_match_bootstrap_iam_policy_scope():
         target_repo="time4116/iac-smith-demo-infra",
     )
 
-    env_tg = files["live/non-prod/terragrunt.hcl"]
+    env_tg = files["environments/non-prod/terragrunt.hcl"]
     assert 'bucket         = "iac-smith-state-non-prod-322264632107"' in env_tg
     assert 'dynamodb_table = "iac-smith-lock-non-prod"' in env_tg
     assert "iac-smith-demo-infra-non-prod-tfstate" not in env_tg
@@ -286,8 +286,8 @@ def _foundation_plan(stack_name: str = "ecs-fargate") -> ChangePlan:
     plan = _plan(stack_name)
     plan.files_to_generate.extend(
         [
-            "live/non-prod/foundation/terragrunt.hcl",
-            "live/non-prod/foundation/README.md",
+            "environments/non-prod/foundation/terragrunt.hcl",
+            "environments/non-prod/foundation/README.md",
             "modules/foundation/main.tf",
             "modules/foundation/variables.tf",
             "modules/foundation/outputs.tf",
@@ -336,7 +336,7 @@ def test_ecs_fargate_live_stack_depends_on_foundation_outputs():
         target_repo="time4116/iac-smith-demo-infra",
     )
 
-    ecs_tg = files["live/non-prod/ecs-fargate/terragrunt.hcl"]
+    ecs_tg = files["environments/non-prod/ecs-fargate/terragrunt.hcl"]
     assert 'dependency "foundation"' in ecs_tg
     assert 'config_path = "../foundation"' in ecs_tg
     assert "vpc_id             = dependency.foundation.outputs.vpc_id" in ecs_tg

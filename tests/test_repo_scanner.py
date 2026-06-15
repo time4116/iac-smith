@@ -15,13 +15,13 @@ def test_scan_empty_repo_uses_iac_smith_defaults(tmp_path: Path):
 
 def test_scan_existing_terragrunt_repo_detects_envs_module_sources_and_backend(tmp_path: Path):
     root = tmp_path
-    (root / "live" / "dev" / "vpc").mkdir(parents=True)
-    (root / "live" / "prod" / "vpc").mkdir(parents=True)
-    (root / "live" / "terragrunt.hcl").write_text(
+    (root / "environments" / "dev" / "vpc").mkdir(parents=True)
+    (root / "environments" / "prod" / "vpc").mkdir(parents=True)
+    (root / "environments" / "terragrunt.hcl").write_text(
         'remote_state {\n  backend = "s3"\n  config = {\n'
         '    key = "${path_relative_to_include()}/terraform.tfstate"\n  }\n}\n'
     )
-    (root / "live" / "dev" / "vpc" / "terragrunt.hcl").write_text(
+    (root / "environments" / "dev" / "vpc" / "terragrunt.hcl").write_text(
         'terraform { source = "../../../modules/network" }\n'
     )
     (root / "modules" / "network").mkdir(parents=True)

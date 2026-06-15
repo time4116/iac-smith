@@ -94,7 +94,7 @@ def _plan() -> ChangePlan:
         stack_name="ecs-fargate",
         environments=["non-prod"],
         files_to_generate=[
-            "live/non-prod/ecs-fargate/terragrunt.hcl",
+            "environments/non-prod/ecs-fargate/terragrunt.hcl",
             "modules/ecs-fargate/main.tf",
             "modules/ecs-fargate/variables.tf",
             "modules/ecs-fargate/outputs.tf",
@@ -126,7 +126,7 @@ def test_generation_prompt_contains_rules_repo_patterns_and_requested_paths():
         repo_patterns=RepoPatterns(
             uses_terragrunt=True,
             environments=["non-prod"],
-            existing_stack_paths=["modules/foundation", "live/non-prod/foundation"],
+            existing_stack_paths=["modules/foundation", "environments/non-prod/foundation"],
             module_sources=["terraform-aws-modules/vpc/aws"],
             preferred_layout="terragrunt_live_modules",
         ),
@@ -138,7 +138,7 @@ def test_generation_prompt_contains_rules_repo_patterns_and_requested_paths():
     assert "Workload modules consume foundation outputs" in prompt
     assert "modules/foundation" in prompt
     assert "terraform-aws-modules/vpc/aws" in prompt
-    assert "live/non-prod/ecs-fargate/terragrunt.hcl" in prompt
+    assert "environments/non-prod/ecs-fargate/terragrunt.hcl" in prompt
     assert "Return only JSON" in prompt
     assert "Do not generate files outside files_to_generate" in prompt
 
@@ -272,7 +272,7 @@ def test_bedrock_terraform_generator_returns_model_generated_files_without_rende
         "modules/ecs-fargate/outputs.tf": (
             'output "cluster_name" { value = aws_ecs_cluster.this.name }\n'
         ),
-        "live/non-prod/ecs-fargate/terragrunt.hcl": (
+        "environments/non-prod/ecs-fargate/terragrunt.hcl": (
             'terraform { source = "../../../modules/ecs-fargate" }\n'
         ),
     }
@@ -306,7 +306,9 @@ def test_bedrock_terraform_generator_returns_model_generated_files_without_rende
     first_context = json.loads(
         body["messages"][0]["content"].split("Generation context JSON:\n", 1)[1]
     )
-    assert first_context["files_to_generate"] == ["live/non-prod/ecs-fargate/terragrunt.hcl"]
+    assert first_context["files_to_generate"] == [
+        "environments/non-prod/ecs-fargate/terragrunt.hcl"
+    ]
 
 
 def test_bedrock_terraform_generator_retries_transient_read_timeouts():
@@ -318,7 +320,7 @@ def test_bedrock_terraform_generator_retries_transient_read_timeouts():
         "modules/ecs-fargate/outputs.tf": (
             'output "cluster_name" { value = aws_ecs_cluster.this.name }\n'
         ),
-        "live/non-prod/ecs-fargate/terragrunt.hcl": (
+        "environments/non-prod/ecs-fargate/terragrunt.hcl": (
             'terraform { source = "../../../modules/ecs-fargate" }\n'
         ),
     }
@@ -346,7 +348,7 @@ def test_bedrock_terraform_generator_repairs_file_after_static_review_failure():
         'remote_state { config = { key = "${path_relative_to_include()}/terraform.tfstate" } }\n'
     )
     files = {
-        "live/non-prod/ecs-fargate/terragrunt.hcl": bad_terragrunt,
+        "environments/non-prod/ecs-fargate/terragrunt.hcl": bad_terragrunt,
         "modules/ecs-fargate/main.tf": (
             'resource "aws_ecs_cluster" "this" { name = var.name_prefix }\n'
         ),
@@ -357,7 +359,7 @@ def test_bedrock_terraform_generator_repairs_file_after_static_review_failure():
     }
     runtime = FakeBedrockRuntime(
         files,
-        repairs={"live/non-prod/ecs-fargate/terragrunt.hcl": fixed_terragrunt},
+        repairs={"environments/non-prod/ecs-fargate/terragrunt.hcl": fixed_terragrunt},
     )
     generator = BedrockTerraformGenerator(
         model_id="anthropic.test-model",
@@ -372,7 +374,7 @@ def test_bedrock_terraform_generator_repairs_file_after_static_review_failure():
         target_repo="time4116/iac-smith-demo-infra",
     )
 
-    assert result["live/non-prod/ecs-fargate/terragrunt.hcl"] == fixed_terragrunt
+    assert result["environments/non-prod/ecs-fargate/terragrunt.hcl"] == fixed_terragrunt
     assert len(runtime.calls) == len(files) + 1
     repair_body = json.loads(runtime.calls[1]["body"])
     assert "Static review failures:" in repair_body["messages"][0]["content"]
@@ -385,7 +387,7 @@ def test_bedrock_terraform_generator_logs_generation_and_repair_progress():
         'remote_state { config = { key = "${path_relative_to_include()}/terraform.tfstate" } }\n'
     )
     files = {
-        "live/non-prod/ecs-fargate/terragrunt.hcl": bad_terragrunt,
+        "environments/non-prod/ecs-fargate/terragrunt.hcl": bad_terragrunt,
         "modules/ecs-fargate/main.tf": (
             'resource "aws_ecs_cluster" "this" { name = var.name_prefix }\n'
         ),
@@ -397,7 +399,7 @@ def test_bedrock_terraform_generator_logs_generation_and_repair_progress():
     messages: list[str] = []
     runtime = FakeBedrockRuntime(
         files,
-        repairs={"live/non-prod/ecs-fargate/terragrunt.hcl": fixed_terragrunt},
+        repairs={"environments/non-prod/ecs-fargate/terragrunt.hcl": fixed_terragrunt},
     )
     generator = BedrockTerraformGenerator(
         model_id="anthropic.test-model",
@@ -414,19 +416,25 @@ def test_bedrock_terraform_generator_logs_generation_and_repair_progress():
     )
 
     assert messages[0] == "IaC Smith: generating 4 planned file(s) with Bedrock."
-    assert "IaC Smith: generating file 1/4: live/non-prod/ecs-fargate/terragrunt.hcl" in messages
-    assert any("static review failed" in message for message in messages)
-    assert "IaC Smith: repairing file 1/4: live/non-prod/ecs-fargate/terragrunt.hcl" in messages
     assert (
-        "IaC Smith: static review passed for live/non-prod/ecs-fargate/terragrunt.hcl after repair."
+        "IaC Smith: generating file 1/4: environments/non-prod/ecs-fargate/terragrunt.hcl"
         in messages
+    )
+    assert any("static review failed" in message for message in messages)
+    assert (
+        "IaC Smith: repairing file 1/4: environments/non-prod/ecs-fargate/terragrunt.hcl"
+        in messages
+    )
+    assert (
+        "IaC Smith: static review passed for "
+        "environments/non-prod/ecs-fargate/terragrunt.hcl after repair." in messages
     )
     assert messages[-1] == "IaC Smith: generated 4 file(s)."
 
 
 def test_bedrock_terraform_generator_stops_after_unrepaired_static_review_failure():
     files = {
-        "live/non-prod/ecs-fargate/terragrunt.hcl": (
+        "environments/non-prod/ecs-fargate/terragrunt.hcl": (
             'remote_state { config = { key = "fixed.tfstate" } }\n'
         ),
         "modules/ecs-fargate/main.tf": (
@@ -467,7 +475,7 @@ def test_bedrock_terraform_generator_uses_extended_bedrock_timeout(monkeypatch):
                     "modules/ecs-fargate/main.tf": "main",
                     "modules/ecs-fargate/variables.tf": "variables",
                     "modules/ecs-fargate/outputs.tf": "outputs",
-                    "live/non-prod/ecs-fargate/terragrunt.hcl": "terragrunt",
+                    "environments/non-prod/ecs-fargate/terragrunt.hcl": "terragrunt",
                 }
             )
 

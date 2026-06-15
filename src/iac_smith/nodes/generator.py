@@ -46,7 +46,7 @@ class IaCGenerator:
 on:
   pull_request:
     paths:
-      - 'live/**'
+      - 'environments/**'
       - 'modules/**'
 
 permissions:
@@ -66,7 +66,7 @@ jobs:
         with:
           filters: |
             changed:
-              - 'live/non-prod/**'
+              - 'environments/non-prod/**'
               - 'modules/**'
       
       - name: Setup Terragrunt
@@ -91,6 +91,6 @@ jobs:
 
       - name: Terragrunt Plan
         if: steps.filter.outputs.changed == 'true'
-        working-directory: live/non-prod
+        working-directory: environments/non-prod
         run: terragrunt run-all plan --terragrunt-non-interactive -lock-timeout=20m
 """
