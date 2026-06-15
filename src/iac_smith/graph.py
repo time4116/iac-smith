@@ -1,10 +1,14 @@
 from collections.abc import Callable
 from pathlib import Path
+from typing import Protocol
 
 from langgraph.graph import END, StateGraph
 
-from iac_smith.generator import generate_files
+from iac_smith.dynamic_terraform import BedrockTerraformGenerator
+from iac_smith.models.change_plan import ChangePlan
 from iac_smith.models.intent import InfrastructureIntent
+from iac_smith.models.repo_patterns import RepoPatterns
+from iac_smith.models.rules import Ruleset
 from iac_smith.models.validation import ValidationResult, ValidationStatus
 from iac_smith.nodes.change_planner import plan_changes
 from iac_smith.nodes.intent_parser import parse_intent
@@ -15,6 +19,35 @@ from iac_smith.repo_scanner import scan_repo_patterns
 from iac_smith.state import IaCSmithState
 
 IntentParser = Callable[[str], InfrastructureIntent]
+
+
+class FileGenerator(Protocol):
+    def __call__(
+        self,
+        *,
+        intent: InfrastructureIntent,
+        change_plan: ChangePlan,
+        repo_patterns: RepoPatterns,
+        ruleset: Ruleset | None,
+        target_repo: str,
+    ) -> dict[str, str]: ...
+
+
+def default_file_generator(
+    *,
+    intent: InfrastructureIntent,
+    change_plan: ChangePlan,
+    repo_patterns: RepoPatterns,
+    ruleset: Ruleset | None,
+    target_repo: str,
+) -> dict[str, str]:
+    return BedrockTerraformGenerator().generate_files(
+        intent=intent,
+        change_plan=change_plan,
+        repo_patterns=repo_patterns,
+        ruleset=ruleset,
+        target_repo=target_repo,
+    )
 
 
 def issue_intake(state: IaCSmithState) -> IaCSmithState:
@@ -71,19 +104,23 @@ def change_planner(state: IaCSmithState) -> IaCSmithState:
     }
 
 
-def code_generator(state: IaCSmithState) -> IaCSmithState:
-    if state.get("generated_files"):
-        return {**state, "status": "generated"}
-    return {
-        **state,
-        "generated_files": generate_files(
-            intent=state["intent"],
-            change_plan=state["change_plan"],
-            repo_patterns=state["repo_patterns"],
-            target_repo=state["target_repo"],
-        ),
-        "status": "generated",
-    }
+def make_code_generator(file_generator_fn: FileGenerator):
+    def code_generator_node(state: IaCSmithState) -> IaCSmithState:
+        if state.get("generated_files"):
+            return {**state, "status": "generated"}
+        return {
+            **state,
+            "generated_files": file_generator_fn(
+                intent=state["intent"],
+                change_plan=state["change_plan"],
+                repo_patterns=state["repo_patterns"],
+                ruleset=state.get("ruleset"),
+                target_repo=state["target_repo"],
+            ),
+            "status": "generated",
+        }
+
+    return code_generator_node
 
 
 def validation_runner(state: IaCSmithState) -> IaCSmithState:
@@ -125,14 +162,17 @@ def route_after_validation(state: IaCSmithState) -> str:
     return "end" if validation and validation.status == ValidationStatus.FAILED else "pr_writer"
 
 
-def build_graph(intent_parser_fn: IntentParser = parse_intent):
+def build_graph(
+    intent_parser_fn: IntentParser = parse_intent,
+    file_generator_fn: FileGenerator = default_file_generator,
+):
     graph = StateGraph(IaCSmithState)
     graph.add_node("issue_intake", issue_intake)
     graph.add_node("intent_parser", make_intent_parser(intent_parser_fn))
     graph.add_node("ruleset_loader", ruleset_loader)
     graph.add_node("repo_pattern_scanner", repo_pattern_scanner)
     graph.add_node("change_planner", change_planner)
-    graph.add_node("code_generator", code_generator)
+    graph.add_node("code_generator", make_code_generator(file_generator_fn))
     graph.add_node("validation_runner", validation_runner)
     graph.add_node("pr_writer", pr_writer)
 

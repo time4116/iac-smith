@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from iac_smith.graph import IntentParser, build_graph
+from iac_smith.dynamic_terraform import BedrockTerraformGenerator
+from iac_smith.graph import FileGenerator, IntentParser, build_graph
 from iac_smith.nodes.pr_writer import branch_name_for_issue
 from iac_smith.services.github import (
     GitHubIssue,
@@ -161,6 +162,7 @@ def run_iac_smith(
     issue_client: IssueClient,
     pr_client: PullRequestClient,
     intent_parser_fn: IntentParser | None = None,
+    file_generator_fn: FileGenerator | None = None,
 ) -> IaCSmithRunResult:
     target_repo = validate_allowed_target_repo(env)
     target_token = env.get("IAC_SMITH_TARGET_REPO_TOKEN") or env.get("GITHUB_TOKEN") or ""
@@ -171,7 +173,15 @@ def run_iac_smith(
 
     state = build_initial_state(env, issue_client=issue_client)
     state["target_repo_path"] = str(repo_path)
-    graph = build_graph(intent_parser_fn=intent_parser_fn) if intent_parser_fn else build_graph()
+    selected_file_generator = file_generator_fn or BedrockTerraformGenerator().generate_files
+    graph = (
+        build_graph(
+            intent_parser_fn=intent_parser_fn,
+            file_generator_fn=selected_file_generator,
+        )
+        if intent_parser_fn
+        else build_graph(file_generator_fn=selected_file_generator)
+    )
     result = graph.invoke(state)
 
     if result.get("status") in {"ignored", "blocked"}:

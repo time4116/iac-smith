@@ -24,6 +24,37 @@ _CIDR_BLOCK_V6 = re.compile(
 # Ports where public open ingress is unambiguously dangerous.
 _DANGEROUS_PORTS = {22, 3389, 5432, 3306, 1433, 6379, 27017}
 _PORT_RE = re.compile(r"(?:from_port|to_port)\s*=\s*(\d+)")
+_MODULE_DECL_RE = re.compile(r'\bmodule\s+"([^"]+)"')
+_MODULE_REF_RE = re.compile(r"\bmodule\.([A-Za-z0-9_-]+)\.")
+
+
+def _module_root(path: str) -> str | None:
+    parts = path.split("/")
+    if len(parts) >= 3 and parts[0] == "modules" and path.endswith(".tf"):
+        return "/".join(parts[:2])
+    return None
+
+
+def _find_undeclared_module_references(generated_files: dict[str, str]) -> list[str]:
+    declared_by_root: dict[str, set[str]] = {}
+    referenced_by_root: dict[str, set[str]] = {}
+
+    for path, content in generated_files.items():
+        root = _module_root(path)
+        if not root:
+            continue
+        declared_by_root.setdefault(root, set()).update(_MODULE_DECL_RE.findall(content))
+        referenced_by_root.setdefault(root, set()).update(_MODULE_REF_RE.findall(content))
+
+    errors = []
+    for root, references in sorted(referenced_by_root.items()):
+        declared = declared_by_root.get(root, set())
+        for module_name in sorted(references - declared):
+            errors.append(
+                f"Generated module `{root}` references `module.{module_name}` "
+                f'but does not declare `module "{module_name}"`.'
+            )
+    return errors
 
 
 def _contains_dangerous_public_ingress(content: str) -> bool:
@@ -61,6 +92,8 @@ def static_review_generated_files(generated_files: dict[str, str]) -> Validation
             and ("<!-- BEGIN_TF_DOCS -->" not in content or "<!-- END_TF_DOCS -->" not in content)
         ):
             warnings.append(f"Module README `{path}` is missing terraform-docs markers.")
+
+    errors.extend(_find_undeclared_module_references(generated_files))
 
     if errors:
         status = ValidationStatus.FAILED

@@ -64,6 +64,28 @@ def _discover_existing_stack_paths(root: Path) -> list[str]:
     return sorted(paths)
 
 
+def _discover_representative_files(
+    root: Path, limit: int = 12, max_chars: int = 4000
+) -> dict[str, str]:
+    """Capture bounded examples so the model can follow existing repo conventions."""
+    candidates: list[Path] = []
+    for pattern in ["live/**/terragrunt.hcl", "modules/**/*.tf", "modules/**/README.md"]:
+        candidates.extend(sorted(root.glob(pattern)))
+
+    samples: dict[str, str] = {}
+    for path in candidates:
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root).as_posix()
+        text = _read_text(path).strip()
+        if not text:
+            continue
+        samples[rel] = text[:max_chars]
+        if len(samples) >= limit:
+            break
+    return samples
+
+
 def scan_repo_patterns(root: str | Path) -> RepoPatterns:
     repo_root = Path(root)
     terragrunt_files = list(repo_root.rglob("terragrunt.hcl"))
@@ -95,5 +117,6 @@ def scan_repo_patterns(root: str | Path) -> RepoPatterns:
         preferred_layout=preferred_layout,
         remote_state_uses_path_relative_to_include="path_relative_to_include()" in all_hcl_text,
         existing_stack_paths=_discover_existing_stack_paths(repo_root),
+        representative_files=_discover_representative_files(repo_root),
         warnings=warnings,
     )

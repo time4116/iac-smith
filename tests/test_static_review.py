@@ -113,3 +113,30 @@ module "db" {
     result = static_review_generated_files({"modules/rds-postgres/main.tf": safe_tf})
     _ = intent  # static review doesn't inspect intent
     assert result.errors == []
+
+
+def test_static_review_rejects_generated_references_to_undeclared_modules():
+    main_tf = 'resource "aws_ecs_cluster" "this" { name = var.name_prefix }\n'
+    outputs_tf = 'output "vpc_id" { value = module.vpc.vpc_id }\n'
+    result = static_review_generated_files(
+        {
+            "modules/ecs-fargate/main.tf": main_tf,
+            "modules/ecs-fargate/outputs.tf": outputs_tf,
+        }
+    )
+
+    assert result.status.value == "failed"
+    assert any("module.vpc" in error for error in result.errors)
+
+
+def test_static_review_allows_references_to_declared_modules():
+    main_tf = 'module "vpc" { source = "terraform-aws-modules/vpc/aws" version = "~> 5.0" }\n'
+    outputs_tf = 'output "vpc_id" { value = module.vpc.vpc_id }\n'
+    result = static_review_generated_files(
+        {
+            "modules/network/main.tf": main_tf,
+            "modules/network/outputs.tf": outputs_tf,
+        }
+    )
+
+    assert result.errors == []

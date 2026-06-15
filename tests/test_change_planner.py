@@ -114,3 +114,18 @@ def test_plan_ecs_fargate_adds_foundation_stack_and_module():
     assert "modules/ecs-fargate/main.tf" in plan.files_to_generate
     assert plan.backend_resources["non-prod"].bucket == "iac-smith-state-non-prod-322264632107"
     assert plan.backend_resources["non-prod"].lock_table == "iac-smith-lock-non-prod"
+
+
+def test_plan_existing_foundation_applies_to_arbitrary_workload_stack():
+    patterns = RepoPatterns(existing_stack_paths=["modules/foundation", "live/non-prod/foundation"])
+
+    plan = plan_changes(
+        _intent("worker_service"),
+        target_repo="time4116/iac-smith-demo-infra",
+        repo_patterns=patterns,
+    )
+
+    assert "live/non-prod/foundation/terragrunt.hcl" not in plan.files_to_generate
+    assert "modules/foundation/main.tf" not in plan.files_to_generate
+    assert "live/non-prod/worker-service/terragrunt.hcl" in plan.files_to_generate
+    assert any("foundation" in item.lower() for item in plan.summary)
