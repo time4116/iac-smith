@@ -291,6 +291,8 @@ def test_apply_workflow_uses_separate_non_prod_and_prod_role_secrets():
     )
 
     workflow = files[".github/workflows/terraform-apply.yml"]
+    assert "pull_request:" not in workflow
+    assert "branches: [main, master]" in workflow
     assert "secrets.AWS_ROLE_ARN_NON_PROD" in workflow
     assert "secrets.AWS_ROLE_ARN_PROD" in workflow
     assert "working-directory: environments/non-prod" in workflow

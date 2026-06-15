@@ -28,6 +28,25 @@ _MODULE_DECL_RE = re.compile(r'\bmodule\s+"([^"]+)"')
 _MODULE_REF_RE = re.compile(r"\bmodule\.([A-Za-z0-9_-]+)\.")
 
 
+def _apply_workflow_errors(path: str, content: str) -> list[str]:
+    if path != ".github/workflows/terraform-apply.yml":
+        return []
+
+    errors = []
+    if re.search(r"^\s*pull_request\s*:", content, re.MULTILINE):
+        errors.append(
+            f"Terraform apply workflow `{path}` must not run on pull requests or feature branches."
+        )
+    has_main_or_master_filter = re.search(
+        r"branches\s*:\s*\[[^\]]*\bmain\b[^\]]*\]", content
+    ) or re.search(r"branches\s*:\s*\[[^\]]*\bmaster\b[^\]]*\]", content)
+    if not has_main_or_master_filter:
+        errors.append(
+            f"Terraform apply workflow `{path}` push trigger must be limited to main or master."
+        )
+    return errors
+
+
 def _module_root(path: str) -> str | None:
     parts = path.split("/")
     if len(parts) >= 3 and parts[0] == "modules" and path.endswith(".tf"):
@@ -71,6 +90,8 @@ def static_review_generated_files(generated_files: dict[str, str]) -> Validation
     checks: list[str] = []
 
     for path, content in generated_files.items():
+        errors.extend(_apply_workflow_errors(path, content))
+
         for pattern in SECRET_PATTERNS:
             if pattern.search(content):
                 errors.append(f"Potential hardcoded secret detected in `{path}`.")

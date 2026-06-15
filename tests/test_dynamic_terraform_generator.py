@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 
 import botocore.exceptions
 import pytest
@@ -73,6 +75,25 @@ class FakeBedrockRuntime:
                 ).encode()
             )
         }
+
+
+class BlockingBedrockRuntime(FakeBedrockRuntime):
+    def __init__(self, files: dict[str, str]):
+        super().__init__(files)
+        self.active = 0
+        self.max_active = 0
+        self.lock = threading.Lock()
+
+    def invoke_model(self, **kwargs):
+        with self.lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            time.sleep(0.05)
+            return super().invoke_model(**kwargs)
+        finally:
+            with self.lock:
+                self.active -= 1
 
 
 def _intent() -> InfrastructureIntent:
@@ -311,6 +332,38 @@ def test_bedrock_terraform_generator_returns_model_generated_files_without_rende
     ]
 
 
+def test_bedrock_terraform_generator_generates_files_with_bounded_parallelism():
+    files = {
+        "modules/ecs-fargate/main.tf": (
+            'resource "aws_ecs_cluster" "this" { name = var.name_prefix }\n'
+        ),
+        "modules/ecs-fargate/variables.tf": 'variable "name_prefix" { type = string }\n',
+        "modules/ecs-fargate/outputs.tf": (
+            'output "cluster_name" { value = aws_ecs_cluster.this.name }\n'
+        ),
+        "environments/non-prod/ecs-fargate/terragrunt.hcl": (
+            'terraform { source = "../../../modules/ecs-fargate" }\n'
+        ),
+    }
+    runtime = BlockingBedrockRuntime(files)
+    generator = BedrockTerraformGenerator(
+        model_id="anthropic.test-model",
+        bedrock_runtime=runtime,
+        concurrency=2,
+    )
+
+    result = generator.generate_files(
+        intent=_intent(),
+        change_plan=_plan(),
+        repo_patterns=RepoPatterns(),
+        ruleset=_ruleset(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+
+    assert result == files
+    assert runtime.max_active == 2
+
+
 def test_bedrock_terraform_generator_retries_transient_read_timeouts():
     files = {
         "modules/ecs-fargate/main.tf": (
@@ -376,7 +429,11 @@ def test_bedrock_terraform_generator_repairs_file_after_static_review_failure():
 
     assert result["environments/non-prod/ecs-fargate/terragrunt.hcl"] == fixed_terragrunt
     assert len(runtime.calls) == len(files) + 1
-    repair_body = json.loads(runtime.calls[1]["body"])
+    repair_body = next(
+        json.loads(call["body"])
+        for call in runtime.calls
+        if "Static review failures:" in json.loads(call["body"])["messages"][0]["content"]
+    )
     assert "Static review failures:" in repair_body["messages"][0]["content"]
     assert "path_relative_to_include" in repair_body["messages"][0]["content"]
 
@@ -415,7 +472,9 @@ def test_bedrock_terraform_generator_logs_generation_and_repair_progress():
         target_repo="time4116/iac-smith-demo-infra",
     )
 
-    assert messages[0] == "IaC Smith: generating 4 planned file(s) with Bedrock."
+    assert messages[0] == (
+        "IaC Smith: generating 4 planned file(s) with Bedrock using concurrency 4."
+    )
     assert (
         "IaC Smith: generating file 1/4: environments/non-prod/ecs-fargate/terragrunt.hcl"
         in messages
@@ -461,7 +520,7 @@ def test_bedrock_terraform_generator_stops_after_unrepaired_static_review_failur
             target_repo="time4116/iac-smith-demo-infra",
         )
 
-    assert len(runtime.calls) == 2
+    assert len(runtime.calls) == len(files) + 1
 
 
 def test_bedrock_terraform_generator_uses_extended_bedrock_timeout(monkeypatch):

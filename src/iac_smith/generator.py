@@ -676,7 +676,7 @@ def _workflow_apply() -> str:
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
 
 permissions:
   contents: read
