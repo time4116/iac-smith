@@ -136,20 +136,57 @@ class BedrockTerraformGenerator:
         self,
         model_id: str | None = None,
         bedrock_runtime: BedrockRuntime | None = None,
+        *,
+        read_timeout_seconds: int = 240,
+        max_attempts: int = 3,
     ) -> None:
         self.model_id = model_id or os.getenv("BEDROCK_MODEL_ID", "")
         if not self.model_id:
             raise ValueError("BEDROCK_MODEL_ID must be set to generate Terraform with Bedrock.")
         self._bedrock_runtime = bedrock_runtime
+        self.read_timeout_seconds = read_timeout_seconds
+        self.max_attempts = max_attempts
 
     @property
     def bedrock_runtime(self) -> BedrockRuntime:
         if self._bedrock_runtime is None:
             import boto3
+            from botocore.config import Config
 
             region = os.getenv("AWS_REGION", "us-west-2")
-            self._bedrock_runtime = boto3.client("bedrock-runtime", region_name=region)
+            self._bedrock_runtime = boto3.client(
+                "bedrock-runtime",
+                region_name=region,
+                config=Config(
+                    connect_timeout=10,
+                    read_timeout=self.read_timeout_seconds,
+                    retries={"max_attempts": self.max_attempts, "mode": "standard"},
+                ),
+            )
         return self._bedrock_runtime
+
+    def _invoke_model_with_retries(self, **kwargs: Any) -> dict[str, Any]:
+        from botocore.exceptions import (
+            ConnectionClosedError,
+            ConnectTimeoutError,
+            EndpointConnectionError,
+            ReadTimeoutError,
+        )
+
+        retryable_errors = (
+            ConnectionClosedError,
+            ConnectTimeoutError,
+            EndpointConnectionError,
+            ReadTimeoutError,
+        )
+        last_error: Exception | None = None
+        for _attempt in range(1, self.max_attempts + 1):
+            try:
+                return self.bedrock_runtime.invoke_model(**kwargs)
+            except retryable_errors as exc:
+                last_error = exc
+        assert last_error is not None
+        raise last_error
 
     def generate_files(
         self,
@@ -167,7 +204,7 @@ class BedrockTerraformGenerator:
             ruleset=ruleset,
             target_repo=target_repo,
         )
-        response = self.bedrock_runtime.invoke_model(
+        response = self._invoke_model_with_retries(
             modelId=self.model_id,
             contentType="application/json",
             accept="application/json",
