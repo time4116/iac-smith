@@ -5,11 +5,16 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from iac_smith.dynamic_terraform import BedrockTerraformGenerator
 from iac_smith.graph import FileGenerator, IntentParser, build_graph
+from iac_smith.models.change_plan import ChangePlan
+from iac_smith.models.intent import InfrastructureIntent
+from iac_smith.models.repo_patterns import RepoPatterns
+from iac_smith.models.rules import Ruleset
 from iac_smith.nodes.pr_writer import branch_name_for_issue
+from iac_smith.runtime_validation import validate_generated_iac
 from iac_smith.services.github import (
     GitHubIssue,
     GitHubIssueClient,
@@ -33,6 +38,20 @@ class PullRequestClient(Protocol):
         head: str,
         base: str = "main",
     ) -> GitHubPullRequest: ...
+
+
+class RuntimeRepairer(Protocol):
+    def repair_files(
+        self,
+        *,
+        intent: InfrastructureIntent,
+        change_plan: ChangePlan,
+        repo_patterns: RepoPatterns,
+        ruleset: Ruleset | None,
+        target_repo: str,
+        generated_files: dict[str, str],
+        repair_errors: list[str],
+    ) -> dict[str, str]: ...
 
 
 @dataclass(frozen=True)
@@ -162,6 +181,32 @@ def _target_repo_path(env: Mapping[str, str], target_repo: str, token: str) -> P
     return clone_target_repo(target_repo, token, workdir)
 
 
+def _runtime_repair_attempts(env: Mapping[str, str]) -> int:
+    value = env.get("IAC_SMITH_RUNTIME_REPAIR_ATTEMPTS", "2")
+    try:
+        attempts = int(value)
+    except ValueError as exc:
+        raise SystemExit("IAC_SMITH_RUNTIME_REPAIR_ATTEMPTS must be an integer.") from exc
+    return max(0, attempts)
+
+
+def _repair_generated_files(
+    *,
+    repairer: RuntimeRepairer,
+    result: IaCSmithState,
+    repair_errors: list[str],
+) -> dict[str, str]:
+    return repairer.repair_files(
+        intent=result["intent"],
+        change_plan=result["change_plan"],
+        repo_patterns=result["repo_patterns"],
+        ruleset=result.get("ruleset"),
+        target_repo=result["target_repo"],
+        generated_files=result["generated_files"],
+        repair_errors=repair_errors,
+    )
+
+
 def run_iac_smith(
     env: Mapping[str, str],
     issue_client: IssueClient,
@@ -182,9 +227,15 @@ def run_iac_smith(
     state = build_initial_state(env, issue_client=issue_client)
     _log(f"IaC Smith: fetched issue #{state.get('issue_number')}: {state.get('issue_title')}")
     state["target_repo_path"] = str(repo_path)
-    selected_file_generator = (
-        file_generator_fn or BedrockTerraformGenerator(logger=_log).generate_files
-    )
+    runtime_repairer: RuntimeRepairer | None = None
+    if file_generator_fn:
+        selected_file_generator = file_generator_fn
+        if hasattr(file_generator_fn, "repair_files"):
+            runtime_repairer = file_generator_fn  # type: ignore[assignment]
+    else:
+        generator = BedrockTerraformGenerator(logger=_log)
+        selected_file_generator = generator.generate_files
+        runtime_repairer = generator
     graph = (
         build_graph(
             intent_parser_fn=intent_parser_fn,
@@ -194,7 +245,7 @@ def run_iac_smith(
         else build_graph(file_generator_fn=selected_file_generator)
     )
     _log("IaC Smith: running graph.")
-    result = graph.invoke(state)
+    result = cast(IaCSmithState, graph.invoke(state))
     _log(f"IaC Smith: graph finished with status {result.get('status')}.")
 
     if result.get("status") in {"ignored", "blocked"}:
@@ -210,6 +261,39 @@ def run_iac_smith(
     create_branch(repo_path, branch)
     _log(f"IaC Smith: writing {len(result['generated_files'])} generated file(s).")
     apply_generated_files(repo_path, result["generated_files"])
+
+    if env.get("IAC_SMITH_SKIP_RUNTIME_VALIDATION") != "1":
+        max_runtime_repairs = _runtime_repair_attempts(env)
+        for repair_attempt in range(max_runtime_repairs + 1):
+            _log("IaC Smith: running Terraform/Terragrunt validation and plan before commit.")
+            runtime_validation = validate_generated_iac(repo_path)
+            if runtime_validation.passed:
+                if repair_attempt:
+                    _log(
+                        "IaC Smith: Terraform/Terragrunt validation and plan passed "
+                        "after runtime repair."
+                    )
+                else:
+                    _log("IaC Smith: Terraform/Terragrunt validation and plan passed.")
+                break
+
+            block_reason = "; ".join(runtime_validation.errors)
+            _log(f"IaC Smith: runtime validation failed: {block_reason}")
+            if repair_attempt >= max_runtime_repairs or runtime_repairer is None:
+                return IaCSmithRunResult(status="blocked", branch=branch, block_reason=block_reason)
+
+            _log(
+                "IaC Smith: asking Bedrock to repair Terraform/Terragrunt output "
+                f"from runtime failure ({repair_attempt + 1}/{max_runtime_repairs})."
+            )
+            repaired_files = _repair_generated_files(
+                repairer=runtime_repairer,
+                result=result,
+                repair_errors=runtime_validation.errors,
+            )
+            result["generated_files"] = repaired_files
+            apply_generated_files(repo_path, repaired_files)
+
     commit_message = f"feat: generate IaC for issue #{result['issue_number']}"
     _log("IaC Smith: committing generated files.")
     committed = commit_generated_files(repo_path, commit_message)

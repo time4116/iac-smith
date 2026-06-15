@@ -107,13 +107,17 @@ def build_generation_prompt(
 Static review failures:
 {json.dumps(repair_errors, indent=2)}
 
+Runtime validation failures use this same repair path when errors came from
+terraform fmt/init/validate, terragrunt hclfmt/init/validate, or terragrunt plan.
+
 Previous generated content that failed review:
 ```text
 {previous_content or ""}
 ```
 
-Regenerate the same file path only. Fix every static review failure. Do not
-repeat the failing pattern.
+Regenerate the same file path only. Fix every validation failure. Do not
+repeat the failing pattern. Validation failures may come from static review,
+terraform fmt/init/validate, terragrunt hclfmt/init/validate, or terragrunt plan.
 """
     return f"""You are IaC Smith's Terraform/Terragrunt generator.
 
@@ -468,3 +472,59 @@ class BedrockTerraformGenerator:
             }
 
         return generated_files
+
+    def repair_files(
+        self,
+        *,
+        intent: InfrastructureIntent,
+        change_plan: ChangePlan,
+        repo_patterns: RepoPatterns,
+        ruleset: Ruleset | None,
+        target_repo: str,
+        generated_files: dict[str, str],
+        repair_errors: list[str],
+    ) -> dict[str, str]:
+        """Repair generated files using runtime validation/plan failures.
+
+        Runtime validation happens after files are written into the target repo,
+        so failures can include provider/schema/Terragrunt errors that static
+        review cannot catch. Feed those exact errors back to Bedrock and repair
+        only the implicated files when possible, falling back to the full planned
+        file set when the error is cross-file or pathless.
+        """
+
+        paths_to_repair = [
+            path
+            for path in change_plan.files_to_generate
+            if any(path in error for error in repair_errors)
+        ] or list(change_plan.files_to_generate)
+        total_files = len(change_plan.files_to_generate)
+        path_positions = {
+            path: index for index, path in enumerate(change_plan.files_to_generate, start=1)
+        }
+        max_workers = min(self.concurrency, max(1, len(paths_to_repair)))
+        repaired_files = dict(generated_files)
+        self._log(
+            f"IaC Smith: repairing {len(paths_to_repair)} file(s) after runtime validation failure."
+        )
+
+        def repair_one(path: str) -> tuple[str, str]:
+            self._log(f"IaC Smith: repairing file {path_positions[path]}/{total_files}: {path}")
+            return path, self._generate_planned_file(
+                path=path,
+                intent=intent,
+                change_plan=change_plan,
+                repo_patterns=repo_patterns,
+                ruleset=ruleset,
+                target_repo=target_repo,
+                repair_errors=repair_errors,
+                previous_content=generated_files[path],
+            )
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(repair_one, path): path for path in paths_to_repair}
+            for future in as_completed(futures):
+                path, content = future.result()
+                repaired_files[path] = content
+
+        return {path: repaired_files[path] for path in change_plan.files_to_generate}
