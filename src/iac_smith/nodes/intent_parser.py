@@ -8,31 +8,13 @@ UNSUPPORTED_MVP_REASON = (
     "EKS Fargate, ECS Fargate, and private RDS PostgreSQL."
 )
 UNMAPPED_REASON = "IaC Smith could not map the request to a supported MVP infrastructure family."
-PUBLIC_DATABASE_REASON = "Publicly exposed databases are blocked. Request private RDS instead."
 
 
 class IntentClient(Protocol):
     def parse_issue(self, issue_text: str) -> InfrastructureIntent: ...
 
 
-def _requests_public_database_exposure(text: str) -> bool:
-    database_terms = ["rds", "database", "postgres", "postgresql", "mysql", "aurora"]
-    public_terms = ["open to the internet", "publicly accessible", "public internet", "0.0.0.0/0"]
-    return any(term in text for term in database_terms) and any(
-        term in text for term in public_terms
-    )
-
-
 def _apply_final_safety_guards(intent: InfrastructureIntent) -> InfrastructureIntent:
-    text = intent.raw_request.lower()
-    if _requests_public_database_exposure(text):
-        return intent.model_copy(
-            update={
-                "supported_intent": SupportedIntent.UNSUPPORTED,
-                "blocked": True,
-                "block_reason": PUBLIC_DATABASE_REASON,
-            }
-        )
     if intent.supported_intent == SupportedIntent.UNSUPPORTED and not intent.blocked:
         return intent.model_copy(update={"blocked": True, "block_reason": UNMAPPED_REASON})
     return intent

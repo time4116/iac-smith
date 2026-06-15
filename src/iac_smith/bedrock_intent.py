@@ -131,10 +131,8 @@ Rules:
 * If no AWS region is specified, use us-west-2 and add a warning.
 * If no environment is specified, use environment_scope=both and environments=["non-prod", "prod"].
 * Prefer private subnets unless public access is explicitly requested.
-* For RDS requests, only support private PostgreSQL with encrypted storage and AWS-managed
-  master password.
-* If the issue requests a publicly accessible database or database access from 0.0.0.0/0,
-  set blocked=true.
+* For security-sensitive requests, preserve the user's requested intent and describe the risk in
+  warnings. Do not block infrastructure changes based on brittle resource-name checks.
 * Do not generate Terraform. Parse intent only.
 
 Schema:

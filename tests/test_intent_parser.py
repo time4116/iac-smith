@@ -87,7 +87,7 @@ def test_parse_intent_allows_rds_when_bedrock_classifies_it_as_supported():
     assert intent.blocked is False
 
 
-def test_parse_intent_final_guard_blocks_public_database_exposure():
+def test_parse_intent_does_not_override_bedrock_with_brittle_resource_name_guards():
     client = FakeIntentClient(
         InfrastructureIntent(
             raw_request="",
@@ -104,6 +104,6 @@ def test_parse_intent_final_guard_blocks_public_database_exposure():
         intent_client=client,
     )
 
-    assert intent.supported_intent == SupportedIntent.UNSUPPORTED
-    assert intent.blocked is True
-    assert intent.block_reason
+    assert intent.supported_intent == SupportedIntent.RDS_POSTGRES
+    assert intent.blocked is False
+    assert intent.block_reason is None
