@@ -53,7 +53,7 @@ def main():
                 "Principal": {"Federated": f"arn:aws:iam::{account_id}:oidc-provider/{oidc_url}"},
                 "Action": "sts:AssumeRoleWithWebIdentity",
                 "Condition": {
-                    "StringLike": {f"{oidc_url}:sub": f"repo:{CONTROLLER_REPO}:*"},
+                    "StringLike": {f"{oidc_url}:sub": [f"repo:{CONTROLLER_REPO}:*", f"repo:{TARGET_REPO}:*"]},
                     "StringEquals": {f"{oidc_url}:aud": "sts.amazonaws.com"},
                 },
             }
@@ -91,8 +91,7 @@ def main():
         )
 
     # 5. Create Inline Policy for permissions
-    # MVPS Permissions needed: Bedrock (Invoke), S3 (backend), DynamoDB (locking),
-    # ECS/Fargate (target resources)
+    # Comprehensive permissions needed for Terragrunt state management and target infrastructure
     permissions = {
         "Version": "2012-10-17",
         "Statement": [
@@ -100,30 +99,33 @@ def main():
                 "Sid": "BedrockAccess",
                 "Effect": "Allow",
                 "Action": "bedrock:InvokeModel",
-                "Resource": "*",  # Scope to specific model ARN if preferred
+                "Resource": "*",
             },
             {
-                "Sid": "BackendStorage",
+                "Sid": "AllowS3StateManagement",
                 "Effect": "Allow",
                 "Action": [
                     "s3:CreateBucket",
-                    "s3:GetBucketVersioning",
-                    "s3:PutBucketVersioning",
-                    "s3:GetBucketEncryption",
-                    "s3:PutBucketEncryption",
-                    "s3:GetBucketPublicAccessBlock",
-                    "s3:PutBucketPublicAccessBlock",
-                    "s3:GetObject",
-                    "s3:PutObject",
                     "s3:ListBucket",
+                    "s3:GetBucket*",
+                    "s3:PutBucket*",
+                    "s3:GetEncryptionConfiguration",
+                    "s3:PutEncryptionConfiguration",
+                    "s3:GetBucketPolicy",
+                    "s3:PutBucketPolicy",
+                    "s3:PutBucketOwnershipControls",
+                    "s3:PutObject*",
+                    "s3:GetObject",
+                    "s3:GetBucketTagging",
+                    "s3:PutBucketTagging"
                 ],
                 "Resource": [
-                    f"arn:aws:s3:::{TARGET_REPO.split('/')[-1]}*",
-                    f"arn:aws:s3:::{TARGET_REPO.split('/')[-1]}*/*",
-                ],
+                    "arn:aws:s3:::iac-smith-state-*",
+                    "arn:aws:s3:::iac-smith-state-*/*"
+                ]
             },
             {
-                "Sid": "BackendLocking",
+                "Sid": "AllowDynamoDBLocking",
                 "Effect": "Allow",
                 "Action": [
                     "dynamodb:CreateTable",
@@ -131,28 +133,38 @@ def main():
                     "dynamodb:GetItem",
                     "dynamodb:PutItem",
                     "dynamodb:DeleteItem",
+                    "dynamodb:TagResource"
                 ],
-                "Resource": f"arn:aws:dynamodb:*:*:table/{TARGET_REPO.split('/')[-1]}*",
+                "Resource": "arn:aws:dynamodb:*:*:table/iac-smith-lock-*"
             },
             {
-                "Sid": "ECSFargatePermissions",
+                "Sid": "AllowInfraManagement",
                 "Effect": "Allow",
                 "Action": [
-                    "ecs:CreateCluster",
-                    "ecs:DescribeClusters",
-                    "ecs:DeleteCluster",
+                    "ec2:Describe*",
                     "ec2:CreateVpc",
-                    "ec2:DescribeVpcs",
                     "ec2:DeleteVpc",
+                    "ec2:ModifyVpcAttribute",
                     "ec2:CreateSubnet",
-                    "ec2:DescribeSubnets",
                     "ec2:DeleteSubnet",
                     "ec2:CreateSecurityGroup",
-                    "ec2:DescribeSecurityGroups",
                     "ec2:DeleteSecurityGroup",
+                    "ec2:AuthorizeSecurityGroupIngress",
+                    "ec2:AuthorizeSecurityGroupEgress",
+                    "ec2:CreateRouteTable",
+                    "ec2:DeleteRouteTable",
+                    "ec2:AssociateRouteTable",
+                    "ec2:CreateRoute",
+                    "ec2:CreateInternetGateway",
+                    "ec2:AttachInternetGateway",
+                    "ecs:CreateCluster",
+                    "ecs:DeleteCluster",
+                    "ecs:DescribeClusters",
+                    "ecs:ListClusters",
+                    "iam:CreateServiceLinkedRole"
                 ],
-                "Resource": "*",
-            },
+                "Resource": "*"
+            }
         ],
     }
     with open("permissions.json", "w") as f:
@@ -176,8 +188,7 @@ def main():
     role_arn = f"arn:aws:iam::{account_id}:role/{ROLE_NAME}"
     print("\n--- SUCCESS ---")
     print(f"Role ARN: {role_arn}")
-    msg = f"Use this for the AWS_BEDROCK_ROLE_ARN variable in your GitHub repo {CONTROLLER_REPO}."
-    print(msg)
+    print(f"Trust established for: {CONTROLLER_REPO} and {TARGET_REPO}")
 
     # Cleanup
     os.remove("trust-policy.json")
