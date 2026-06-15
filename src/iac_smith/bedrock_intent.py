@@ -83,7 +83,8 @@ class BedrockIntentClient:
         if self._bedrock_runtime is None:
             import boto3
 
-            self._bedrock_runtime = boto3.client("bedrock-runtime")
+            region = os.getenv("AWS_REGION", "us-west-2")
+            self._bedrock_runtime = boto3.client("bedrock-runtime", region_name=region)
         return self._bedrock_runtime
 
     def parse_issue(self, issue_text: str) -> InfrastructureIntent:
