@@ -62,6 +62,24 @@ class GitHubPullRequestClient:
         head: str,
         base: str = "main",
     ) -> GitHubPullRequest:
+        # Idempotency check: see if a pull request already exists for this branch
+        owner = repo.split("/")[0]
+        # Query matching open pull requests
+        check_response = self._http_client.get(
+            f"https://api.github.com/repos/{repo}/pulls",
+            headers={
+                "Authorization": f"Bearer {self._token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            params={"head": f"{owner}:{head}", "state": "open", "base": base},
+        )
+        if check_response.status_code == 200:
+            existing_prs = check_response.json()
+            if existing_prs:
+                payload = existing_prs[0]
+                return GitHubPullRequest(number=int(payload["number"]), url=payload["html_url"])
+
         response = self._http_client.post(
             f"https://api.github.com/repos/{repo}/pulls",
             headers={
