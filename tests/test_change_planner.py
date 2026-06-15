@@ -24,8 +24,8 @@ def test_plan_derives_stack_name_from_resource_type():
     assert "modules/eks-fargate/README.md" in plan.files_to_generate
     assert ".github/workflows/terraform-pr-check.yml" in plan.files_to_generate
     assert ".github/workflows/terraform-apply.yml" in plan.files_to_generate
-    assert plan.backend_resources["non-prod"].bucket == "iac-smith-demo-infra-non-prod-tfstate"
-    assert plan.backend_resources["non-prod"].lock_table == "iac-smith-demo-infra-non-prod-tflock"
+    assert plan.backend_resources["non-prod"].bucket == "iac-smith-state-non-prod-322264632107"
+    assert plan.backend_resources["non-prod"].lock_table == "iac-smith-lock-non-prod"
     assert (
         "Generate AWS infrastructure with secure defaults regardless of prompt wording"
         in plan.summary
@@ -101,3 +101,16 @@ def test_plan_raises_for_blocked_intent():
         assert "apply" in str(exc)
     else:
         raise AssertionError("blocked intent should not produce a change plan")
+
+
+def test_plan_ecs_fargate_adds_foundation_stack_and_module():
+    plan = plan_changes(
+        _intent("ecs_fargate"),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+
+    assert "live/non-prod/foundation/terragrunt.hcl" in plan.files_to_generate
+    assert "modules/foundation/main.tf" in plan.files_to_generate
+    assert "modules/ecs-fargate/main.tf" in plan.files_to_generate
+    assert plan.backend_resources["non-prod"].bucket == "iac-smith-state-non-prod-322264632107"
+    assert plan.backend_resources["non-prod"].lock_table == "iac-smith-lock-non-prod"

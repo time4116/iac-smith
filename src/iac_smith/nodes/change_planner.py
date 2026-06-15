@@ -10,6 +10,17 @@ def _repo_slug(target_repo: str) -> str:
     return re.sub(r"[^a-z0-9-]", "-", name.lower()).strip("-")[:40]
 
 
+def _backend_resource(env: str) -> BackendResource:
+    return BackendResource(
+        bucket=f"iac-smith-state-{env}-322264632107",
+        lock_table=f"iac-smith-lock-{env}",
+    )
+
+
+def _uses_foundation(stack_name: str) -> bool:
+    return stack_name in {"ecs-fargate"}
+
+
 def _planned_environments(
     intent: InfrastructureIntent,
     repo_patterns: RepoPatterns | None,
@@ -47,15 +58,8 @@ def plan_changes(
         raise ValueError(intent.block_reason or "Blocked infrastructure request")
 
     stack_name = _stack_name(intent)
-    repo_slug = _repo_slug(target_repo)
     environments = _planned_environments(intent, repo_patterns)
-    backend_resources = {
-        env: BackendResource(
-            bucket=f"{repo_slug}-{env}-tfstate",
-            lock_table=f"{repo_slug}-{env}-tflock",
-        )
-        for env in environments
-    }
+    backend_resources = {env: _backend_resource(env) for env in environments}
 
     files = [
         "README.md",
@@ -73,6 +77,24 @@ def plan_changes(
                 f"live/{env}/terragrunt.hcl",
                 f"live/{env}/{stack_name}/terragrunt.hcl",
                 f"live/{env}/{stack_name}/README.md",
+            ]
+        )
+        if _uses_foundation(stack_name):
+            files.extend(
+                [
+                    f"live/{env}/foundation/terragrunt.hcl",
+                    f"live/{env}/foundation/README.md",
+                ]
+            )
+
+    if _uses_foundation(stack_name):
+        files.extend(
+            [
+                "modules/foundation/main.tf",
+                "modules/foundation/variables.tf",
+                "modules/foundation/outputs.tf",
+                "modules/foundation/versions.tf",
+                "modules/foundation/README.md",
             ]
         )
 

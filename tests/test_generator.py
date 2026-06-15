@@ -220,14 +220,17 @@ def test_generate_baseline_does_not_create_stack_module():
 def test_generated_vpc_based_modules_have_non_empty_default_azs():
     files = generate_files(
         intent=_intent("ecs_fargate"),
-        change_plan=_plan("ecs-fargate"),
+        change_plan=_foundation_plan("ecs-fargate"),
         repo_patterns=RepoPatterns(),
         target_repo="time4116/iac-smith-demo-infra",
     )
 
-    variables_tf = files["modules/ecs-fargate/variables.tf"]
+    variables_tf = files["modules/foundation/variables.tf"]
     assert 'default     = ["us-west-2a", "us-west-2b"]' in variables_tf
-    assert "default     = []" not in variables_tf
+    availability_zones_block = variables_tf.split('variable "availability_zones" {', 1)[1].split(
+        "}\n", 1
+    )[0]
+    assert "default     = []" not in availability_zones_block
 
 
 def test_env_terragrunt_generates_backend_tf_without_module_backend_block():
@@ -277,3 +280,48 @@ def test_pr_check_workflow_uses_valid_terragrunt_action_inputs():
     assert "-depth 2" not in workflow
     assert "-lock-timeout=20m" in workflow
     assert "secrets.AWS_ROLE_ARN_NON_PROD" in workflow
+
+
+def _foundation_plan(stack_name: str = "ecs-fargate") -> ChangePlan:
+    plan = _plan(stack_name)
+    plan.files_to_generate.extend(
+        [
+            "live/non-prod/foundation/terragrunt.hcl",
+            "live/non-prod/foundation/README.md",
+            "modules/foundation/main.tf",
+            "modules/foundation/variables.tf",
+            "modules/foundation/outputs.tf",
+            "modules/foundation/versions.tf",
+            "modules/foundation/README.md",
+        ]
+    )
+    return plan
+
+
+def test_ecs_fargate_uses_foundation_module_for_vpc():
+    files = generate_files(
+        intent=_intent("ecs_fargate"),
+        change_plan=_foundation_plan("ecs-fargate"),
+        repo_patterns=RepoPatterns(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+
+    assert "modules/foundation/main.tf" in files
+    assert "modules/ecs-fargate/main.tf" in files
+    assert 'source  = "terraform-aws-modules/vpc/aws"' in files["modules/foundation/main.tf"]
+    assert 'source  = "terraform-aws-modules/vpc/aws"' not in files["modules/ecs-fargate/main.tf"]
+
+
+def test_ecs_fargate_live_stack_depends_on_foundation_outputs():
+    files = generate_files(
+        intent=_intent("ecs_fargate"),
+        change_plan=_foundation_plan("ecs-fargate"),
+        repo_patterns=RepoPatterns(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+
+    ecs_tg = files["live/non-prod/ecs-fargate/terragrunt.hcl"]
+    assert 'dependency "foundation"' in ecs_tg
+    assert 'config_path = "../foundation"' in ecs_tg
+    assert "vpc_id             = dependency.foundation.outputs.vpc_id" in ecs_tg
+    assert "private_subnet_ids = dependency.foundation.outputs.private_subnets" in ecs_tg
