@@ -314,6 +314,20 @@ def test_ecs_fargate_uses_foundation_module_for_vpc():
     assert "Workload modules should consume its outputs" in files["modules/foundation/README.md"]
 
 
+def test_ecs_fargate_outputs_do_not_reference_removed_vpc_module():
+    """Regression for CI: ecs-fargate depends on foundation, so no module.vpc exists."""
+    files = generate_files(
+        intent=_intent("ecs_fargate"),
+        change_plan=_foundation_plan("ecs-fargate"),
+        repo_patterns=RepoPatterns(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+
+    outputs_tf = files["modules/ecs-fargate/outputs.tf"]
+    assert "module.vpc" not in outputs_tf
+    assert "value       = var.vpc_id" in outputs_tf
+
+
 def test_ecs_fargate_live_stack_depends_on_foundation_outputs():
     files = generate_files(
         intent=_intent("ecs_fargate"),

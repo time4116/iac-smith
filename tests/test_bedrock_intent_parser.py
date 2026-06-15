@@ -110,7 +110,8 @@ def test_intent_prompt_only_blocks_apply_and_destroy_not_resource_types():
     assert "destroying resources" in prompt
 
 
-def test_bedrock_client_requires_model_id():
+def test_bedrock_client_requires_model_id(monkeypatch):
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
     with pytest.raises(ValueError, match="BEDROCK_MODEL_ID"):
         BedrockIntentClient(model_id="", bedrock_runtime=FakeBedrockRuntime({}))
 

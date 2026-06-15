@@ -528,8 +528,8 @@ output "vpc_id" {
 }
 
 output "vpc_id" {
-  description = "Created VPC ID."
-  value       = module.vpc.vpc_id
+  description = "Foundation VPC ID used by this ECS cluster."
+  value       = var.vpc_id
 }
 """
     return ""
