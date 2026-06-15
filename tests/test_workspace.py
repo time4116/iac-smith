@@ -5,9 +5,9 @@ from iac_smith.workspace import apply_generated_files, commit_generated_files
 
 
 def test_apply_generated_files_writes_inside_repo_and_rejects_escape(tmp_path: Path):
-    apply_generated_files(tmp_path, {"live/non-prod/main.tf": "terraform {}\n"})
+    apply_generated_files(tmp_path, {"environments/non-prod/main.tf": "terraform {}\n"})
 
-    assert (tmp_path / "live" / "non-prod" / "main.tf").read_text() == "terraform {}\n"
+    assert (tmp_path / "environments" / "non-prod" / "main.tf").read_text() == "terraform {}\n"
 
     try:
         apply_generated_files(tmp_path, {"../escape.tf": "bad"})

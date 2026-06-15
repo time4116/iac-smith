@@ -96,7 +96,7 @@ def plan_changes(
         "README.md",
         ".github/workflows/terraform-pr-check.yml",
         ".github/workflows/terraform-apply.yml",
-        "live/terragrunt.hcl",
+        "environments/terragrunt.hcl",
     ]
     for env in environments:
         files.extend(
@@ -105,16 +105,16 @@ def plan_changes(
                 f"bootstrap/backend/{env}/variables.tf",
                 f"bootstrap/backend/{env}/outputs.tf",
                 f"bootstrap/backend/{env}/README.md",
-                f"live/{env}/terragrunt.hcl",
-                f"live/{env}/{stack_name}/terragrunt.hcl",
-                f"live/{env}/{stack_name}/README.md",
+                f"environments/{env}/terragrunt.hcl",
+                f"environments/{env}/{stack_name}/terragrunt.hcl",
+                f"environments/{env}/{stack_name}/README.md",
             ]
         )
         if _should_generate_foundation(stack_name, intent, repo_patterns):
             files.extend(
                 [
-                    f"live/{env}/foundation/terragrunt.hcl",
-                    f"live/{env}/foundation/README.md",
+                    f"environments/{env}/foundation/terragrunt.hcl",
+                    f"environments/{env}/foundation/README.md",
                 ]
             )
 

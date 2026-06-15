@@ -106,8 +106,8 @@ def test_graph_passes_ruleset_and_repo_context_to_injected_file_generator(tmp_pa
         "    description: Follow dynamic generation rules.\n",
         encoding="utf-8",
     )
-    (tmp_path / "live" / "non-prod").mkdir(parents=True)
-    (tmp_path / "live" / "non-prod" / "terragrunt.hcl").write_text("locals {}\n")
+    (tmp_path / "environments" / "non-prod").mkdir(parents=True)
+    (tmp_path / "environments" / "non-prod" / "terragrunt.hcl").write_text("locals {}\n")
 
     graph = build_graph(
         intent_parser_fn=_fake_intent_parser,
@@ -203,7 +203,7 @@ def test_graph_blocks_failed_static_review_before_pr_writer():
             labels=["iac-smith"],
             target_repo="time4116/iac-smith-demo-infra",
             generated_files={
-                "live/non-prod/example/terragrunt.hcl": (
+                "environments/non-prod/example/terragrunt.hcl": (
                     'remote_state { config = { key = "fixed.tfstate" } }'
                 )
             },

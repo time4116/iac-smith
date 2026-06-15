@@ -619,7 +619,7 @@ def _workflow_check() -> str:
 on:
   pull_request:
     paths:
-      - 'live/**'
+      - 'environments/**'
       - 'modules/**'
 
 permissions:
@@ -641,7 +641,7 @@ jobs:
         with:
           filters: |
             changed:
-              - 'live/non-prod/**'
+              - 'environments/non-prod/**'
               - 'modules/**'
 
       - name: Setup Terraform
@@ -667,7 +667,7 @@ jobs:
       - name: Terragrunt Plan
         if: steps.filter.outputs.changed == 'true'
         run: terragrunt run-all plan --terragrunt-non-interactive -lock-timeout=20m
-        working-directory: live/non-prod
+        working-directory: environments/non-prod
 """
 
 
@@ -709,7 +709,7 @@ jobs:
 
       - name: Terragrunt Apply
         run: terragrunt run-all apply --terragrunt-non-interactive -lock-timeout=20m
-        working-directory: live
+        working-directory: environments
 """
 
 
@@ -724,27 +724,27 @@ def generate_files(
 
     files: dict[str, str] = {}
     files["README.md"] = f"# {slug}\n\nInfrastructure managed through Terraform/Terragrunt.\n"
-    files["live/terragrunt.hcl"] = _root_terragrunt(intent)
+    files["environments/terragrunt.hcl"] = _root_terragrunt(intent)
     files[".github/workflows/terraform-pr-check.yml"] = _workflow_check()
     files[".github/workflows/terraform-apply.yml"] = _workflow_apply()
 
     for env in change_plan.environments:
         backend = _backend_resource(env)
-        files[f"live/{env}/terragrunt.hcl"] = _env_terragrunt(env, intent, backend)
+        files[f"environments/{env}/terragrunt.hcl"] = _env_terragrunt(env, intent, backend)
         files[f"bootstrap/backend/{env}/main.tf"] = _backend_bootstrap(env, change_plan, intent)
         files[f"bootstrap/backend/{env}/variables.tf"] = ""
         files[f"bootstrap/backend/{env}/outputs.tf"] = ""
         files[f"bootstrap/backend/{env}/README.md"] = f"# {env} backend bootstrap\n"
         if stack != "baseline":
             if _uses_foundation(stack):
-                files[f"live/{env}/foundation/terragrunt.hcl"] = _stack_terragrunt(
+                files[f"environments/{env}/foundation/terragrunt.hcl"] = _stack_terragrunt(
                     "foundation", env, intent, repo_patterns
                 )
-                files[f"live/{env}/foundation/README.md"] = f"# {env} foundation\n"
-            files[f"live/{env}/{stack}/terragrunt.hcl"] = _stack_terragrunt(
+                files[f"environments/{env}/foundation/README.md"] = f"# {env} foundation\n"
+            files[f"environments/{env}/{stack}/terragrunt.hcl"] = _stack_terragrunt(
                 stack, env, intent, repo_patterns
             )
-            files[f"live/{env}/{stack}/README.md"] = f"# {env} {stack}\n"
+            files[f"environments/{env}/{stack}/README.md"] = f"# {env} {stack}\n"
 
     if stack != "baseline":
         if _uses_foundation(stack):

@@ -20,7 +20,7 @@ def test_plan_derives_stack_name_from_resource_type():
 
     assert plan.stack_name == "eks-fargate"
     assert "bootstrap/backend/non-prod/main.tf" in plan.files_to_generate
-    assert "live/non-prod/eks-fargate/terragrunt.hcl" in plan.files_to_generate
+    assert "environments/non-prod/eks-fargate/terragrunt.hcl" in plan.files_to_generate
     assert "modules/eks-fargate/README.md" in plan.files_to_generate
     assert ".github/workflows/terraform-pr-check.yml" in plan.files_to_generate
     assert ".github/workflows/terraform-apply.yml" in plan.files_to_generate
@@ -65,7 +65,7 @@ def test_plan_uses_existing_environment_names_when_issue_does_not_pin_scope():
     )
 
     assert plan.environments == ["dev", "staging", "prod"]
-    assert "live/staging/vpc-foundation/terragrunt.hcl" in plan.files_to_generate
+    assert "environments/staging/vpc-foundation/terragrunt.hcl" in plan.files_to_generate
 
 
 def test_plan_skips_module_scaffold_when_stack_already_exists_in_repo():
@@ -109,7 +109,7 @@ def test_plan_ecs_fargate_adds_foundation_stack_and_module():
         target_repo="time4116/iac-smith-demo-infra",
     )
 
-    assert "live/non-prod/foundation/terragrunt.hcl" in plan.files_to_generate
+    assert "environments/non-prod/foundation/terragrunt.hcl" in plan.files_to_generate
     assert "modules/foundation/main.tf" in plan.files_to_generate
     assert "modules/ecs-fargate/main.tf" in plan.files_to_generate
     assert plan.backend_resources["non-prod"].bucket == "iac-smith-state-non-prod-322264632107"
@@ -117,7 +117,9 @@ def test_plan_ecs_fargate_adds_foundation_stack_and_module():
 
 
 def test_plan_existing_foundation_applies_to_arbitrary_workload_stack():
-    patterns = RepoPatterns(existing_stack_paths=["modules/foundation", "live/non-prod/foundation"])
+    patterns = RepoPatterns(
+        existing_stack_paths=["modules/foundation", "environments/non-prod/foundation"]
+    )
 
     plan = plan_changes(
         _intent("worker_service"),
@@ -125,7 +127,7 @@ def test_plan_existing_foundation_applies_to_arbitrary_workload_stack():
         repo_patterns=patterns,
     )
 
-    assert "live/non-prod/foundation/terragrunt.hcl" not in plan.files_to_generate
+    assert "environments/non-prod/foundation/terragrunt.hcl" not in plan.files_to_generate
     assert "modules/foundation/main.tf" not in plan.files_to_generate
-    assert "live/non-prod/worker-service/terragrunt.hcl" in plan.files_to_generate
+    assert "environments/non-prod/worker-service/terragrunt.hcl" in plan.files_to_generate
     assert any("foundation" in item.lower() for item in plan.summary)

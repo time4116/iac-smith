@@ -139,6 +139,13 @@ Non-negotiable rules:
 * When files_to_generate contains one path, return exactly that one file path
   in files. Use the full change_plan and repo_patterns as context, but do not
   include sibling planned files in the response.
+* Generated GitHub Action workflows (e.g. `.github/workflows/terraform-pr-check.yml`
+  and `.github/workflows/terraform-apply.yml`) must strictly align with the
+  concrete directory structure in files_to_generate. For example, if the planned
+  directories are under `environments/`, your workflows must trigger on `environments/**`
+  and use `environments/` subdirectories as their job working-directories. Do not
+  hallucinate independent folder structures such as `envs/`, `live/`, or `environments/non-prod`
+  (without the trailing `environments/` prefix) that are not present in the files_to_generate list.
 {repair_section}
 Generation context JSON:
 {json.dumps(context, indent=2)}

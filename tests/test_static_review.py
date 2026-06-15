@@ -5,7 +5,7 @@ from iac_smith.nodes.static_review import static_review_generated_files
 def test_static_review_blocks_hardcoded_terragrunt_state_key():
     result = static_review_generated_files(
         {
-            "live/non-prod/example/terragrunt.hcl": (
+            "environments/non-prod/example/terragrunt.hcl": (
                 'remote_state { config = { key = "fixed.tfstate" } }'
             )
         }
@@ -38,7 +38,7 @@ def test_static_review_passes_safe_minimal_generated_files():
     )
     result = static_review_generated_files(
         {
-            "live/non-prod/example/terragrunt.hcl": terragrunt,
+            "environments/non-prod/example/terragrunt.hcl": terragrunt,
             "modules/example/README.md": (
                 "# Example\n<!-- BEGIN_TF_DOCS -->\n<!-- END_TF_DOCS -->\n"
             ),
