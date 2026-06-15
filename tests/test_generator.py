@@ -282,6 +282,21 @@ def test_pr_check_workflow_uses_valid_terragrunt_action_inputs():
     assert "secrets.AWS_ROLE_ARN_NON_PROD" in workflow
 
 
+def test_apply_workflow_uses_separate_non_prod_and_prod_role_secrets():
+    files = generate_files(
+        intent=_intent("ecs_fargate"),
+        change_plan=_plan("ecs-fargate"),
+        repo_patterns=RepoPatterns(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+
+    workflow = files[".github/workflows/terraform-apply.yml"]
+    assert "secrets.AWS_ROLE_ARN_NON_PROD" in workflow
+    assert "secrets.AWS_ROLE_ARN_PROD" in workflow
+    assert "working-directory: environments/non-prod" in workflow
+    assert "working-directory: environments/prod" in workflow
+
+
 def _foundation_plan(stack_name: str = "ecs-fargate") -> ChangePlan:
     plan = _plan(stack_name)
     plan.files_to_generate.extend(

@@ -683,24 +683,36 @@ permissions:
   id-token: write
 
 jobs:
-  apply:
-    name: Terragrunt Apply
+  apply-non-prod:
+    name: Terragrunt Apply (non-prod)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check for non-prod changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            changed:
+              - 'environments/non-prod/**'
+              - 'modules/**'
+
       - name: Setup Terraform
+        if: steps.filter.outputs.changed == 'true'
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.9.0"
 
       - name: Setup Terragrunt
+        if: steps.filter.outputs.changed == 'true'
         uses: autero1/action-terragrunt@v3
         with:
           terragrunt-version: "0.58.0"
 
       - name: Configure AWS credentials
+        if: steps.filter.outputs.changed == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_NON_PROD }}
@@ -708,8 +720,50 @@ jobs:
           audience: sts.amazonaws.com
 
       - name: Terragrunt Apply
+        if: steps.filter.outputs.changed == 'true'
         run: terragrunt run-all apply --terragrunt-non-interactive -lock-timeout=20m
-        working-directory: environments
+        working-directory: environments/non-prod
+
+  apply-prod:
+    name: Terragrunt Apply (prod)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check for prod changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            changed:
+              - 'environments/prod/**'
+              - 'modules/**'
+
+      - name: Setup Terraform
+        if: steps.filter.outputs.changed == 'true'
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+
+      - name: Setup Terragrunt
+        if: steps.filter.outputs.changed == 'true'
+        uses: autero1/action-terragrunt@v3
+        with:
+          terragrunt-version: "0.58.0"
+
+      - name: Configure AWS credentials
+        if: steps.filter.outputs.changed == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_PROD }}
+          aws-region: us-west-2
+          audience: sts.amazonaws.com
+
+      - name: Terragrunt Apply
+        if: steps.filter.outputs.changed == 'true'
+        run: terragrunt run-all apply --terragrunt-non-interactive -lock-timeout=20m
+        working-directory: environments/prod
 """
 
 
