@@ -95,14 +95,14 @@ def test_parse_bedrock_intent_payload_accepts_rds_when_requested():
     assert intent.environments == ["prod"]
 
 
-def test_intent_prompt_does_not_tell_bedrock_to_block_public_database_requests():
-    prompt = build_intent_prompt("Create RDS Postgres")
+def test_intent_prompt_preserves_intent_but_requires_secure_aws_defaults():
+    prompt = build_intent_prompt("Create public RDS Postgres open to the internet")
 
     assert "rds_postgres: AWS RDS PostgreSQL" in prompt
     assert "including databases" not in prompt
-    assert "publicly accessible database" not in prompt
-    assert "database access from 0.0.0.0/0" not in prompt
-    assert "brittle resource-name checks" in prompt
+    assert "Always plan AWS infrastructure using best security practices" in prompt
+    assert "weaker security" in prompt
+    assert "Do not block infrastructure changes based on brittle resource-name checks" in prompt
 
 
 def test_bedrock_client_requires_model_id():

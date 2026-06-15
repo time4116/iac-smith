@@ -24,6 +24,10 @@ def test_plan_eks_fargate_non_prod_structure():
     assert ".github/workflows/terraform-apply.yml" in plan.files_to_generate
     assert plan.backend_resources["non-prod"].bucket == "iac-smith-demo-infra-non-prod-tfstate"
     assert plan.backend_resources["non-prod"].lock_table == "iac-smith-demo-infra-non-prod-tflock"
+    assert (
+        "Generate AWS infrastructure with secure defaults regardless of prompt wording"
+        in plan.summary
+    )
 
 
 def test_plan_uses_existing_environment_names_when_issue_does_not_pin_scope():

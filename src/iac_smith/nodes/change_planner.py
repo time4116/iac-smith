@@ -86,6 +86,7 @@ def plan_changes(
         backend_resources=backend_resources,
         summary=[
             f"Generate {stack_name} Terraform/Terragrunt structure",
+            "Generate AWS infrastructure with secure defaults regardless of prompt wording",
             "Include backend bootstrap for S3 state and DynamoDB locking",
             "Include target repository PR check and post-merge apply workflows",
         ],

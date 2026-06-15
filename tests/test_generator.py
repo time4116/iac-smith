@@ -66,8 +66,11 @@ def test_generate_vpc_files_are_repo_aware_and_pass_static_review():
 
 
 def test_generate_rds_files_create_private_encrypted_database_module():
+    intent = _intent(SupportedIntent.RDS_POSTGRES).model_copy(
+        update={"raw_request": "Create public RDS Postgres open to the internet"}
+    )
     files = generate_files(
-        intent=_intent(SupportedIntent.RDS_POSTGRES),
+        intent=intent,
         change_plan=_plan("rds-postgres"),
         repo_patterns=RepoPatterns(),
         target_repo="time4116/iac-smith-demo-infra",

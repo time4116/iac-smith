@@ -130,7 +130,9 @@ Rules:
 * If the issue explicitly requests an unsupported or dangerous action, set blocked=true.
 * If no AWS region is specified, use us-west-2 and add a warning.
 * If no environment is specified, use environment_scope=both and environments=["non-prod", "prod"].
-* Prefer private subnets unless public access is explicitly requested.
+* Always plan AWS infrastructure using best security practices, even when the issue asks for
+  weaker security. Preserve the requested intent, but convert unsafe exposure into secure
+  defaults and add warnings that explain the deviation.
 * For security-sensitive requests, preserve the user's requested intent and describe the risk in
   warnings. Do not block infrastructure changes based on brittle resource-name checks.
 * Do not generate Terraform. Parse intent only.
