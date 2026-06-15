@@ -35,7 +35,7 @@ def build_pr_body(
 
 {_bullets(change_plan.summary)}
 
-Target environments: {", ".join(intent.environments)}
+Target environments: {", ".join(change_plan.environments)}
 Region: `{intent.region}`
 Stack: `{change_plan.stack_name}`
 

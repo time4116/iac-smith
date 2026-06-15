@@ -12,6 +12,7 @@ IaC Smith never applies infrastructure from the controller repo.
 Configure these in the controller repo:
 
 * Secret `IAC_SMITH_TARGET_REPO_PAT`: fine-grained PAT scoped only to `time4116/iac-smith-demo-infra` with contents and pull request write permissions.
+* Secret `BEDROCK_MODEL_ID`: Bedrock model ID or inference profile ARN. Do not hardcode this in source.
 * Variable `AWS_BEDROCK_ROLE_ARN`: IAM role ARN used by the controller workflow to call Bedrock.
 * Variable `AWS_REGION`: optional, defaults to `us-west-2`.
 
@@ -41,7 +42,9 @@ Required permissions:
 
 Do not grant organization-wide access. Do not reuse a personal all-repos token.
 
-## AWS OIDC trust policy
+## Bedrock setup
+
+Bedrock is required for the MVP intent parser.
 
 Create an IAM role trusted by GitHub Actions OIDC. Restrict the trust policy to this controller repo and the `main` branch.
 

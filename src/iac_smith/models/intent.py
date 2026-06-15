@@ -8,6 +8,7 @@ class SupportedIntent(StrEnum):
     VPC_FOUNDATION = "vpc_foundation"
     EKS_FARGATE = "eks_fargate"
     ECS_FARGATE = "ecs_fargate"
+    RDS_POSTGRES = "rds_postgres"
     UNSUPPORTED = "unsupported"
 
 
