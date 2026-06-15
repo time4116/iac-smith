@@ -1,6 +1,7 @@
 import json
 import os
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
@@ -129,6 +130,9 @@ Non-negotiable rules:
   and preference rules must be followed unless they conflict with the explicit
   issue request or existing repo convention; explain conflicts in warnings.
 * Never apply infrastructure, destroy resources, or include plaintext credentials.
+* Terraform apply workflows must never run on pull_request events or feature
+  branches. `.github/workflows/terraform-apply.yml` may run only on push events
+  to `main` or `master`.
 * Prefer secure AWS defaults: private networking, encryption, least privilege,
   no dangerous public ingress.
 * If a workload stack depends on foundation outputs for VPC/subnets, do not
@@ -214,6 +218,7 @@ class BedrockTerraformGenerator:
         read_timeout_seconds: int = 240,
         max_attempts: int = 3,
         max_repair_attempts: int = 1,
+        concurrency: int | None = None,
         logger: Callable[[str], None] | None = None,
     ) -> None:
         self.model_id = model_id or os.getenv("BEDROCK_MODEL_ID", "")
@@ -223,6 +228,8 @@ class BedrockTerraformGenerator:
         self.read_timeout_seconds = read_timeout_seconds
         self.max_attempts = max_attempts
         self.max_repair_attempts = max_repair_attempts
+        configured_concurrency = concurrency or int(os.getenv("IAC_SMITH_BEDROCK_CONCURRENCY", "4"))
+        self.concurrency = max(1, configured_concurrency)
         self.logger = logger
 
     def _log(self, message: str) -> None:
@@ -373,18 +380,91 @@ class BedrockTerraformGenerator:
     ) -> dict[str, str]:
         generated_files: dict[str, str] = {}
         total_files = len(change_plan.files_to_generate)
-        self._log(f"IaC Smith: generating {total_files} planned file(s) with Bedrock.")
-        for file_index, path in enumerate(change_plan.files_to_generate, start=1):
-            generated_files[path] = self._generate_reviewed_file(
+        max_workers = min(self.concurrency, max(1, total_files))
+        self._log(
+            f"IaC Smith: generating {total_files} planned file(s) with Bedrock "
+            f"using concurrency {max_workers}."
+        )
+
+        def generate_one(path: str, file_index: int) -> tuple[str, str]:
+            self._log(f"IaC Smith: generating file {file_index}/{total_files}: {path}")
+            return path, self._generate_planned_file(
                 path=path,
-                generated_files=generated_files,
                 intent=intent,
                 change_plan=change_plan,
                 repo_patterns=repo_patterns,
                 ruleset=ruleset,
                 target_repo=target_repo,
-                file_index=file_index,
-                total_files=total_files,
             )
-        self._log(f"IaC Smith: generated {len(generated_files)} file(s).")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(generate_one, path, file_index): path
+                for file_index, path in enumerate(change_plan.files_to_generate, start=1)
+            }
+            for future in as_completed(futures):
+                path, content = future.result()
+                generated_files[path] = content
+
+        generated_files = {path: generated_files[path] for path in change_plan.files_to_generate}
+
+        for repair_attempt in range(self.max_repair_attempts + 1):
+            validation = static_review_generated_files(generated_files)
+            if validation.status != ValidationStatus.FAILED:
+                for path in change_plan.files_to_generate:
+                    suffix = " after repair" if repair_attempt else ""
+                    self._log(f"IaC Smith: static review passed for {path}{suffix}.")
+                self._log(f"IaC Smith: generated {len(generated_files)} file(s).")
+                return generated_files
+
+            self._log("IaC Smith: static review failed: " + "; ".join(validation.errors))
+            if repair_attempt >= self.max_repair_attempts:
+                joined_errors = "; ".join(validation.errors)
+                raise ValueError(f"Generated files failed static review: {joined_errors}")
+
+            paths_to_repair = [
+                path
+                for path in change_plan.files_to_generate
+                if any(path in error for error in validation.errors)
+            ] or list(change_plan.files_to_generate)
+            path_positions = {
+                path: index for index, path in enumerate(change_plan.files_to_generate, start=1)
+            }
+            self._log(
+                f"IaC Smith: repairing {len(paths_to_repair)} file(s) after static review failure."
+            )
+            repair_errors = list(validation.errors)
+            previous_files = dict(generated_files)
+
+            def repair_one(
+                path: str,
+                file_index: int,
+                repair_errors: list[str] = repair_errors,
+                previous_files: dict[str, str] = previous_files,
+            ) -> tuple[str, str]:
+                self._log(f"IaC Smith: repairing file {file_index}/{total_files}: {path}")
+                return path, self._generate_planned_file(
+                    path=path,
+                    intent=intent,
+                    change_plan=change_plan,
+                    repo_patterns=repo_patterns,
+                    ruleset=ruleset,
+                    target_repo=target_repo,
+                    repair_errors=repair_errors,
+                    previous_content=previous_files[path],
+                )
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(repair_one, path, path_positions[path]): path
+                    for path in paths_to_repair
+                }
+                for future in as_completed(futures):
+                    path, content = future.result()
+                    generated_files[path] = content
+
+            generated_files = {
+                path: generated_files[path] for path in change_plan.files_to_generate
+            }
+
         return generated_files

@@ -142,3 +142,33 @@ def test_static_review_allows_references_to_declared_modules():
     )
 
     assert result.errors == []
+
+
+def test_static_review_blocks_apply_workflow_on_pull_request():
+    workflow = """
+name: Terraform Apply
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs: {}
+"""
+
+    result = static_review_generated_files({".github/workflows/terraform-apply.yml": workflow})
+
+    assert result.status.value == "failed"
+    assert any("feature branches" in error for error in result.errors)
+
+
+def test_static_review_blocks_apply_workflow_without_main_or_master_branch_filter():
+    workflow = """
+name: Terraform Apply
+on:
+  push:
+jobs: {}
+"""
+
+    result = static_review_generated_files({".github/workflows/terraform-apply.yml": workflow})
+
+    assert result.status.value == "failed"
+    assert any("main or master" in error for error in result.errors)
