@@ -36,6 +36,8 @@ def commit_generated_files(repo_path: str | Path, message: str) -> bool:
     status = _run_git(root, ["status", "--porcelain"]).stdout.strip()
     if not status:
         return False
+    _run_git(root, ["config", "--local", "user.email", "iac-smith@time4116.ai"])
+    _run_git(root, ["config", "--local", "user.name", "IaC Smith"])
     _run_git(root, ["add", "-A"])
     _run_git(root, ["commit", "-m", message])
     return True
