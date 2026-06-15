@@ -109,6 +109,9 @@ Non-negotiable rules:
 * Generate complete, syntactically valid file bodies for each requested path.
   Do not use placeholder comments instead of Terraform resources when the issue
   asks for concrete infrastructure.
+* When files_to_generate contains one path, return exactly that one file path
+  in files. Use the full change_plan and repo_patterns as context, but do not
+  include sibling planned files in the response.
 
 Generation context JSON:
 {json.dumps(context, indent=2)}
@@ -188,18 +191,20 @@ class BedrockTerraformGenerator:
         assert last_error is not None
         raise last_error
 
-    def generate_files(
+    def _generate_planned_file(
         self,
         *,
+        path: str,
         intent: InfrastructureIntent,
         change_plan: ChangePlan,
         repo_patterns: RepoPatterns,
         ruleset: Ruleset | None,
         target_repo: str,
-    ) -> dict[str, str]:
+    ) -> str:
+        single_file_plan = change_plan.model_copy(update={"files_to_generate": [path]})
         prompt = build_generation_prompt(
             intent=intent,
-            change_plan=change_plan,
+            change_plan=single_file_plan,
             repo_patterns=repo_patterns,
             ruleset=ruleset,
             target_repo=target_repo,
@@ -218,7 +223,26 @@ class BedrockTerraformGenerator:
             ),
         )
         raw_body = response["body"].read().decode("utf-8")
-        return parse_generation_payload(
-            raw_body,
-            allowed_paths=change_plan.files_to_generate,
-        ).files
+        generated = parse_generation_payload(raw_body, allowed_paths=[path])
+        return generated.files[path]
+
+    def generate_files(
+        self,
+        *,
+        intent: InfrastructureIntent,
+        change_plan: ChangePlan,
+        repo_patterns: RepoPatterns,
+        ruleset: Ruleset | None,
+        target_repo: str,
+    ) -> dict[str, str]:
+        return {
+            path: self._generate_planned_file(
+                path=path,
+                intent=intent,
+                change_plan=change_plan,
+                repo_patterns=repo_patterns,
+                ruleset=ruleset,
+                target_repo=target_repo,
+            )
+            for path in change_plan.files_to_generate
+        }

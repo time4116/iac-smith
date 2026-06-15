@@ -32,9 +32,13 @@ class FakeBedrockRuntime:
         self.calls.append(kwargs)
         if len(self.calls) <= self.failures_before_success:
             raise botocore.exceptions.ReadTimeoutError(
-                endpoint_url="https://bedrock-runtime.us-west-2.amazonaws.com/model/test/invoke",
+                endpoint_url="https://example.invalid/model/test/invoke",
                 error="timed out",
             )
+        body = json.loads(kwargs["body"])
+        prompt = body["messages"][0]["content"]
+        context = json.loads(prompt.split("Generation context JSON:\n", 1)[1])
+        requested_paths = context["files_to_generate"]
         return {
             "body": FakeBody(
                 json.dumps(
@@ -44,7 +48,9 @@ class FakeBedrockRuntime:
                                 "type": "text",
                                 "text": json.dumps(
                                     {
-                                        "files": self.files,
+                                        "files": {
+                                            path: self.files[path] for path in requested_paths
+                                        },
                                         "assumptions": ["Used repository rules."],
                                         "warnings": [],
                                     }
@@ -225,10 +231,15 @@ def test_bedrock_terraform_generator_returns_model_generated_files_without_rende
     )
 
     assert result == files
+    assert len(runtime.calls) == len(files)
     assert runtime.calls[0]["modelId"] == "anthropic.test-model"
     body = json.loads(runtime.calls[0]["body"])
     assert body["temperature"] == 0
     assert "workload-modules-depend-on-foundation" in body["messages"][0]["content"]
+    first_context = json.loads(
+        body["messages"][0]["content"].split("Generation context JSON:\n", 1)[1]
+    )
+    assert first_context["files_to_generate"] == ["live/non-prod/ecs-fargate/terragrunt.hcl"]
 
 
 def test_bedrock_terraform_generator_retries_transient_read_timeouts():
@@ -259,7 +270,7 @@ def test_bedrock_terraform_generator_retries_transient_read_timeouts():
     )
 
     assert result == files
-    assert len(runtime.calls) == 2
+    assert len(runtime.calls) == len(files) + 1
 
 
 def test_bedrock_terraform_generator_uses_extended_bedrock_timeout(monkeypatch):
