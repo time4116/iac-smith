@@ -1,6 +1,6 @@
 from collections.abc import Callable
 
-from iac_smith.models.change_plan import ChangePlan
+from iac_smith.models.change_plan import BackendResource, ChangePlan
 from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
 
@@ -17,12 +17,25 @@ def _repo_slug(target_repo: str) -> str:
     return re.sub(r"[^a-z0-9-]", "-", name.lower()).strip("-")[:40]
 
 
-def _root_terragrunt(change_plan: ChangePlan, intent: InfrastructureIntent) -> str:
-    first_env = change_plan.environments[0]
-    backend = change_plan.backend_resources[first_env]
+def _root_terragrunt(intent: InfrastructureIntent) -> str:
+    """Root live/terragrunt.hcl — region locals only.
+
+    Remote state belongs in each env-level terragrunt.hcl so that non-prod and
+    prod point at completely separate S3 buckets and DynamoDB lock tables.
+    """
     return f'''{_header()}
 locals {{
   aws_region = "{intent.region}"
+}}
+'''
+
+
+def _env_terragrunt(env: str, intent: InfrastructureIntent, backend: BackendResource) -> str:
+    """Per-environment terragrunt.hcl — owns the remote_state block for this env."""
+    return f'''{_header()}
+locals {{
+  environment = "{env}"
+  aws_region  = "{intent.region}"
 }}
 
 remote_state {{
@@ -34,15 +47,6 @@ remote_state {{
     encrypt        = true
     dynamodb_table = "{backend.lock_table}"
   }}
-}}
-'''
-
-
-def _env_terragrunt(env: str, intent: InfrastructureIntent) -> str:
-    return f'''{_header()}
-locals {{
-  environment = "{env}"
-  aws_region  = "{intent.region}"
 }}
 '''
 
@@ -606,12 +610,13 @@ def generate_files(
 
     files: dict[str, str] = {}
     files["README.md"] = f"# {slug}\n\nInfrastructure managed through Terraform/Terragrunt.\n"
-    files["live/terragrunt.hcl"] = _root_terragrunt(change_plan, intent)
+    files["live/terragrunt.hcl"] = _root_terragrunt(intent)
     files[".github/workflows/terraform-pr-check.yml"] = _workflow_check()
     files[".github/workflows/terraform-apply.yml"] = _workflow_apply()
 
     for env in change_plan.environments:
-        files[f"live/{env}/terragrunt.hcl"] = _env_terragrunt(env, intent)
+        backend = change_plan.backend_resources[env]
+        files[f"live/{env}/terragrunt.hcl"] = _env_terragrunt(env, intent, backend)
         files[f"bootstrap/backend/{env}/main.tf"] = _backend_bootstrap(env, change_plan, intent)
         files[f"bootstrap/backend/{env}/variables.tf"] = ""
         files[f"bootstrap/backend/{env}/outputs.tf"] = ""

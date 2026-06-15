@@ -59,9 +59,90 @@ def test_generate_vpc_files_are_repo_aware_and_pass_static_review():
 
     assert "modules/vpc/main.tf" in files
     assert 'source  = "terraform-aws-modules/vpc/aws"' in files["modules/vpc/main.tf"]
+    # remote_state lives in env-level file, NOT root
     state_key = 'key            = "${path_relative_to_include()}/terraform.tfstate"'
-    assert state_key in files["live/terragrunt.hcl"]
+    assert state_key not in files["live/terragrunt.hcl"]
+    assert state_key in files["live/non-prod/terragrunt.hcl"]
     assert 'include "root"' in files["live/non-prod/vpc/terragrunt.hcl"]
+    assert static_review_generated_files(files).errors == []
+
+
+def test_root_terragrunt_has_no_remote_state_block():
+    """Root live/terragrunt.hcl must only define region locals — no backend config."""
+    files = generate_files(
+        intent=_intent("vpc_foundation"),
+        change_plan=_plan("vpc"),
+        repo_patterns=RepoPatterns(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+    root = files["live/terragrunt.hcl"]
+    assert "remote_state" not in root
+    assert "aws_region" in root
+
+
+def _multi_env_plan(stack_name: str) -> ChangePlan:
+    return ChangePlan(
+        stack_name=stack_name,
+        environments=["non-prod", "prod"],
+        files_to_generate=[
+            "README.md",
+            "live/terragrunt.hcl",
+            "live/non-prod/terragrunt.hcl",
+            "live/prod/terragrunt.hcl",
+            f"live/non-prod/{stack_name}/terragrunt.hcl",
+            f"live/prod/{stack_name}/terragrunt.hcl",
+            f"modules/{stack_name}/main.tf",
+            f"modules/{stack_name}/variables.tf",
+            f"modules/{stack_name}/outputs.tf",
+            f"modules/{stack_name}/versions.tf",
+            f"modules/{stack_name}/README.md",
+        ],
+        backend_resources={
+            "non-prod": BackendResource(
+                bucket="iac-smith-demo-infra-non-prod-tfstate",
+                lock_table="iac-smith-demo-infra-non-prod-tflock",
+            ),
+            "prod": BackendResource(
+                bucket="iac-smith-demo-infra-prod-tfstate",
+                lock_table="iac-smith-demo-infra-prod-tflock",
+            ),
+        },
+        summary=["Generate vpc Terraform/Terragrunt structure"],
+    )
+
+
+def test_each_env_terragrunt_owns_its_own_backend_resources():
+    """non-prod and prod must each point to their own S3 bucket and DynamoDB table."""
+    intent = InfrastructureIntent(
+        raw_request="Create VPC for both envs",
+        resource_type="vpc_foundation",
+        environment_scope=EnvironmentScope.BOTH,
+        environments=["non-prod", "prod"],
+        region="us-west-2",
+    )
+    files = generate_files(
+        intent=intent,
+        change_plan=_multi_env_plan("vpc"),
+        repo_patterns=RepoPatterns(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+
+    non_prod_tg = files["live/non-prod/terragrunt.hcl"]
+    prod_tg = files["live/prod/terragrunt.hcl"]
+
+    assert "iac-smith-demo-infra-non-prod-tfstate" in non_prod_tg
+    assert "iac-smith-demo-infra-non-prod-tflock" in non_prod_tg
+    assert "iac-smith-demo-infra-prod-tfstate" not in non_prod_tg
+
+    assert "iac-smith-demo-infra-prod-tfstate" in prod_tg
+    assert "iac-smith-demo-infra-prod-tflock" in prod_tg
+    assert "iac-smith-demo-infra-non-prod-tfstate" not in prod_tg
+
+    # Both env files carry the state key
+    key = 'key            = "${path_relative_to_include()}/terraform.tfstate"'
+    assert key in non_prod_tg
+    assert key in prod_tg
+
     assert static_review_generated_files(files).errors == []
 
 
