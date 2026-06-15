@@ -53,7 +53,12 @@ def main():
                 "Principal": {"Federated": f"arn:aws:iam::{account_id}:oidc-provider/{oidc_url}"},
                 "Action": "sts:AssumeRoleWithWebIdentity",
                 "Condition": {
-                    "StringLike": {f"{oidc_url}:sub": [f"repo:{CONTROLLER_REPO}:*", f"repo:{TARGET_REPO}:*"]},
+                    "StringLike": {
+                        f"{oidc_url}:sub": [
+                            f"repo:{CONTROLLER_REPO}:*",
+                            f"repo:{TARGET_REPO}:*",
+                        ]
+                    },
                     "StringEquals": {f"{oidc_url}:aud": "sts.amazonaws.com"},
                 },
             }
@@ -117,12 +122,12 @@ def main():
                     "s3:PutObject*",
                     "s3:GetObject",
                     "s3:GetBucketTagging",
-                    "s3:PutBucketTagging"
+                    "s3:PutBucketTagging",
                 ],
                 "Resource": [
                     "arn:aws:s3:::iac-smith-state-*",
-                    "arn:aws:s3:::iac-smith-state-*/*"
-                ]
+                    "arn:aws:s3:::iac-smith-state-*/*",
+                ],
             },
             {
                 "Sid": "AllowDynamoDBLocking",
@@ -133,9 +138,9 @@ def main():
                     "dynamodb:GetItem",
                     "dynamodb:PutItem",
                     "dynamodb:DeleteItem",
-                    "dynamodb:TagResource"
+                    "dynamodb:TagResource",
                 ],
-                "Resource": "arn:aws:dynamodb:*:*:table/iac-smith-lock-*"
+                "Resource": "arn:aws:dynamodb:*:*:table/iac-smith-lock-*",
             },
             {
                 "Sid": "AllowInfraManagement",
@@ -161,10 +166,10 @@ def main():
                     "ecs:DeleteCluster",
                     "ecs:DescribeClusters",
                     "ecs:ListClusters",
-                    "iam:CreateServiceLinkedRole"
+                    "iam:CreateServiceLinkedRole",
                 ],
-                "Resource": "*"
-            }
+                "Resource": "*",
+            },
         ],
     }
     with open("permissions.json", "w") as f:
