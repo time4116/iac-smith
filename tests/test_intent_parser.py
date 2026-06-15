@@ -1,4 +1,4 @@
-from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent, SupportedIntent
+from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent
 from iac_smith.nodes.intent_parser import parse_intent
 
 
@@ -16,7 +16,7 @@ def test_parse_intent_uses_mandatory_bedrock_client_result():
     client = FakeIntentClient(
         InfrastructureIntent(
             raw_request="",
-            supported_intent=SupportedIntent.EKS_FARGATE,
+            resource_type="eks_fargate",
             environment_scope=EnvironmentScope.NON_PROD_ONLY,
             environments=["non-prod"],
             region="us-west-2",
@@ -34,7 +34,7 @@ def test_parse_intent_uses_mandatory_bedrock_client_result():
     assert client.calls == [
         "Create AWS infrastructure for a non-prod EKS Fargate setup in us-west-2."
     ]
-    assert intent.supported_intent == SupportedIntent.EKS_FARGATE
+    assert intent.resource_type == "eks_fargate"
     assert intent.environment_scope == EnvironmentScope.NON_PROD_ONLY
     assert intent.environments == ["non-prod"]
     assert intent.region == "us-west-2"
@@ -46,7 +46,7 @@ def test_parse_intent_preserves_bedrock_defaults_for_unspecified_environment():
     client = FakeIntentClient(
         InfrastructureIntent(
             raw_request="",
-            supported_intent=SupportedIntent.VPC_FOUNDATION,
+            resource_type="vpc_foundation",
             environment_scope=EnvironmentScope.BOTH,
             environments=["non-prod", "prod"],
             region="us-west-2",
@@ -59,51 +59,64 @@ def test_parse_intent_preserves_bedrock_defaults_for_unspecified_environment():
         intent_client=client,
     )
 
-    assert intent.supported_intent == SupportedIntent.VPC_FOUNDATION
+    assert intent.resource_type == "vpc_foundation"
     assert intent.environment_scope == EnvironmentScope.BOTH
     assert intent.environments == ["non-prod", "prod"]
     assert any("region defaulted" in warning.lower() for warning in intent.warnings)
 
 
-def test_parse_intent_allows_rds_when_bedrock_classifies_it_as_supported():
+def test_parse_intent_passes_through_any_resource_type_without_blocking():
+    """No resource type should be blocked by IaC Smith itself — that's the PR reviewer's job."""
+    for resource_type in ["rds_postgres", "s3_bucket", "lambda_function", "aurora_cluster"]:
+        client = FakeIntentClient(
+            InfrastructureIntent(
+                raw_request="",
+                resource_type=resource_type,
+                environment_scope=EnvironmentScope.PROD_ONLY,
+                environments=["prod"],
+                region="us-west-2",
+                blocked=False,
+            )
+        )
+        intent = parse_intent(f"Create {resource_type}", intent_client=client)
+        assert intent.resource_type == resource_type
+        assert intent.blocked is False
+        assert intent.block_reason is None
+
+
+def test_parse_intent_blocks_only_when_bedrock_sets_blocked():
     client = FakeIntentClient(
         InfrastructureIntent(
             raw_request="",
-            supported_intent=SupportedIntent.RDS_POSTGRES,
-            environment_scope=EnvironmentScope.PROD_ONLY,
-            environments=["prod"],
+            resource_type="",
+            environment_scope=EnvironmentScope.BOTH,
+            environments=["non-prod", "prod"],
             region="us-west-2",
-            features=["postgres", "encrypted_storage", "private_subnets"],
+            blocked=True,
+            block_reason="Issue requests terraform apply directly.",
+        )
+    )
+
+    intent = parse_intent("Please apply terraform now.", intent_client=client)
+
+    assert intent.blocked is True
+    assert intent.block_reason == "Issue requests terraform apply directly."
+
+
+def test_parse_intent_blocks_on_empty_resource_type_without_explicit_block():
+    """Guard: if Bedrock returns no resource_type and didn't set blocked, we block it."""
+    client = FakeIntentClient(
+        InfrastructureIntent(
+            raw_request="",
+            resource_type="",
+            environment_scope=EnvironmentScope.BOTH,
+            environments=["non-prod", "prod"],
+            region="us-west-2",
             blocked=False,
         )
     )
 
-    intent = parse_intent(
-        "Create a production RDS PostgreSQL database.",
-        intent_client=client,
-    )
+    intent = parse_intent("???", intent_client=client)
 
-    assert intent.supported_intent == SupportedIntent.RDS_POSTGRES
-    assert intent.blocked is False
-
-
-def test_parse_intent_does_not_override_bedrock_with_brittle_resource_name_guards():
-    client = FakeIntentClient(
-        InfrastructureIntent(
-            raw_request="",
-            supported_intent=SupportedIntent.RDS_POSTGRES,
-            environment_scope=EnvironmentScope.PROD_ONLY,
-            environments=["prod"],
-            region="us-west-2",
-            blocked=False,
-        )
-    )
-
-    intent = parse_intent(
-        "Create a production RDS PostgreSQL database open to the internet.",
-        intent_client=client,
-    )
-
-    assert intent.supported_intent == SupportedIntent.RDS_POSTGRES
-    assert intent.blocked is False
-    assert intent.block_reason is None
+    assert intent.blocked is True
+    assert intent.block_reason

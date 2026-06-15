@@ -1,13 +1,9 @@
 from typing import Protocol
 
 from iac_smith.bedrock_intent import BedrockIntentClient
-from iac_smith.models.intent import InfrastructureIntent, SupportedIntent
+from iac_smith.models.intent import InfrastructureIntent
 
-UNSUPPORTED_MVP_REASON = (
-    "Unsupported request family for MVP. Supported families are baseline, VPC, "
-    "EKS Fargate, ECS Fargate, and private RDS PostgreSQL."
-)
-UNMAPPED_REASON = "IaC Smith could not map the request to a supported MVP infrastructure family."
+UNMAPPED_REASON = "IaC Smith could not determine an infrastructure resource type from this issue."
 
 
 class IntentClient(Protocol):
@@ -15,7 +11,7 @@ class IntentClient(Protocol):
 
 
 def _apply_final_safety_guards(intent: InfrastructureIntent) -> InfrastructureIntent:
-    if intent.supported_intent == SupportedIntent.UNSUPPORTED and not intent.blocked:
+    if not intent.resource_type.strip() and not intent.blocked:
         return intent.model_copy(update={"blocked": True, "block_reason": UNMAPPED_REASON})
     return intent
 

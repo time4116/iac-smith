@@ -7,7 +7,7 @@ from iac_smith.bedrock_intent import (
     build_intent_prompt,
     parse_bedrock_intent_payload,
 )
-from iac_smith.models.intent import EnvironmentScope, SupportedIntent
+from iac_smith.models.intent import EnvironmentScope
 
 
 class FakeBedrockRuntime:
@@ -40,7 +40,7 @@ def test_parse_bedrock_intent_payload_accepts_anthropic_text_block_json():
                 "type": "text",
                 "text": json.dumps(
                     {
-                        "supported_intent": "vpc_foundation",
+                        "resource_type": "vpc_foundation",
                         "environment_scope": "non_prod_only",
                         "environments": ["non-prod"],
                         "region": "us-west-2",
@@ -58,51 +58,56 @@ def test_parse_bedrock_intent_payload_accepts_anthropic_text_block_json():
 
     intent = parse_bedrock_intent_payload(json.dumps(payload))
 
-    assert intent.supported_intent == SupportedIntent.VPC_FOUNDATION
+    assert intent.resource_type == "vpc_foundation"
     assert intent.environment_scope == EnvironmentScope.NON_PROD_ONLY
     assert intent.environments == ["non-prod"]
     assert intent.region == "us-west-2"
     assert intent.requires_new_vpc is True
 
 
-def test_parse_bedrock_intent_payload_accepts_rds_when_requested():
-    payload = {
-        "content": [
-            {
-                "type": "text",
-                "text": json.dumps(
-                    {
-                        "supported_intent": "rds_postgres",
-                        "environment_scope": "prod_only",
-                        "environments": ["prod"],
-                        "region": "us-west-2",
-                        "requires_new_vpc": False,
-                        "features": ["postgres", "encrypted_storage", "private_subnets"],
-                        "assumptions": ["Use AWS-managed master password."],
-                        "warnings": [],
-                        "blocked": False,
-                        "block_reason": None,
-                    }
-                ),
-            }
-        ]
-    }
+def test_parse_bedrock_intent_payload_accepts_any_resource_type():
+    """resource_type is a free-form string — Bedrock can return anything."""
+    for resource_type in ["rds_postgres", "s3_bucket", "aurora_cluster", "custom_thing"]:
+        payload = {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "resource_type": resource_type,
+                            "environment_scope": "prod_only",
+                            "environments": ["prod"],
+                            "region": "us-west-2",
+                            "requires_new_vpc": False,
+                            "features": [],
+                            "assumptions": [],
+                            "warnings": [],
+                            "blocked": False,
+                            "block_reason": None,
+                        }
+                    ),
+                }
+            ]
+        }
+        intent = parse_bedrock_intent_payload(json.dumps(payload))
+        assert intent.resource_type == resource_type
+        assert intent.blocked is False
 
-    intent = parse_bedrock_intent_payload(json.dumps(payload))
 
-    assert intent.supported_intent == SupportedIntent.RDS_POSTGRES
-    assert intent.environment_scope == EnvironmentScope.PROD_ONLY
-    assert intent.environments == ["prod"]
+def test_intent_prompt_does_not_hardcode_resource_type_allowlist():
+    prompt = build_intent_prompt("Create some AWS infrastructure")
 
-
-def test_intent_prompt_preserves_intent_but_requires_secure_aws_defaults():
-    prompt = build_intent_prompt("Create public RDS Postgres open to the internet")
-
-    assert "rds_postgres: AWS RDS PostgreSQL" in prompt
-    assert "including databases" not in prompt
+    assert "There is no restricted list" in prompt
+    assert "blocked=true" not in prompt or "only set blocked=true" in prompt.lower()
     assert "Always plan AWS infrastructure using best security practices" in prompt
     assert "weaker security" in prompt
-    assert "Do not block infrastructure changes based on brittle resource-name checks" in prompt
+
+
+def test_intent_prompt_only_blocks_apply_and_destroy_not_resource_types():
+    prompt = build_intent_prompt("Create RDS Postgres")
+
+    assert "applying infrastructure directly" in prompt
+    assert "destroying resources" in prompt
 
 
 def test_bedrock_client_requires_model_id():
@@ -118,7 +123,7 @@ def test_bedrock_client_invokes_configured_model_without_hardcoded_model_id():
                     "type": "text",
                     "text": json.dumps(
                         {
-                            "supported_intent": "baseline",
+                            "resource_type": "baseline",
                             "environment_scope": "both",
                             "environments": ["non-prod", "prod"],
                             "region": "us-east-1",
@@ -138,7 +143,7 @@ def test_bedrock_client_invokes_configured_model_without_hardcoded_model_id():
     client = BedrockIntentClient(model_id="anthropic.test-model", bedrock_runtime=runtime)
     intent = client.parse_issue("Bootstrap remote state")
 
-    assert intent.supported_intent == SupportedIntent.BASELINE
+    assert intent.resource_type == "baseline"
     assert runtime.calls[0]["modelId"] == "anthropic.test-model"
     body = json.loads(runtime.calls[0]["body"])
     assert body["anthropic_version"] == "bedrock-2023-05-31"

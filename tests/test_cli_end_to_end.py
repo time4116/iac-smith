@@ -2,7 +2,7 @@ import subprocess
 from pathlib import Path
 
 from iac_smith.cli import run_iac_smith
-from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent, SupportedIntent
+from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent
 from iac_smith.services.github import GitHubIssue, GitHubPullRequest
 
 
@@ -31,7 +31,7 @@ class FakePullRequestClient:
 def _fake_intent_parser(issue_text: str) -> InfrastructureIntent:
     return InfrastructureIntent(
         raw_request=issue_text,
-        supported_intent=SupportedIntent.VPC_FOUNDATION,
+        resource_type="vpc_foundation",
         environment_scope=EnvironmentScope.NON_PROD_ONLY,
         environments=["non-prod"],
         region="us-west-2",
@@ -70,6 +70,6 @@ def test_run_iac_smith_generates_commits_and_opens_pr(tmp_path: Path):
 
     assert result.pr_url == "https://github.com/time4116/iac-smith-demo-infra/pull/9"
     assert result.branch.startswith("iac-smith/issue-42-create-non-prod-vpc")
-    assert (tmp_path / "modules" / "vpc" / "main.tf").exists()
+    assert (tmp_path / "modules" / "vpc-foundation" / "main.tf").exists()
     assert pr_client.calls[0]["repo"] == "time4116/iac-smith-demo-infra"
     assert pr_client.calls[0]["head"] == result.branch

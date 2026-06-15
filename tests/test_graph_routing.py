@@ -1,22 +1,22 @@
 from iac_smith.graph import build_graph
-from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent, SupportedIntent
+from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent
 from iac_smith.state import IaCSmithState
 
 
 def _fake_intent_parser(issue_text: str) -> InfrastructureIntent:
-    if "database" in issue_text.lower() or "rds" in issue_text.lower():
+    if "apply" in issue_text.lower():
         return InfrastructureIntent(
             raw_request=issue_text,
-            supported_intent=SupportedIntent.UNSUPPORTED,
+            resource_type="",
             environment_scope=EnvironmentScope.PROD_ONLY,
             environments=["prod"],
             region="us-west-2",
             blocked=True,
-            block_reason="Unsupported request family for MVP.",
+            block_reason="Issue requests terraform apply directly.",
         )
     return InfrastructureIntent(
         raw_request=issue_text,
-        supported_intent=SupportedIntent.EKS_FARGATE,
+        resource_type="eks_fargate",
         environment_scope=EnvironmentScope.NON_PROD_ONLY,
         environments=["non-prod"],
         region="us-west-2",
@@ -45,20 +45,20 @@ def test_graph_compiles_and_routes_supported_issue_to_generated_pr_ready(tmp_pat
     )
 
     assert result["status"] == "pr_ready"
-    assert result["intent"].supported_intent.value == "eks_fargate"
+    assert result["intent"].resource_type == "eks_fargate"
     assert result["change_plan"].stack_name == "eks-fargate"
     assert result["validation"].status.value in {"passed", "partial"}
     assert "modules/eks-fargate/main.tf" in result["generated_files"]
     assert result["pr_body"] is not None
 
 
-def test_graph_blocks_unsupported_issue_before_pr_writer():
+def test_graph_blocks_apply_request_before_pr_writer():
     graph = _graph()
     result = graph.invoke(
         IaCSmithState(
             issue_number=13,
-            issue_title="Create database",
-            issue_body="Create a production RDS PostgreSQL database open to the internet.",
+            issue_title="Apply terraform",
+            issue_body="Please apply terraform now.",
             issue_url="https://github.com/time4116/iac-smith/issues/13",
             labels=["iac-smith"],
             target_repo="time4116/iac-smith-demo-infra",
@@ -66,7 +66,7 @@ def test_graph_blocks_unsupported_issue_before_pr_writer():
     )
 
     assert result["status"] == "blocked"
-    assert result["pr_body"] is None
+    assert result.get("pr_body") is None
     assert result["intent"].blocked is True
 
 

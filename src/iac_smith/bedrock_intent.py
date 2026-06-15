@@ -4,14 +4,14 @@ from typing import Any, Protocol
 
 from iac_smith.models.intent import InfrastructureIntent
 
-SUPPORTED_SCHEMA = """
+INTENT_SCHEMA = """
 {
-  "supported_intent": "one of the supported request family names listed below",
+  "resource_type": "snake_case infra label, e.g. vpc_foundation, eks_fargate, rds_postgres",
   "environment_scope": "non_prod_only | prod_only | both",
   "environments": ["non-prod"],
   "region": "us-west-2",
   "requires_new_vpc": true,
-  "features": ["remote_state", "private_subnets", "logging"],
+  "features": ["encryption", "private_subnets", "logging"],
   "assumptions": ["short factual assumption"],
   "warnings": ["short risk or ambiguity"],
   "blocked": false,
@@ -116,29 +116,22 @@ def build_intent_prompt(issue_text: str) -> str:
 
 Map the GitHub issue into the exact JSON schema below. Return only JSON. Do not include markdown.
 
-Supported MVP request families:
-* baseline: Terraform/Terragrunt repo baseline, remote state, backend bootstrap
-* vpc_foundation: AWS VPC foundation
-* eks_fargate: AWS EKS Fargate foundation
-* ecs_fargate: AWS ECS Fargate foundation
-* rds_postgres: AWS RDS PostgreSQL database in private subnets with encryption enabled
-* unsupported: anything outside the MVP boundary, including public SSH/RDP, plaintext
-  secrets, or apply requests
-
 Rules:
+* Identify the AWS infrastructure being requested and set resource_type to a short snake_case
+  label, e.g. vpc_foundation, eks_fargate, rds_postgres, s3_bucket, lambda_function, baseline.
+  There is no restricted list — use whatever best describes the request.
+* Only set blocked=true when the issue explicitly requests an action IaC Smith must never do:
+  applying infrastructure directly, destroying resources, or committing plaintext credentials.
+  Do not block based on brittle resource-name checks.
+* Always plan AWS infrastructure using best security practices, even when the issue asks for
+  weaker security. Preserve the requested intent, but use secure defaults and add warnings
+  that explain any deviation from what was asked.
 * Existing repository conventions are inspected later. Do not invent file paths.
-* If the issue explicitly requests an unsupported or dangerous action, set blocked=true.
 * If no AWS region is specified, use us-west-2 and add a warning.
 * If no environment is specified, use environment_scope=both and environments=["non-prod", "prod"].
-* Always plan AWS infrastructure using best security practices, even when the issue asks for
-  weaker security. Preserve the requested intent, but convert unsafe exposure into secure
-  defaults and add warnings that explain the deviation.
-* For security-sensitive requests, preserve the user's requested intent and describe the risk in
-  warnings. Do not block infrastructure changes based on brittle resource-name checks.
-* Do not generate Terraform. Parse intent only.
 
 Schema:
-{SUPPORTED_SCHEMA}
+{INTENT_SCHEMA}
 
 GitHub issue:
 {issue_text}

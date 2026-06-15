@@ -1,4 +1,4 @@
-from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent, SupportedIntent
+from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent
 from iac_smith.models.validation import ValidationResult, ValidationStatus
 from iac_smith.nodes.change_planner import plan_changes
 from iac_smith.nodes.pr_writer import branch_name_for_issue, build_pr_body
@@ -14,7 +14,7 @@ def test_branch_name_for_issue_is_stable_and_slugged():
 def test_pr_body_contains_required_sections_and_no_apply_confirmation():
     intent = InfrastructureIntent(
         raw_request="Create non-prod EKS Fargate",
-        supported_intent=SupportedIntent.EKS_FARGATE,
+        resource_type="eks_fargate",
         environment_scope=EnvironmentScope.NON_PROD_ONLY,
         environments=["non-prod"],
         region="us-west-2",

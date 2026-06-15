@@ -42,9 +42,10 @@ def make_intent_parser(intent_parser_fn: IntentParser):
 
 
 def ruleset_loader(state: IaCSmithState) -> IaCSmithState:
+    rules_dir = Path(state.get("target_repo_path") or ".") / "rules"
     return {
         **state,
-        "ruleset": load_ruleset(Path("rules")),
+        "ruleset": load_ruleset(rules_dir if rules_dir.exists() else None),
         "status": "rules_loaded",
     }
 

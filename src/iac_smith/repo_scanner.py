@@ -4,17 +4,6 @@ from pathlib import Path
 from iac_smith.models.repo_patterns import RepoPatterns
 
 MODULE_SOURCE_RE = re.compile(r"source\s*=\s*\"([^\"]+)\"")
-KNOWN_ENV_NAMES = {
-    "dev",
-    "development",
-    "test",
-    "stage",
-    "staging",
-    "non-prod",
-    "nonprod",
-    "prod",
-    "production",
-}
 
 
 def _read_text(path: Path) -> str:
@@ -25,40 +14,54 @@ def _read_text(path: Path) -> str:
 
 
 def _discover_environments(root: Path) -> list[str]:
+    """Discover environment directories under live/ heuristically.
+
+    Any immediate subdirectory of live/ that either contains a terragrunt.hcl
+    file or contains further subdirectories (i.e. isn't a leaf stack dir) is
+    treated as an environment. This avoids the old hard-coded name allowlist.
+    """
     live = root / "live"
     if not live.exists():
         return []
     envs = []
-    for child in live.iterdir():
-        is_env_dir = child.is_dir() and (
-            (child / "terragrunt.hcl").exists() or child.name in KNOWN_ENV_NAMES
-        )
-        if is_env_dir:
+    for child in sorted(live.iterdir()):
+        if not child.is_dir():
+            continue
+        has_hcl = (child / "terragrunt.hcl").exists()
+        has_subdirs = any(sub.is_dir() for sub in child.iterdir())
+        if has_hcl or has_subdirs:
             envs.append(child.name)
-    return sorted(set(envs))
+    return envs
 
 
 def _discover_module_sources(root: Path) -> list[str]:
     sources: set[str] = set()
     for path in root.rglob("*.tf"):
-        text = _read_text(path)
-        sources.update(MODULE_SOURCE_RE.findall(text))
+        sources.update(MODULE_SOURCE_RE.findall(_read_text(path)))
     for path in root.rglob("terragrunt.hcl"):
-        text = _read_text(path)
-        sources.update(MODULE_SOURCE_RE.findall(text))
+        sources.update(MODULE_SOURCE_RE.findall(_read_text(path)))
     return sorted(sources)
 
 
 def _discover_existing_stack_paths(root: Path) -> list[str]:
-    paths = []
+    """Return relative paths of stack directories already in the repo.
+
+    Includes both live/{env}/{stack} paths and modules/{stack} paths so the
+    change planner can skip regenerating module scaffolds that already exist.
+    """
+    paths: set[str] = set()
     live = root / "live"
-    if not live.exists():
-        return paths
-    for path in live.rglob("terragrunt.hcl"):
-        rel = path.relative_to(root).as_posix()
-        if rel != "live/terragrunt.hcl" and path.parent != live:
-            paths.append(path.parent.relative_to(root).as_posix())
-    return sorted(set(paths))
+    if live.exists():
+        for path in live.rglob("terragrunt.hcl"):
+            rel = path.relative_to(root).as_posix()
+            if rel != "live/terragrunt.hcl" and path.parent != live:
+                paths.add(path.parent.relative_to(root).as_posix())
+    modules = root / "modules"
+    if modules.exists():
+        for child in modules.iterdir():
+            if child.is_dir():
+                paths.add(child.relative_to(root).as_posix())
+    return sorted(paths)
 
 
 def scan_repo_patterns(root: str | Path) -> RepoPatterns:
