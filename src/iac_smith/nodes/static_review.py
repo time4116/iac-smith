@@ -28,6 +28,29 @@ _MODULE_DECL_RE = re.compile(r'\bmodule\s+"([^"]+)"')
 _MODULE_REF_RE = re.compile(r"\bmodule\.([A-Za-z0-9_-]+)\.")
 
 
+def _has_main_or_master_branch_filter(content: str) -> bool:
+    lines = content.splitlines()
+    for index, line in enumerate(lines):
+        match = re.match(r"^(\s*)branches\s*:\s*(.*)$", line)
+        if not match:
+            continue
+
+        branch_indent = len(match.group(1))
+        inline_value = match.group(2)
+        if re.search(r"\b(main|master)\b", inline_value):
+            return True
+
+        for child in lines[index + 1 :]:
+            if not child.strip():
+                continue
+            child_indent = len(child) - len(child.lstrip())
+            if child_indent <= branch_indent:
+                break
+            if re.match(r"^\s*-\s*(main|master)\s*(?:#.*)?$", child):
+                return True
+    return False
+
+
 def _apply_workflow_errors(path: str, content: str) -> list[str]:
     if path != ".github/workflows/terraform-apply.yml":
         return []
@@ -37,10 +60,7 @@ def _apply_workflow_errors(path: str, content: str) -> list[str]:
         errors.append(
             f"Terraform apply workflow `{path}` must not run on pull requests or feature branches."
         )
-    has_main_or_master_filter = re.search(
-        r"branches\s*:\s*\[[^\]]*\bmain\b[^\]]*\]", content
-    ) or re.search(r"branches\s*:\s*\[[^\]]*\bmaster\b[^\]]*\]", content)
-    if not has_main_or_master_filter:
+    if not _has_main_or_master_branch_filter(content):
         errors.append(
             f"Terraform apply workflow `{path}` push trigger must be limited to main or master."
         )

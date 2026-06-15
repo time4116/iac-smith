@@ -172,3 +172,33 @@ jobs: {}
 
     assert result.status.value == "failed"
     assert any("main or master" in error for error in result.errors)
+
+
+def test_static_review_allows_apply_workflow_with_multiline_main_branch_filter():
+    workflow = """
+name: Terraform Apply
+on:
+  push:
+    branches:
+      - main
+jobs: {}
+"""
+
+    result = static_review_generated_files({".github/workflows/terraform-apply.yml": workflow})
+
+    assert result.errors == []
+
+
+def test_static_review_allows_apply_workflow_with_multiline_master_branch_filter():
+    workflow = """
+name: Terraform Apply
+on:
+  push:
+    branches:
+      - master
+jobs: {}
+"""
+
+    result = static_review_generated_files({".github/workflows/terraform-apply.yml": workflow})
+
+    assert result.errors == []
