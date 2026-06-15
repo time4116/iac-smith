@@ -4,9 +4,9 @@ IaC Smith is an AWS-focused agentic IaC workflow that turns freeform GitHub issu
 
 ## Current status
 
-IaC Smith's issue-to-PR MVP path is implemented for narrow AWS Terraform/Terragrunt request families. It can fetch a labeled GitHub issue, use Bedrock to parse infrastructure intent, scan the target repository for existing patterns and representative Terraform snippets, dynamically generate bounded Terraform/Terragrunt files, run static guardrails, commit to a target-repo branch, and open a pull request.
+IaC Smith's issue-to-PR MVP path is implemented for narrow AWS Terraform/Terragrunt request families. It can fetch a labeled GitHub issue, use Bedrock to parse infrastructure intent, scan the target repository for existing patterns and representative Terraform snippets, dynamically generate bounded Terraform/Terragrunt files, run per-file static guardrails with one bounded Bedrock repair attempt, commit to a target-repo branch, and open a pull request.
 
-Implemented pieces include the Python project structure, LangGraph routing, ruleset loading, mandatory Bedrock intent parsing, target repo pattern scanning, change planning, Bedrock-backed Terraform/Terragrunt generation, static review guardrails, PR summary generation, target repo branch/commit/PR creation, hardened GitHub Actions, setup documentation, and regression tests.
+Implemented pieces include the Python project structure, LangGraph routing, ruleset loading, mandatory Bedrock intent parsing, target repo pattern scanning, change planning, Bedrock-backed Terraform/Terragrunt generation, fail-fast static review and repair guardrails, PR summary generation, target repo branch/commit/PR creation, hardened GitHub Actions, setup documentation, and regression tests.
 
 `BEDROCK_MODEL_ID` is supplied by GitHub Actions secret or environment configuration. IaC Smith does not hardcode AWS account IDs, account-specific Bedrock ARNs, or model IDs.
 

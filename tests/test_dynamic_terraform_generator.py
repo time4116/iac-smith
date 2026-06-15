@@ -24,8 +24,14 @@ class FakeBody:
 
 
 class FakeBedrockRuntime:
-    def __init__(self, files: dict[str, str], failures_before_success: int = 0):
+    def __init__(
+        self,
+        files: dict[str, str],
+        failures_before_success: int = 0,
+        repairs: dict[str, str] | None = None,
+    ):
         self.files = files
+        self.repairs = repairs or {}
         self.failures_before_success = failures_before_success
         self.calls = []
 
@@ -40,6 +46,12 @@ class FakeBedrockRuntime:
         prompt = body["messages"][0]["content"]
         context = json.loads(prompt.split("Generation context JSON:\n", 1)[1])
         requested_paths = context["files_to_generate"]
+        path = requested_paths[0]
+        content = (
+            self.repairs.get(path, self.files[path])
+            if "Static review failures:" in prompt
+            else self.files[path]
+        )
         return {
             "body": FakeBody(
                 json.dumps(
@@ -49,8 +61,8 @@ class FakeBedrockRuntime:
                                 "type": "text",
                                 "text": json.dumps(
                                     {
-                                        "path": requested_paths[0],
-                                        "content": self.files[requested_paths[0]],
+                                        "path": path,
+                                        "content": content,
                                         "assumptions": ["Used repository rules."],
                                         "warnings": [],
                                     }
@@ -326,6 +338,77 @@ def test_bedrock_terraform_generator_retries_transient_read_timeouts():
 
     assert result == files
     assert len(runtime.calls) == len(files) + 1
+
+
+def test_bedrock_terraform_generator_repairs_file_after_static_review_failure():
+    bad_terragrunt = 'remote_state { config = { key = "fixed.tfstate" } }\n'
+    fixed_terragrunt = (
+        'remote_state { config = { key = "${path_relative_to_include()}/terraform.tfstate" } }\n'
+    )
+    files = {
+        "live/non-prod/ecs-fargate/terragrunt.hcl": bad_terragrunt,
+        "modules/ecs-fargate/main.tf": (
+            'resource "aws_ecs_cluster" "this" { name = var.name_prefix }\n'
+        ),
+        "modules/ecs-fargate/variables.tf": 'variable "name_prefix" { type = string }\n',
+        "modules/ecs-fargate/outputs.tf": (
+            'output "cluster_name" { value = aws_ecs_cluster.this.name }\n'
+        ),
+    }
+    runtime = FakeBedrockRuntime(
+        files,
+        repairs={"live/non-prod/ecs-fargate/terragrunt.hcl": fixed_terragrunt},
+    )
+    generator = BedrockTerraformGenerator(
+        model_id="anthropic.test-model",
+        bedrock_runtime=runtime,
+    )
+
+    result = generator.generate_files(
+        intent=_intent(),
+        change_plan=_plan(),
+        repo_patterns=RepoPatterns(),
+        ruleset=_ruleset(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+
+    assert result["live/non-prod/ecs-fargate/terragrunt.hcl"] == fixed_terragrunt
+    assert len(runtime.calls) == len(files) + 1
+    repair_body = json.loads(runtime.calls[1]["body"])
+    assert "Static review failures:" in repair_body["messages"][0]["content"]
+    assert "path_relative_to_include" in repair_body["messages"][0]["content"]
+
+
+def test_bedrock_terraform_generator_stops_after_unrepaired_static_review_failure():
+    files = {
+        "live/non-prod/ecs-fargate/terragrunt.hcl": (
+            'remote_state { config = { key = "fixed.tfstate" } }\n'
+        ),
+        "modules/ecs-fargate/main.tf": (
+            'resource "aws_ecs_cluster" "this" { name = var.name_prefix }\n'
+        ),
+        "modules/ecs-fargate/variables.tf": 'variable "name_prefix" { type = string }\n',
+        "modules/ecs-fargate/outputs.tf": (
+            'output "cluster_name" { value = aws_ecs_cluster.this.name }\n'
+        ),
+    }
+    runtime = FakeBedrockRuntime(files)
+    generator = BedrockTerraformGenerator(
+        model_id="anthropic.test-model",
+        bedrock_runtime=runtime,
+        max_repair_attempts=1,
+    )
+
+    with pytest.raises(ValueError, match="failed static review"):
+        generator.generate_files(
+            intent=_intent(),
+            change_plan=_plan(),
+            repo_patterns=RepoPatterns(),
+            ruleset=_ruleset(),
+            target_repo="time4116/iac-smith-demo-infra",
+        )
+
+    assert len(runtime.calls) == 2
 
 
 def test_bedrock_terraform_generator_uses_extended_bedrock_timeout(monkeypatch):
