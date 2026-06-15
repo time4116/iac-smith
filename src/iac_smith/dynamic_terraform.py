@@ -20,6 +20,13 @@ class GeneratedTerraform(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class GeneratedTerraformFile(BaseModel):
+    path: str
+    content: str
+    assumptions: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 def _extract_text_from_bedrock_payload(payload: dict[str, Any]) -> str:
     if isinstance(payload.get("content"), list):
         parts = []
@@ -86,7 +93,7 @@ def build_generation_prompt(
         "rules": _rules_payload(ruleset),
         "files_to_generate": change_plan.files_to_generate,
     }
-    shape = '{"files": {"path": "content"}, "assumptions": [], "warnings": []}'
+    shape = '{"path": "path/to/file.tf", "content": "file body", "assumptions": [], "warnings": []}'
     return f"""You are IaC Smith's Terraform/Terragrunt generator.
 
 Generate reviewable Terraform and Terragrunt file contents from structured issue
@@ -109,6 +116,9 @@ Non-negotiable rules:
 * Generate complete, syntactically valid file bodies for each requested path.
   Do not use placeholder comments instead of Terraform resources when the issue
   asks for concrete infrastructure.
+* When files_to_generate contains one path, return exactly that one file path
+  in files. Use the full change_plan and repo_patterns as context, but do not
+  include sibling planned files in the response.
 
 Generation context JSON:
 {json.dumps(context, indent=2)}
@@ -129,6 +139,43 @@ def parse_generation_payload(raw_payload: str, allowed_paths: list[str]) -> Gene
     if missing:
         raise ValueError(f"Terraform generation is missing planned file `{missing[0]}`.")
     return generated
+
+
+def parse_single_file_generation_payload(
+    raw_payload: str, *, expected_path: str
+) -> GeneratedTerraformFile:
+    payload = _extract_json_object(raw_payload)
+    text = _extract_text_from_bedrock_payload(payload)
+    generated = GeneratedTerraformFile.model_validate(_extract_json_object(text))
+    if generated.path != expected_path:
+        raise ValueError(f"Terraform generation returned unplanned file path `{generated.path}`.")
+    if generated.path.startswith("/") or ".." in generated.path.split("/"):
+        raise ValueError(f"Terraform generation returned unsafe file path `{generated.path}`.")
+    return generated
+
+
+TERRAFORM_FILE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "path": {"type": "string", "description": "The single planned file path."},
+        "content": {
+            "type": "string",
+            "description": "Complete Terraform or Terragrunt file content.",
+        },
+        "assumptions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Short factual assumptions used while generating this file.",
+        },
+        "warnings": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Short risks, conflicts, or ambiguities for review.",
+        },
+    },
+    "required": ["path", "content", "assumptions", "warnings"],
+    "additionalProperties": False,
+}
 
 
 class BedrockTerraformGenerator:
@@ -188,18 +235,20 @@ class BedrockTerraformGenerator:
         assert last_error is not None
         raise last_error
 
-    def generate_files(
+    def _generate_planned_file(
         self,
         *,
+        path: str,
         intent: InfrastructureIntent,
         change_plan: ChangePlan,
         repo_patterns: RepoPatterns,
         ruleset: Ruleset | None,
         target_repo: str,
-    ) -> dict[str, str]:
+    ) -> str:
+        single_file_plan = change_plan.model_copy(update={"files_to_generate": [path]})
         prompt = build_generation_prompt(
             intent=intent,
-            change_plan=change_plan,
+            change_plan=single_file_plan,
             repo_patterns=repo_patterns,
             ruleset=ruleset,
             target_repo=target_repo,
@@ -214,11 +263,36 @@ class BedrockTerraformGenerator:
                     "max_tokens": 8000,
                     "temperature": 0,
                     "messages": [{"role": "user", "content": prompt}],
+                    "output_config": {
+                        "format": {
+                            "type": "json_schema",
+                            "schema": TERRAFORM_FILE_SCHEMA,
+                        }
+                    },
                 }
             ),
         )
         raw_body = response["body"].read().decode("utf-8")
-        return parse_generation_payload(
-            raw_body,
-            allowed_paths=change_plan.files_to_generate,
-        ).files
+        generated = parse_single_file_generation_payload(raw_body, expected_path=path)
+        return generated.content
+
+    def generate_files(
+        self,
+        *,
+        intent: InfrastructureIntent,
+        change_plan: ChangePlan,
+        repo_patterns: RepoPatterns,
+        ruleset: Ruleset | None,
+        target_repo: str,
+    ) -> dict[str, str]:
+        return {
+            path: self._generate_planned_file(
+                path=path,
+                intent=intent,
+                change_plan=change_plan,
+                repo_patterns=repo_patterns,
+                ruleset=ruleset,
+                target_repo=target_repo,
+            )
+            for path in change_plan.files_to_generate
+        }

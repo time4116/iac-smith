@@ -7,6 +7,7 @@ from iac_smith.dynamic_terraform import (
     BedrockTerraformGenerator,
     build_generation_prompt,
     parse_generation_payload,
+    parse_single_file_generation_payload,
 )
 from iac_smith.models.change_plan import BackendResource, ChangePlan
 from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent
@@ -32,9 +33,13 @@ class FakeBedrockRuntime:
         self.calls.append(kwargs)
         if len(self.calls) <= self.failures_before_success:
             raise botocore.exceptions.ReadTimeoutError(
-                endpoint_url="https://bedrock-runtime.us-west-2.amazonaws.com/model/test/invoke",
+                endpoint_url="https://example.invalid/model/test/invoke",
                 error="timed out",
             )
+        body = json.loads(kwargs["body"])
+        prompt = body["messages"][0]["content"]
+        context = json.loads(prompt.split("Generation context JSON:\n", 1)[1])
+        requested_paths = context["files_to_generate"]
         return {
             "body": FakeBody(
                 json.dumps(
@@ -44,7 +49,8 @@ class FakeBedrockRuntime:
                                 "type": "text",
                                 "text": json.dumps(
                                     {
-                                        "files": self.files,
+                                        "path": requested_paths[0],
+                                        "content": self.files[requested_paths[0]],
                                         "assumptions": ["Used repository rules."],
                                         "warnings": [],
                                     }
@@ -197,6 +203,54 @@ def test_parse_generation_payload_rejects_missing_planned_files():
         )
 
 
+def test_parse_single_file_generation_payload_accepts_structured_output_shape():
+    payload = json.dumps(
+        {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "path": "modules/example/main.tf",
+                            "content": 'resource "aws_s3_bucket" "this" {}\n',
+                            "assumptions": [],
+                            "warnings": [],
+                        }
+                    ),
+                }
+            ]
+        }
+    )
+
+    result = parse_single_file_generation_payload(payload, expected_path="modules/example/main.tf")
+
+    assert result.path == "modules/example/main.tf"
+    assert result.content == 'resource "aws_s3_bucket" "this" {}\n'
+
+
+def test_parse_single_file_generation_payload_rejects_wrong_path():
+    payload = json.dumps(
+        {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "path": "modules/wrong/main.tf",
+                            "content": "bad",
+                            "assumptions": [],
+                            "warnings": [],
+                        }
+                    ),
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(ValueError, match="unplanned file path"):
+        parse_single_file_generation_payload(payload, expected_path="modules/example/main.tf")
+
+
 def test_bedrock_terraform_generator_returns_model_generated_files_without_renderer_map():
     files = {
         "modules/ecs-fargate/main.tf": (
@@ -225,10 +279,22 @@ def test_bedrock_terraform_generator_returns_model_generated_files_without_rende
     )
 
     assert result == files
+    assert len(runtime.calls) == len(files)
     assert runtime.calls[0]["modelId"] == "anthropic.test-model"
     body = json.loads(runtime.calls[0]["body"])
     assert body["temperature"] == 0
+    assert body["output_config"]["format"]["type"] == "json_schema"
+    assert body["output_config"]["format"]["schema"]["required"] == [
+        "path",
+        "content",
+        "assumptions",
+        "warnings",
+    ]
     assert "workload-modules-depend-on-foundation" in body["messages"][0]["content"]
+    first_context = json.loads(
+        body["messages"][0]["content"].split("Generation context JSON:\n", 1)[1]
+    )
+    assert first_context["files_to_generate"] == ["live/non-prod/ecs-fargate/terragrunt.hcl"]
 
 
 def test_bedrock_terraform_generator_retries_transient_read_timeouts():
@@ -259,7 +325,7 @@ def test_bedrock_terraform_generator_retries_transient_read_timeouts():
     )
 
     assert result == files
-    assert len(runtime.calls) == 2
+    assert len(runtime.calls) == len(files) + 1
 
 
 def test_bedrock_terraform_generator_uses_extended_bedrock_timeout(monkeypatch):
