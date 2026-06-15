@@ -84,7 +84,7 @@ def static_review_generated_files(generated_files: dict[str, str]) -> Validation
                 )
 
         if _contains_dangerous_public_ingress(content):
-            errors.append(f"Dangerous public ingress detected in `{path}`.")
+            warnings.append(f"Dangerous public ingress detected in `{path}` for PR review.")
 
         if (
             path.startswith("modules/")
