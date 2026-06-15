@@ -121,6 +121,10 @@ def _run(command: list[str], cwd: Path | None = None) -> None:
     subprocess.run(command, cwd=cwd, check=True)
 
 
+def _log(message: str) -> None:
+    print(message, flush=True)
+
+
 def clone_target_repo(target_repo: str, token: str, destination: Path) -> Path:
     repo_path = destination / target_repo.split("/")[-1]
     if repo_path.exists():
@@ -165,15 +169,21 @@ def run_iac_smith(
     file_generator_fn: FileGenerator | None = None,
 ) -> IaCSmithRunResult:
     target_repo = validate_allowed_target_repo(env)
+    _log(f"IaC Smith: target repo allowed: {target_repo}")
     target_token = env.get("IAC_SMITH_TARGET_REPO_TOKEN") or env.get("GITHUB_TOKEN") or ""
     if env.get("IAC_SMITH_TARGET_REPO_PATH"):
         repo_path = Path(env["IAC_SMITH_TARGET_REPO_PATH"])
     else:
+        _log(f"IaC Smith: cloning target repo {target_repo}.")
         repo_path = _target_repo_path(env, target_repo, target_token)
+    _log(f"IaC Smith: using target repo path {repo_path}.")
 
     state = build_initial_state(env, issue_client=issue_client)
+    _log(f"IaC Smith: fetched issue #{state.get('issue_number')}: {state.get('issue_title')}")
     state["target_repo_path"] = str(repo_path)
-    selected_file_generator = file_generator_fn or BedrockTerraformGenerator().generate_files
+    selected_file_generator = (
+        file_generator_fn or BedrockTerraformGenerator(logger=_log).generate_files
+    )
     graph = (
         build_graph(
             intent_parser_fn=intent_parser_fn,
@@ -182,7 +192,9 @@ def run_iac_smith(
         if intent_parser_fn
         else build_graph(file_generator_fn=selected_file_generator)
     )
+    _log("IaC Smith: running graph.")
     result = graph.invoke(state)
+    _log(f"IaC Smith: graph finished with status {result.get('status')}.")
 
     if result.get("status") in {"ignored", "blocked"}:
         validation = result.get("validation")
@@ -193,18 +205,24 @@ def run_iac_smith(
         )
 
     branch = branch_name_for_issue(result["issue_number"], result["issue_title"])
+    _log(f"IaC Smith: creating branch {branch}.")
     create_branch(repo_path, branch)
+    _log(f"IaC Smith: writing {len(result['generated_files'])} generated file(s).")
     apply_generated_files(repo_path, result["generated_files"])
     commit_message = f"feat: generate IaC for issue #{result['issue_number']}"
+    _log("IaC Smith: committing generated files.")
     committed = commit_generated_files(repo_path, commit_message)
     if not committed:
+        _log("IaC Smith: no generated file changes to commit.")
         return IaCSmithRunResult(status="no_changes", branch=branch)
 
     if env.get("IAC_SMITH_SKIP_PUSH") != "1":
         if not target_token:
             raise SystemExit("IAC_SMITH_TARGET_REPO_TOKEN or GITHUB_TOKEN must be set for push.")
+        _log(f"IaC Smith: pushing branch {branch}.")
         push_branch(repo_path, branch, target_token)
 
+    _log("IaC Smith: opening pull request.")
     pr = pr_client.create_pull_request(
         repo=target_repo,
         title=f"feat: generate IaC for issue #{result['issue_number']}",
