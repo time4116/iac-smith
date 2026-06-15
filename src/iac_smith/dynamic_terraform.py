@@ -20,6 +20,13 @@ class GeneratedTerraform(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class GeneratedTerraformFile(BaseModel):
+    path: str
+    content: str
+    assumptions: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 def _extract_text_from_bedrock_payload(payload: dict[str, Any]) -> str:
     if isinstance(payload.get("content"), list):
         parts = []
@@ -86,7 +93,7 @@ def build_generation_prompt(
         "rules": _rules_payload(ruleset),
         "files_to_generate": change_plan.files_to_generate,
     }
-    shape = '{"files": {"path": "content"}, "assumptions": [], "warnings": []}'
+    shape = '{"path": "path/to/file.tf", "content": "file body", "assumptions": [], "warnings": []}'
     return f"""You are IaC Smith's Terraform/Terragrunt generator.
 
 Generate reviewable Terraform and Terragrunt file contents from structured issue
@@ -132,6 +139,43 @@ def parse_generation_payload(raw_payload: str, allowed_paths: list[str]) -> Gene
     if missing:
         raise ValueError(f"Terraform generation is missing planned file `{missing[0]}`.")
     return generated
+
+
+def parse_single_file_generation_payload(
+    raw_payload: str, *, expected_path: str
+) -> GeneratedTerraformFile:
+    payload = _extract_json_object(raw_payload)
+    text = _extract_text_from_bedrock_payload(payload)
+    generated = GeneratedTerraformFile.model_validate(_extract_json_object(text))
+    if generated.path != expected_path:
+        raise ValueError(f"Terraform generation returned unplanned file path `{generated.path}`.")
+    if generated.path.startswith("/") or ".." in generated.path.split("/"):
+        raise ValueError(f"Terraform generation returned unsafe file path `{generated.path}`.")
+    return generated
+
+
+TERRAFORM_FILE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "path": {"type": "string", "description": "The single planned file path."},
+        "content": {
+            "type": "string",
+            "description": "Complete Terraform or Terragrunt file content.",
+        },
+        "assumptions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Short factual assumptions used while generating this file.",
+        },
+        "warnings": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Short risks, conflicts, or ambiguities for review.",
+        },
+    },
+    "required": ["path", "content", "assumptions", "warnings"],
+    "additionalProperties": False,
+}
 
 
 class BedrockTerraformGenerator:
@@ -219,12 +263,18 @@ class BedrockTerraformGenerator:
                     "max_tokens": 8000,
                     "temperature": 0,
                     "messages": [{"role": "user", "content": prompt}],
+                    "output_config": {
+                        "format": {
+                            "type": "json_schema",
+                            "schema": TERRAFORM_FILE_SCHEMA,
+                        }
+                    },
                 }
             ),
         )
         raw_body = response["body"].read().decode("utf-8")
-        generated = parse_generation_payload(raw_body, allowed_paths=[path])
-        return generated.files[path]
+        generated = parse_single_file_generation_payload(raw_body, expected_path=path)
+        return generated.content
 
     def generate_files(
         self,

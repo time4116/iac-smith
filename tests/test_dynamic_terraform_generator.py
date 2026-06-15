@@ -7,6 +7,7 @@ from iac_smith.dynamic_terraform import (
     BedrockTerraformGenerator,
     build_generation_prompt,
     parse_generation_payload,
+    parse_single_file_generation_payload,
 )
 from iac_smith.models.change_plan import BackendResource, ChangePlan
 from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent
@@ -48,9 +49,8 @@ class FakeBedrockRuntime:
                                 "type": "text",
                                 "text": json.dumps(
                                     {
-                                        "files": {
-                                            path: self.files[path] for path in requested_paths
-                                        },
+                                        "path": requested_paths[0],
+                                        "content": self.files[requested_paths[0]],
                                         "assumptions": ["Used repository rules."],
                                         "warnings": [],
                                     }
@@ -203,6 +203,54 @@ def test_parse_generation_payload_rejects_missing_planned_files():
         )
 
 
+def test_parse_single_file_generation_payload_accepts_structured_output_shape():
+    payload = json.dumps(
+        {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "path": "modules/example/main.tf",
+                            "content": 'resource "aws_s3_bucket" "this" {}\n',
+                            "assumptions": [],
+                            "warnings": [],
+                        }
+                    ),
+                }
+            ]
+        }
+    )
+
+    result = parse_single_file_generation_payload(payload, expected_path="modules/example/main.tf")
+
+    assert result.path == "modules/example/main.tf"
+    assert result.content == 'resource "aws_s3_bucket" "this" {}\n'
+
+
+def test_parse_single_file_generation_payload_rejects_wrong_path():
+    payload = json.dumps(
+        {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "path": "modules/wrong/main.tf",
+                            "content": "bad",
+                            "assumptions": [],
+                            "warnings": [],
+                        }
+                    ),
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(ValueError, match="unplanned file path"):
+        parse_single_file_generation_payload(payload, expected_path="modules/example/main.tf")
+
+
 def test_bedrock_terraform_generator_returns_model_generated_files_without_renderer_map():
     files = {
         "modules/ecs-fargate/main.tf": (
@@ -235,6 +283,13 @@ def test_bedrock_terraform_generator_returns_model_generated_files_without_rende
     assert runtime.calls[0]["modelId"] == "anthropic.test-model"
     body = json.loads(runtime.calls[0]["body"])
     assert body["temperature"] == 0
+    assert body["output_config"]["format"]["type"] == "json_schema"
+    assert body["output_config"]["format"]["schema"]["required"] == [
+        "path",
+        "content",
+        "assumptions",
+        "warnings",
+    ]
     assert "workload-modules-depend-on-foundation" in body["messages"][0]["content"]
     first_context = json.loads(
         body["messages"][0]["content"].split("Generation context JSON:\n", 1)[1]
