@@ -37,3 +37,7 @@ def test_scan_existing_terragrunt_repo_detects_envs_module_sources_and_backend(t
     assert patterns.preferred_layout == "terragrunt_live_modules"
     assert "terraform-aws-modules/vpc/aws" in patterns.module_sources
     assert patterns.remote_state_uses_path_relative_to_include is True
+    assert "modules/network/main.tf" in patterns.representative_files
+    assert (
+        "terraform-aws-modules/vpc/aws" in patterns.representative_files["modules/network/main.tf"]
+    )

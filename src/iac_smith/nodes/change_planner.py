@@ -17,8 +17,39 @@ def _backend_resource(env: str) -> BackendResource:
     )
 
 
-def _uses_foundation(stack_name: str) -> bool:
-    return stack_name in {"ecs-fargate"}
+def _is_foundation_stack(stack_name: str) -> bool:
+    return stack_name in {"baseline", "foundation", "vpc", "vpc-foundation"}
+
+
+def _repo_has_foundation(repo_patterns: RepoPatterns | None) -> bool:
+    if not repo_patterns:
+        return False
+    return any(
+        path == "modules/foundation"
+        or path.startswith("modules/foundation/")
+        or path.endswith("/foundation")
+        for path in repo_patterns.existing_stack_paths
+    )
+
+
+def _uses_foundation(
+    stack_name: str,
+    intent: InfrastructureIntent,
+    repo_patterns: RepoPatterns | None,
+) -> bool:
+    if _is_foundation_stack(stack_name):
+        return False
+    return _repo_has_foundation(repo_patterns) or intent.requires_new_vpc
+
+
+def _should_generate_foundation(
+    stack_name: str,
+    intent: InfrastructureIntent,
+    repo_patterns: RepoPatterns | None,
+) -> bool:
+    return _uses_foundation(stack_name, intent, repo_patterns) and not _repo_has_foundation(
+        repo_patterns
+    )
 
 
 def _planned_environments(
@@ -79,7 +110,7 @@ def plan_changes(
                 f"live/{env}/{stack_name}/README.md",
             ]
         )
-        if _uses_foundation(stack_name):
+        if _should_generate_foundation(stack_name, intent, repo_patterns):
             files.extend(
                 [
                     f"live/{env}/foundation/terragrunt.hcl",
@@ -87,7 +118,7 @@ def plan_changes(
                 ]
             )
 
-    if _uses_foundation(stack_name):
+    if _should_generate_foundation(stack_name, intent, repo_patterns):
         files.extend(
             [
                 "modules/foundation/main.tf",
@@ -121,6 +152,13 @@ def plan_changes(
             f"Reusing existing modules/{stack_name} from repository — "
             "new live path wired to existing module"
         )
+    if _uses_foundation(stack_name, intent, repo_patterns):
+        if _repo_has_foundation(repo_patterns):
+            summary.append(
+                "Follow existing foundation module pattern for shared network dependencies"
+            )
+        else:
+            summary.append("Generate foundation module for shared network dependencies")
 
     return ChangePlan(
         stack_name=stack_name,

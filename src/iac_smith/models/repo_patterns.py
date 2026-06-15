@@ -10,4 +10,5 @@ class RepoPatterns(BaseModel):
     preferred_layout: str = "iac_smith_default"
     remote_state_uses_path_relative_to_include: bool = False
     existing_stack_paths: list[str] = Field(default_factory=list)
+    representative_files: dict[str, str] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)

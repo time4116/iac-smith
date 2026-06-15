@@ -40,6 +40,18 @@ def _fake_intent_parser(issue_text: str) -> InfrastructureIntent:
     )
 
 
+def _fake_file_generator(*, intent, change_plan, repo_patterns, ruleset, target_repo):
+    main_tf = 'resource "aws_vpc" "this" { cidr_block = "10.0.0.0/16" }\n'
+    readme = "# vpc-foundation\n<!-- BEGIN_TF_DOCS -->\n<!-- END_TF_DOCS -->\n"
+    return {
+        "modules/vpc-foundation/main.tf": main_tf,
+        "modules/vpc-foundation/variables.tf": "",
+        "modules/vpc-foundation/outputs.tf": "",
+        "modules/vpc-foundation/versions.tf": "",
+        "modules/vpc-foundation/README.md": readme,
+    }
+
+
 def test_run_iac_smith_generates_commits_and_opens_pr(tmp_path: Path):
     subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
@@ -66,6 +78,7 @@ def test_run_iac_smith_generates_commits_and_opens_pr(tmp_path: Path):
         issue_client=FakeIssueClient(),
         pr_client=pr_client,
         intent_parser_fn=_fake_intent_parser,
+        file_generator_fn=_fake_file_generator,
     )
 
     assert result.pr_url == "https://github.com/time4116/iac-smith-demo-infra/pull/9"
