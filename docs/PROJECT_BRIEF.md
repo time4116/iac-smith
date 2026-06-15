@@ -649,9 +649,12 @@ Recommended nodes:
 
 6. **Code Generator**
    - Generate Terraform/Terragrunt files, workflows, READMEs, terraform-docs markers, and supporting docs.
+   - Review each generated file immediately with static guardrails.
+   - Send hard static-review failures back to Bedrock for one bounded repair attempt before generating sibling files.
 
 7. **Static Review**
    - Check generated output against hard rules and preference rules before running shell validation.
+   - Re-run over the complete generated set before PR creation to catch cross-file issues.
 
 8. **Validation Runner**
    - Run formatting, validation, tflint, terraform-docs checks, and plan where possible.
