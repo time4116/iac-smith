@@ -566,15 +566,38 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
-  validate:
+  plan:
+    name: Terragrunt Plan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
-      - name: Terraform format check
-        run: terraform fmt -check -recursive
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_version: "1.9.0"
+
+      - name: Setup Terragrunt
+        uses: autero1/action-terragrunt@671395f8247076a54f0f622956cf988880628469
+        with:
+          terragrunt_version: "0.58.0"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-west-2' }}
+
+      - name: Terragrunt Format Check
+        run: terragrunt hclfmt --terragrunt-check --terragrunt-diff
+
+      - name: Terragrunt Plan
+        run: terragrunt run-all plan --terragrunt-non-interactive
+        working-directory: live
 """
 
 
@@ -591,11 +614,31 @@ permissions:
 
 jobs:
   apply:
+    name: Terragrunt Apply
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-      - name: Apply placeholder
-        run: echo "Configure repository-specific apply workflow before enabling automatic applies."
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_version: "1.9.0"
+
+      - name: Setup Terragrunt
+        uses: autero1/action-terragrunt@671395f8247076a54f0f622956cf988880628469
+        with:
+          terragrunt_version: "0.58.0"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-west-2' }}
+
+      - name: Terragrunt Apply
+        run: terragrunt run-all apply --terragrunt-non-interactive
+        working-directory: live
 """
 
 
@@ -611,6 +654,8 @@ def generate_files(
     files: dict[str, str] = {}
     files["README.md"] = f"# {slug}\n\nInfrastructure managed through Terraform/Terragrunt.\n"
     files["live/terragrunt.hcl"] = _root_terragrunt(intent)
+    files[".github/workflows/terraform-pr-check.yml"] = _workflow_check()
+    files[".github/workflows/terraform-apply.yml"] = _workflow_apply()
 
     for env in change_plan.environments:
         backend = change_plan.backend_resources[env]
