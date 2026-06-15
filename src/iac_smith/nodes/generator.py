@@ -64,11 +64,11 @@ jobs:
               - 'live/non-prod/**'
               - 'modules/**'
       
-      - name: Setup Terraform
+      - name: Setup Terragrunt
         if: steps.filter.outputs.changed == 'true'
-        uses: hashicorp/setup-terraform@v3
+        uses: autero1/action-terragrunt@v3
         with:
-          terraform_version: 1.9.0
+          terragrunt-version: 0.58.0
       
       - name: Setup Terragrunt
         if: steps.filter.outputs.changed == 'true'
