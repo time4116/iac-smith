@@ -13,7 +13,8 @@ Configure these in the controller repo:
 
 * Secret `IAC_SMITH_TARGET_REPO_PAT`: fine-grained PAT scoped only to `time4116/iac-smith-demo-infra` with contents and pull request write permissions.
 * Secret `BEDROCK_MODEL_ID`: Bedrock model ID or inference profile ARN. Do not hardcode this in source.
-* Variable `AWS_BEDROCK_ROLE_ARN`: IAM role ARN used by the controller workflow to call Bedrock.
+* Secret `AWS_ROLE_ARN_NON_PROD`: non-production IAM role ARN used by the controller workflow to call Bedrock and by generated non-prod validation workflows.
+* Secret `AWS_ROLE_ARN_PROD`: production IAM role ARN used by generated production validation workflows.
 * Variable `AWS_REGION`: optional, defaults to `us-west-2`.
 
 The workflow only runs when the `iac-smith` label is applied by `time4116`. If ownership changes, update `.github/workflows/issue-to-pr.yml` deliberately instead of broadening this check to all users.
@@ -48,7 +49,7 @@ Bedrock is required for the MVP intent parser and the default dynamic Terraform/
 
 The controller sends Bedrock structured issue intent, the planned file set, loaded rules, repo-scanned conventions, and bounded representative Terraform/Terragrunt snippets from the target repo. Generation must follow existing repo patterns unless the issue explicitly asks not to, and each generated file is rejected if it returns a path outside the plan. Generated files are statically reviewed immediately; on hard failures, IaC Smith sends the specific review errors back to Bedrock for one bounded repair attempt before moving to sibling files.
 
-Create an IAM role trusted by GitHub Actions OIDC. Restrict the trust policy to this controller repo and the `main` branch.
+Create IAM roles trusted by GitHub Actions OIDC and store their ARNs as `AWS_ROLE_ARN_NON_PROD` and `AWS_ROLE_ARN_PROD`. Restrict the controller trust policy to this controller repo and the `main` branch.
 
 Example trust policy shape:
 
