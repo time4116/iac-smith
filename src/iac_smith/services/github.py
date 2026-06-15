@@ -12,6 +12,12 @@ class GitHubIssue:
     labels: list[str]
 
 
+@dataclass(frozen=True)
+class GitHubPullRequest:
+    number: int
+    url: str
+
+
 class GitHubIssueClient:
     def __init__(self, token: str, http_client: httpx.Client | None = None) -> None:
         if not token:
@@ -39,3 +45,32 @@ class GitHubIssueClient:
             url=payload["html_url"],
             labels=[label["name"] for label in payload.get("labels", [])],
         )
+
+
+class GitHubPullRequestClient:
+    def __init__(self, token: str, http_client: httpx.Client | None = None) -> None:
+        if not token:
+            raise ValueError("GitHub token is required")
+        self._token = token
+        self._http_client = http_client or httpx.Client(timeout=30.0)
+
+    def create_pull_request(
+        self,
+        repo: str,
+        title: str,
+        body: str,
+        head: str,
+        base: str = "main",
+    ) -> GitHubPullRequest:
+        response = self._http_client.post(
+            f"https://api.github.com/repos/{repo}/pulls",
+            headers={
+                "Authorization": f"Bearer {self._token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            json={"title": title, "body": body, "head": head, "base": base},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return GitHubPullRequest(number=int(payload["number"]), url=payload["html_url"])

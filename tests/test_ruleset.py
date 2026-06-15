@@ -5,9 +5,11 @@ import pytest
 from iac_smith.models.rules import RuleSeverity
 from iac_smith.nodes.ruleset_loader import load_ruleset
 
+_RULES_DIR = Path(__file__).resolve().parents[1] / "rules"
+
 
 def test_load_ruleset_normalizes_severity_and_counts_rules():
-    ruleset = load_ruleset(Path("rules"))
+    ruleset = load_ruleset(_RULES_DIR)
 
     assert ruleset.error_count >= 1
     assert ruleset.warning_count >= 1
@@ -17,6 +19,11 @@ def test_load_ruleset_normalizes_severity_and_counts_rules():
         RuleSeverity.WARNING,
         RuleSeverity.PREFERENCE,
     }
+
+
+def test_load_ruleset_returns_empty_when_directory_does_not_exist(tmp_path):
+    ruleset = load_ruleset(tmp_path / "nonexistent")
+    assert ruleset.rules == []
 
 
 def test_load_ruleset_rejects_unknown_severity(tmp_path):

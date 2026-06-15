@@ -1,3 +1,4 @@
+from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent
 from iac_smith.nodes.static_review import static_review_generated_files
 
 
@@ -45,4 +46,70 @@ def test_static_review_passes_safe_minimal_generated_files():
     )
 
     assert result.status.value == "passed"
+    assert result.errors == []
+
+
+def test_static_review_blocks_cidr_block_style_dangerous_ingress():
+    """Old-style security group using cidr_blocks = [...]."""
+    bad_sg = """
+resource "aws_security_group_rule" "bad" {
+  type        = "ingress"
+  from_port   = 22
+  to_port     = 22
+  cidr_blocks = ["0.0.0.0/0"]
+}
+"""
+    result = static_review_generated_files({"modules/example/main.tf": bad_sg})
+    assert result.status.value == "failed"
+    assert any("public ingress" in e for e in result.errors)
+
+
+def test_static_review_blocks_cidr_ipv4_attribute_style_dangerous_ingress():
+    """Newer aws_vpc_security_group_ingress_rule using cidr_ipv4 attribute."""
+    bad_sg = """
+resource "aws_vpc_security_group_ingress_rule" "bad" {
+  from_port   = 5432
+  to_port     = 5432
+  cidr_ipv4   = "0.0.0.0/0"
+  ip_protocol = "tcp"
+}
+"""
+    result = static_review_generated_files({"modules/example/main.tf": bad_sg})
+    assert result.status.value == "failed"
+    assert any("public ingress" in e for e in result.errors)
+
+
+def test_static_review_allows_public_http_https_on_load_balancer():
+    """Port 80/443 open to the internet is expected on ALBs — should not be blocked."""
+    alb_sg = """
+resource "aws_vpc_security_group_ingress_rule" "http" {
+  from_port   = 80
+  to_port     = 80
+  cidr_ipv4   = "0.0.0.0/0"
+  ip_protocol = "tcp"
+}
+"""
+    result = static_review_generated_files({"modules/alb/main.tf": alb_sg})
+    assert "modules/alb/main.tf" not in " ".join(result.errors)
+
+
+# Intent is no longer used inside static_review — this test proves the reviewer
+# checks the *generated files*, not the intent text.
+def test_static_review_checks_generated_files_not_intent_text():
+    intent = InfrastructureIntent(
+        raw_request="Create public RDS Postgres open to the internet",
+        resource_type="rds_postgres",
+        environment_scope=EnvironmentScope.PROD_ONLY,
+        environments=["prod"],
+        region="us-west-2",
+    )
+    safe_tf = """
+module "db" {
+  source              = "terraform-aws-modules/rds/aws"
+  storage_encrypted   = true
+  publicly_accessible = false
+}
+"""
+    result = static_review_generated_files({"modules/rds-postgres/main.tf": safe_tf})
+    _ = intent  # static review doesn't inspect intent
     assert result.errors == []

@@ -1,14 +1,8 @@
 import re
 
 from iac_smith.models.change_plan import BackendResource, ChangePlan
-from iac_smith.models.intent import InfrastructureIntent, SupportedIntent
-
-STACK_NAMES = {
-    SupportedIntent.BASELINE: "baseline",
-    SupportedIntent.VPC_FOUNDATION: "vpc",
-    SupportedIntent.EKS_FARGATE: "eks-fargate",
-    SupportedIntent.ECS_FARGATE: "ecs-fargate",
-}
+from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent
+from iac_smith.models.repo_patterns import RepoPatterns
 
 
 def _repo_slug(target_repo: str) -> str:
@@ -16,18 +10,51 @@ def _repo_slug(target_repo: str) -> str:
     return re.sub(r"[^a-z0-9-]", "-", name.lower()).strip("-")[:40]
 
 
-def plan_changes(intent: InfrastructureIntent, target_repo: str) -> ChangePlan:
-    if intent.blocked or intent.supported_intent == SupportedIntent.UNSUPPORTED:
-        raise ValueError(intent.block_reason or "Unsupported request family")
+def _planned_environments(
+    intent: InfrastructureIntent,
+    repo_patterns: RepoPatterns | None,
+) -> list[str]:
+    if (
+        repo_patterns
+        and repo_patterns.default_environment_names
+        and intent.environment_scope == EnvironmentScope.BOTH
+    ):
+        return repo_patterns.default_environment_names
+    return intent.environments
 
-    stack_name = STACK_NAMES[intent.supported_intent]
+
+def _stack_name(intent: InfrastructureIntent) -> str:
+    """Derive a stable filesystem-safe stack name from the resource_type."""
+    return re.sub(r"[^a-z0-9-]", "-", intent.resource_type.lower().replace("_", "-")).strip("-")
+
+
+def _module_already_exists(stack: str, repo_patterns: RepoPatterns | None) -> bool:
+    """Return True if the target repo already has this stack under modules/."""
+    if not repo_patterns:
+        return False
+    return any(
+        path == f"modules/{stack}" or path.startswith(f"modules/{stack}/")
+        for path in repo_patterns.existing_stack_paths
+    )
+
+
+def plan_changes(
+    intent: InfrastructureIntent,
+    target_repo: str,
+    repo_patterns: RepoPatterns | None = None,
+) -> ChangePlan:
+    if intent.blocked:
+        raise ValueError(intent.block_reason or "Blocked infrastructure request")
+
+    stack_name = _stack_name(intent)
     repo_slug = _repo_slug(target_repo)
+    environments = _planned_environments(intent, repo_patterns)
     backend_resources = {
         env: BackendResource(
             bucket=f"{repo_slug}-{env}-tfstate",
             lock_table=f"{repo_slug}-{env}-tflock",
         )
-        for env in intent.environments
+        for env in environments
     }
 
     files = [
@@ -36,7 +63,7 @@ def plan_changes(intent: InfrastructureIntent, target_repo: str) -> ChangePlan:
         ".github/workflows/terraform-apply.yml",
         "live/terragrunt.hcl",
     ]
-    for env in intent.environments:
+    for env in environments:
         files.extend(
             [
                 f"bootstrap/backend/{env}/main.tf",
@@ -48,7 +75,9 @@ def plan_changes(intent: InfrastructureIntent, target_repo: str) -> ChangePlan:
                 f"live/{env}/{stack_name}/README.md",
             ]
         )
-    if stack_name != "baseline":
+
+    # Only generate module scaffold if the repo doesn't already have one for this stack.
+    if stack_name != "baseline" and not _module_already_exists(stack_name, repo_patterns):
         files.extend(
             [
                 f"modules/{stack_name}/main.tf",
@@ -59,14 +88,22 @@ def plan_changes(intent: InfrastructureIntent, target_repo: str) -> ChangePlan:
             ]
         )
 
+    summary = [
+        f"Generate {stack_name} Terraform/Terragrunt structure",
+        "Generate AWS infrastructure with secure defaults regardless of prompt wording",
+        "Include backend bootstrap for S3 state and DynamoDB locking",
+        "Include target repository PR check and post-merge apply workflows",
+    ]
+    if _module_already_exists(stack_name, repo_patterns):
+        summary.append(
+            f"Reusing existing modules/{stack_name} from repository — "
+            "new live path wired to existing module"
+        )
+
     return ChangePlan(
         stack_name=stack_name,
-        environments=intent.environments,
+        environments=environments,
         files_to_generate=files,
         backend_resources=backend_resources,
-        summary=[
-            f"Generate {stack_name} Terraform/Terragrunt structure",
-            "Include backend bootstrap for S3 state and DynamoDB locking",
-            "Include target repository PR check and post-merge apply workflows",
-        ],
+        summary=summary,
     )

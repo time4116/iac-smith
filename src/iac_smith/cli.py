@@ -1,14 +1,46 @@
 import os
 import re
+import subprocess
+import tempfile
 from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
-from iac_smith.services.github import GitHubIssue, GitHubIssueClient
+from iac_smith.graph import IntentParser, build_graph
+from iac_smith.nodes.pr_writer import branch_name_for_issue
+from iac_smith.services.github import (
+    GitHubIssue,
+    GitHubIssueClient,
+    GitHubPullRequest,
+    GitHubPullRequestClient,
+)
 from iac_smith.state import IaCSmithState
+from iac_smith.workspace import apply_generated_files, commit_generated_files, create_branch
 
 
 class IssueClient(Protocol):
     def fetch_issue(self, repo: str, issue_number: int) -> GitHubIssue: ...
+
+
+class PullRequestClient(Protocol):
+    def create_pull_request(
+        self,
+        repo: str,
+        title: str,
+        body: str,
+        head: str,
+        base: str = "main",
+    ) -> GitHubPullRequest: ...
+
+
+@dataclass(frozen=True)
+class IaCSmithRunResult:
+    status: str
+    branch: str | None = None
+    pr_url: str | None = None
+    pr_number: int | None = None
+    block_reason: str | None = None
 
 
 _REPO_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -70,16 +102,126 @@ def select_github_token(env: Mapping[str, str]) -> str:
     return token
 
 
-def main() -> None:
-    state = build_initial_state(
-        os.environ,
-        issue_client=GitHubIssueClient(token=select_github_token(os.environ)),
+def select_target_repo_token(env: Mapping[str, str]) -> str:
+    token = env.get("IAC_SMITH_TARGET_REPO_TOKEN") or env.get("GITHUB_TOKEN")
+    if not token:
+        raise SystemExit("IAC_SMITH_TARGET_REPO_TOKEN or GITHUB_TOKEN must be set.")
+    return token
+
+
+def _git_auth_header(token: str) -> str:
+    import base64
+
+    encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return f"AUTHORIZATION: basic {encoded}"
+
+
+def _run(command: list[str], cwd: Path | None = None) -> None:
+    subprocess.run(command, cwd=cwd, check=True)
+
+
+def clone_target_repo(target_repo: str, token: str, destination: Path) -> Path:
+    repo_path = destination / target_repo.split("/")[-1]
+    if repo_path.exists():
+        return repo_path
+    _run(
+        [
+            "git",
+            "-c",
+            f"http.https://github.com/.extraheader={_git_auth_header(token)}",
+            "clone",
+            f"https://github.com/{target_repo}.git",
+            str(repo_path),
+        ]
     )
-    message = (
-        "CLI fetched issue #{issue_number} for target repo `{target_repo}`. Full graph execution "
-        "is not implemented yet."
-    ).format(**state)
-    raise SystemExit(message)
+    return repo_path
+
+
+def push_branch(repo_path: Path, branch: str, token: str) -> None:
+    _run(
+        [
+            "git",
+            "-c",
+            f"http.https://github.com/.extraheader={_git_auth_header(token)}",
+            "push",
+            "-u",
+            "origin",
+            branch,
+        ],
+        cwd=repo_path,
+    )
+
+
+def _target_repo_path(env: Mapping[str, str], target_repo: str, token: str) -> Path:
+    explicit_path = env.get("IAC_SMITH_TARGET_REPO_PATH")
+    if explicit_path:
+        return Path(explicit_path)
+    workdir = Path(env.get("IAC_SMITH_WORKDIR") or tempfile.mkdtemp(prefix="iac-smith-"))
+    return clone_target_repo(target_repo, token, workdir)
+
+
+def run_iac_smith(
+    env: Mapping[str, str],
+    issue_client: IssueClient,
+    pr_client: PullRequestClient,
+    intent_parser_fn: IntentParser | None = None,
+) -> IaCSmithRunResult:
+    target_repo = validate_allowed_target_repo(env)
+    target_token = env.get("IAC_SMITH_TARGET_REPO_TOKEN") or env.get("GITHUB_TOKEN") or ""
+    if env.get("IAC_SMITH_TARGET_REPO_PATH"):
+        repo_path = Path(env["IAC_SMITH_TARGET_REPO_PATH"])
+    else:
+        repo_path = _target_repo_path(env, target_repo, target_token)
+
+    state = build_initial_state(env, issue_client=issue_client)
+    state["target_repo_path"] = str(repo_path)
+    graph = build_graph(intent_parser_fn=intent_parser_fn) if intent_parser_fn else build_graph()
+    result = graph.invoke(state)
+
+    if result.get("status") in {"ignored", "blocked"}:
+        validation = result.get("validation")
+        validation_errors = "; ".join(validation.errors) if validation else ""
+        return IaCSmithRunResult(
+            status=result["status"],
+            block_reason=result.get("block_reason") or validation_errors,
+        )
+
+    branch = branch_name_for_issue(result["issue_number"], result["issue_title"])
+    create_branch(repo_path, branch)
+    apply_generated_files(repo_path, result["generated_files"])
+    commit_message = f"feat: generate IaC for issue #{result['issue_number']}"
+    committed = commit_generated_files(repo_path, commit_message)
+    if not committed:
+        return IaCSmithRunResult(status="no_changes", branch=branch)
+
+    if env.get("IAC_SMITH_SKIP_PUSH") != "1":
+        if not target_token:
+            raise SystemExit("IAC_SMITH_TARGET_REPO_TOKEN or GITHUB_TOKEN must be set for push.")
+        push_branch(repo_path, branch, target_token)
+
+    pr = pr_client.create_pull_request(
+        repo=target_repo,
+        title=f"feat: generate IaC for issue #{result['issue_number']}",
+        body=result["pr_body"] or "",
+        head=branch,
+        base="main",
+    )
+    return IaCSmithRunResult(status="pr_created", branch=branch, pr_url=pr.url, pr_number=pr.number)
+
+
+def main() -> None:
+    env = os.environ
+    github_token = select_github_token(env)
+    target_token = select_target_repo_token(env)
+    result = run_iac_smith(
+        env,
+        issue_client=GitHubIssueClient(token=github_token),
+        pr_client=GitHubPullRequestClient(token=target_token),
+    )
+    if result.status in {"ignored", "blocked", "no_changes"}:
+        message = f"IaC Smith finished with status `{result.status}`: {result.block_reason or ''}"
+        raise SystemExit(message)
+    print(f"Created PR: {result.pr_url}")
 
 
 if __name__ == "__main__":

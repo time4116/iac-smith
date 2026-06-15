@@ -37,5 +37,6 @@ jobs:
           IAC_SMITH_GITHUB_TOKEN: ${{ github.token }}
           IAC_SMITH_SOURCE_REPO: ${{ github.repository }}
           IAC_SMITH_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          BEDROCK_MODEL_ID: ${{ secrets.BEDROCK_MODEL_ID }}
           IAC_SMITH_TARGET_REPO: time4116/iac-smith-demo-infra
         run: uv run python -m iac_smith.cli

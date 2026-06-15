@@ -9,19 +9,29 @@ SECRET_PATTERNS = [
     re.compile(r"aws_(access_key_id|secret_access_key)\s*=", re.IGNORECASE),
     re.compile(r"(password|token|secret)\s*=\s*[\"'][^\"']{6,}[\"']", re.IGNORECASE),
 ]
-DANGEROUS_PUBLIC_INGRESS = re.compile(
-    r"(cidr_blocks\s*=\s*\[[^\]]*0\.0\.0\.0/0|ipv6_cidr_blocks\s*=\s*\[[^\]]*::/0)",
+
+# Matches both old-style bracket form and newer aws_vpc_security_group_ingress_rule form.
+_CIDR_BLOCK_V4 = re.compile(
+    r"cidr_blocks\s*=\s*\[[^\]]*0\.0\.0\.0/0"
+    r"|cidr_ipv4\s*=\s*[\"']0\.0\.0\.0/0[\"']",
     re.IGNORECASE | re.DOTALL,
 )
-DANGEROUS_PORTS = {22, 3389, 5432, 3306, 1433, 6379, 27017}
-PORT_RE = re.compile(r"(?:from_port|to_port)\s*=\s*(\d+)")
+_CIDR_BLOCK_V6 = re.compile(
+    r"ipv6_cidr_blocks\s*=\s*\[[^\]]*::/0"
+    r"|cidr_ipv6\s*=\s*[\"']::/0[\"']",
+    re.IGNORECASE | re.DOTALL,
+)
+# Ports where public open ingress is unambiguously dangerous.
+_DANGEROUS_PORTS = {22, 3389, 5432, 3306, 1433, 6379, 27017}
+_PORT_RE = re.compile(r"(?:from_port|to_port)\s*=\s*(\d+)")
 
 
 def _contains_dangerous_public_ingress(content: str) -> bool:
-    if not DANGEROUS_PUBLIC_INGRESS.search(content):
+    has_public_cidr = _CIDR_BLOCK_V4.search(content) or _CIDR_BLOCK_V6.search(content)
+    if not has_public_cidr:
         return False
-    ports = {int(match.group(1)) for match in PORT_RE.finditer(content)}
-    return bool(ports & DANGEROUS_PORTS)
+    ports = {int(m.group(1)) for m in _PORT_RE.finditer(content)}
+    return bool(ports & _DANGEROUS_PORTS)
 
 
 def static_review_generated_files(generated_files: dict[str, str]) -> ValidationResult:
