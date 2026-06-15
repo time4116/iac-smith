@@ -59,8 +59,6 @@ def plan_changes(
 
     files = [
         "README.md",
-        ".github/workflows/terraform-pr-check.yml",
-        ".github/workflows/terraform-apply.yml",
         "live/terragrunt.hcl",
     ]
     for env in environments:
@@ -92,7 +90,6 @@ def plan_changes(
         f"Generate {stack_name} Terraform/Terragrunt structure",
         "Generate AWS infrastructure with secure defaults regardless of prompt wording",
         "Include backend bootstrap for S3 state and DynamoDB locking",
-        "Include target repository PR check and post-merge apply workflows",
     ]
     if _module_already_exists(stack_name, repo_patterns):
         summary.append(

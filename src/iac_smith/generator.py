@@ -611,8 +611,6 @@ def generate_files(
     files: dict[str, str] = {}
     files["README.md"] = f"# {slug}\n\nInfrastructure managed through Terraform/Terragrunt.\n"
     files["live/terragrunt.hcl"] = _root_terragrunt(intent)
-    files[".github/workflows/terraform-pr-check.yml"] = _workflow_check()
-    files[".github/workflows/terraform-apply.yml"] = _workflow_apply()
 
     for env in change_plan.environments:
         backend = change_plan.backend_resources[env]

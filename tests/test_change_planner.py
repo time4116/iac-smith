@@ -22,8 +22,6 @@ def test_plan_derives_stack_name_from_resource_type():
     assert "bootstrap/backend/non-prod/main.tf" in plan.files_to_generate
     assert "live/non-prod/eks-fargate/terragrunt.hcl" in plan.files_to_generate
     assert "modules/eks-fargate/README.md" in plan.files_to_generate
-    assert ".github/workflows/terraform-pr-check.yml" in plan.files_to_generate
-    assert ".github/workflows/terraform-apply.yml" in plan.files_to_generate
     assert plan.backend_resources["non-prod"].bucket == "iac-smith-demo-infra-non-prod-tfstate"
     assert plan.backend_resources["non-prod"].lock_table == "iac-smith-demo-infra-non-prod-tflock"
     assert (
