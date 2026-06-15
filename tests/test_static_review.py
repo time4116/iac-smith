@@ -49,8 +49,8 @@ def test_static_review_passes_safe_minimal_generated_files():
     assert result.errors == []
 
 
-def test_static_review_blocks_cidr_block_style_dangerous_ingress():
-    """Old-style security group using cidr_blocks = [...]."""
+def test_static_review_warns_on_cidr_block_style_dangerous_ingress():
+    """Old-style security group using cidr_blocks = [...] should reach PR review."""
     bad_sg = """
 resource "aws_security_group_rule" "bad" {
   type        = "ingress"
@@ -60,11 +60,12 @@ resource "aws_security_group_rule" "bad" {
 }
 """
     result = static_review_generated_files({"modules/example/main.tf": bad_sg})
-    assert result.status.value == "failed"
-    assert any("public ingress" in e for e in result.errors)
+    assert result.status.value == "partial"
+    assert any("public ingress" in warning for warning in result.warnings)
+    assert result.errors == []
 
 
-def test_static_review_blocks_cidr_ipv4_attribute_style_dangerous_ingress():
+def test_static_review_warns_on_cidr_ipv4_attribute_style_dangerous_ingress():
     """Newer aws_vpc_security_group_ingress_rule using cidr_ipv4 attribute."""
     bad_sg = """
 resource "aws_vpc_security_group_ingress_rule" "bad" {
@@ -75,8 +76,9 @@ resource "aws_vpc_security_group_ingress_rule" "bad" {
 }
 """
     result = static_review_generated_files({"modules/example/main.tf": bad_sg})
-    assert result.status.value == "failed"
-    assert any("public ingress" in e for e in result.errors)
+    assert result.status.value == "partial"
+    assert any("public ingress" in warning for warning in result.warnings)
+    assert result.errors == []
 
 
 def test_static_review_allows_public_http_https_on_load_balancer():

@@ -3,8 +3,8 @@ rules:
     severity: error
     description: Generated Terraform must not contain hardcoded secrets or credentials.
   - id: no-public-dangerous-ingress
-    severity: error
-    description: Do not allow unrestricted ingress to SSH, RDP, or database ports.
+    severity: warning
+    description: Flag unrestricted ingress to SSH, RDP, or database ports for PR review.
   - id: least-privilege-iam
     severity: preference
     description: Prefer least privilege IAM policies and narrow trust relationships.

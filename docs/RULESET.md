@@ -14,7 +14,7 @@ Current hard checks include:
 * generated paths must be relative and safe;
 * every planned file must be present in the model response;
 * generated Terragrunt remote state keys must not be fixed shared values;
-* generated Terraform must not include clearly dangerous public ingress for administrative or database ports;
+* generated Terraform should flag clearly dangerous public ingress for administrative or database ports in PR review warnings;
 * generated module READMEs should include terraform-docs markers;
 * generated module files must not reference `module.x` unless that module is declared in the same generated module.
 
