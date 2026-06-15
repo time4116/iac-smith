@@ -37,9 +37,6 @@ class IaCGenerator:
         return files
 
     def _apply_secure_defaults(self, path: str, content: str) -> str:
-        has_backend = 'backend "s3"' in content or 'backend "local"' in content
-        if path.endswith(".tf") and not has_backend:
-            content = 'terraform {\n  backend "s3" {}\n}\n\n' + content
         if (path.endswith(".tf") or path.endswith(".hcl")) and "public_access" in content:
             content = content.replace("public_access = true", "public_access = false")
         return content
