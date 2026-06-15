@@ -9,24 +9,24 @@ class IaCGenerator:
 
     def generate(self, extraction: IntentExtraction, plan: dict[str, Any]) -> list[dict[str, str]]:
         files = []
-        
+
         # 1. Generate Terraform/Terragrunt files based on the plan
         for file_path, content in plan.get("files_to_create", {}).items():
-            files.append({
-                "path": file_path,
-                "content": self._apply_secure_defaults(file_path, content)
-            })
+            files.append(
+                {"path": file_path, "content": self._apply_secure_defaults(file_path, content)}
+            )
 
         # 2. Add/Update Workflows with non-stomping targeting logic
-        files.append({
-            "path": ".github/workflows/terraform-pr-check.yml",
-            "content": self._get_pr_check_workflow()
-        })
-        files.append({
-            "path": ".github/workflows/terraform-apply.yml",
-            "content": self._get_apply_workflow()
-        })
-        
+        files.append(
+            {
+                "path": ".github/workflows/terraform-pr-check.yml",
+                "content": self._get_pr_check_workflow(),
+            }
+        )
+        files.append(
+            {"path": ".github/workflows/terraform-apply.yml", "content": self._get_apply_workflow()}
+        )
+
         return files
 
     def _apply_secure_defaults(self, path: str, content: str) -> str:
