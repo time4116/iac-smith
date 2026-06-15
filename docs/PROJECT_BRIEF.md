@@ -244,7 +244,7 @@ live/
     terraform-apply.yml
 ```
 
-The actual generated structure should be determined by the request and ruleset.
+The actual generated structure should be determined by the request, ruleset, and existing target repo conventions.
 
 ### Module Scope Rules
 
@@ -256,15 +256,17 @@ Generated module names must describe the primary ownership boundary of the code 
 
 ## Existing Repo Support
 
-MVP target repo starts empty, but IaC Smith should be designed for future existing-repo support.
+IaC Smith scans the target repo before generation and passes discovered conventions plus bounded representative Terraform/Terragrunt snippets into the dynamic generator.
 
-Future behavior:
+Current behavior:
 - scan existing structure,
 - detect Terraform/Terragrunt conventions,
-- follow existing naming/module/environment patterns,
-- minimally modify existing code,
+- capture representative `live/**/terragrunt.hcl`, `modules/**/*.tf`, and module README examples,
+- follow existing naming/module/environment/backend patterns unless the issue explicitly says not to,
 - avoid stamping a new structure over an established repo,
 - disclose conflicts or assumptions in the PR.
+
+Generation still stays bounded by the planned file set; a model response that returns paths outside the plan or omits planned files is rejected before PR creation.
 
 ## Generated Workflows in Target Repo
 
@@ -633,7 +635,7 @@ Recommended nodes:
 
 2. **Repo Scan**
    - Clone/inspect target repo.
-   - MVP target repo is empty, but keep this node for future existing-repo support.
+   - Detect current Terraform/Terragrunt layout, backend conventions, stack paths, and representative files so generation can defer to existing repo patterns.
 
 3. **Intent Parser**
    - Infer AWS infrastructure intent, environment scope, region, resources, constraints, and defaults.
@@ -773,7 +775,7 @@ Use:
 
 IaC Smith is an AWS-focused agentic IaC workflow that turns freeform GitHub issues into validated Terraform/Terragrunt pull requests.
 
-It uses AWS Bedrock, Claude Sonnet, and LangGraph to infer infrastructure intent, apply an opinionated ruleset, generate Terraform/Terragrunt projects, validate the output, run plan checks, and open a reviewable PR against a target infrastructure repository.
+It uses AWS Bedrock, Claude Sonnet, and LangGraph to infer infrastructure intent, apply an opinionated ruleset, generate Terraform/Terragrunt projects from issue text plus repo-discovered conventions, validate the output, run plan checks, and open a reviewable PR against a target infrastructure repository.
 
 The goal is not to blindly apply infrastructure. The goal is to turn natural-language infrastructure requests into clear, supportable, validated IaC changes that can be reviewed, merged, and applied through normal GitOps-style workflows.
 ```

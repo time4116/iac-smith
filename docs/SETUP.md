@@ -44,7 +44,9 @@ Do not grant organization-wide access. Do not reuse a personal all-repos token.
 
 ## Bedrock setup
 
-Bedrock is required for the MVP intent parser.
+Bedrock is required for the MVP intent parser and the default dynamic Terraform/Terragrunt generator.
+
+The controller sends Bedrock structured issue intent, the planned file set, loaded rules, repo-scanned conventions, and bounded representative Terraform/Terragrunt snippets from the target repo. Generation must follow existing repo patterns unless the issue explicitly asks not to, and the response is rejected if it omits planned files or returns paths outside the plan.
 
 Create an IAM role trusted by GitHub Actions OIDC. Restrict the trust policy to this controller repo and the `main` branch.
 
