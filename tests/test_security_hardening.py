@@ -34,6 +34,8 @@ def test_issue_workflow_has_privilege_boundary_before_secrets_and_oidc():
     assert workflow["concurrency"]["cancel-in-progress"] is False
     assert "github.actor == 'time4116'" in job["if"]
     assert "IAC_SMITH_ALLOWED_TARGET_REPO" in workflow_text
+    assert "IAC_SMITH_SOURCE_REPO" in workflow_text
+    assert "IAC_SMITH_GITHUB_TOKEN" in workflow_text
     assert "IAC_SMITH_TARGET_REPO_TOKEN" in workflow_text
     assert "GITHUB_TOKEN: ${{ secrets.IAC_SMITH_TARGET_REPO_PAT }}" not in workflow_text
     assert "uv sync --locked" in workflow_text
