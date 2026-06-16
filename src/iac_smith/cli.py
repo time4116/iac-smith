@@ -13,7 +13,9 @@ from iac_smith.models.change_plan import ChangePlan
 from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
 from iac_smith.models.rules import Ruleset
+from iac_smith.models.validation import ValidationStatus
 from iac_smith.nodes.pr_writer import branch_name_for_issue
+from iac_smith.nodes.static_review import static_review_generated_files
 from iac_smith.runtime_validation import validate_generated_iac
 from iac_smith.services.github import (
     GitHubIssue,
@@ -290,11 +292,25 @@ def run_iac_smith(
                 "IaC Smith: asking Bedrock to repair Terraform/Terragrunt output "
                 f"from runtime failure ({repair_attempt + 1}/{max_runtime_repairs})."
             )
+            repair_errors = list(runtime_validation.errors)
             repaired_files = _repair_generated_files(
                 repairer=runtime_repairer,
                 result=result,
-                repair_errors=runtime_validation.errors,
+                repair_errors=repair_errors,
             )
+            static_check = static_review_generated_files(repaired_files)
+            if static_check.status == ValidationStatus.FAILED:
+                _log(
+                    "IaC Smith: static review failed after runtime repair: "
+                    + "; ".join(static_check.errors)
+                )
+                if repair_attempt + 1 < max_runtime_repairs:
+                    repaired_files = _repair_generated_files(
+                        repairer=runtime_repairer,
+                        result=result,
+                        repair_errors=[*repair_errors, *static_check.errors],
+                    )
+                    repair_attempt += 1
             result["generated_files"] = repaired_files
             apply_generated_files(repo_path, repaired_files)
 
