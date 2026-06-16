@@ -144,6 +144,17 @@ Non-negotiable rules:
 * Generate complete, syntactically valid file bodies for each requested path.
   Do not use placeholder comments instead of Terraform resources when the issue
   asks for concrete infrastructure.
+* **Terraform module file organization — CRITICAL: Do not duplicate
+  declarations across files.** Each type of declaration belongs in exactly
+  one file and must NOT be repeated in another file of the same module:
+  - `variables.tf` — ONLY variable declarations (e.g. `variable "name"` defined here)
+  - `outputs.tf` — ONLY output declarations (e.g. `output "name"` defined here)
+  - `versions.tf` — ONLY terraform settings and required_providers
+  - `main.tf` — resource and data source definitions (NOT variables,
+    outputs, or required_providers — those go in their dedicated files)
+* When files_to_generate includes both a `main.tf` and a `variables.tf`
+  for the same module, put variables in `variables.tf` only, not in
+  `main.tf`. Same rule applies to outputs.tf and versions.tf.
 * When files_to_generate contains one path, return exactly that one file path
   in files. Use the full change_plan and repo_patterns as context, but do not
   include sibling planned files in the response.

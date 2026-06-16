@@ -96,6 +96,66 @@ def _find_undeclared_module_references(generated_files: dict[str, str]) -> list[
     return errors
 
 
+_VAR_DECL_RE = re.compile(r'\bvariable\s+"([^"]+)"')
+_OUTPUT_DECL_RE = re.compile(r'\boutput\s+"([^"]+)"')
+_REQUIRED_PROVIDERS_RE = re.compile(r"required_providers\s*{")
+
+
+def _find_cross_file_duplicates(generated_files: dict[str, str]) -> list[str]:
+    """Detect variable/output/provider declarations duplicated across files in the same module.
+
+    Terraform modules must have unique variable names, output names, and at most one
+    required_providers block. If a variable is declared in both ``main.tf`` and
+    ``variables.tf`` of the same module, that will fail ``terraform init`` with
+    "Duplicate variable declaration". Same for outputs and required_providers.
+    """
+    var_by_root: dict[str, dict[str, list[str]]] = {}
+    output_by_root: dict[str, dict[str, list[str]]] = {}
+    prov_by_root: dict[str, list[str]] = {}
+    errors = []
+
+    for path, content in generated_files.items():
+        root = _module_root(path)
+        if not root:
+            continue
+
+        for m in _VAR_DECL_RE.finditer(content):
+            name = m.group(1)
+            var_by_root.setdefault(root, {}).setdefault(name, []).append(path)
+
+        for m in _OUTPUT_DECL_RE.finditer(content):
+            name = m.group(1)
+            output_by_root.setdefault(root, {}).setdefault(name, []).append(path)
+
+        if _REQUIRED_PROVIDERS_RE.search(content):
+            prov_by_root.setdefault(root, []).append(path)
+
+    for root, vars_by_name in sorted(var_by_root.items()):
+        for name, locations in sorted(vars_by_name.items()):
+            if len(locations) > 1:
+                errors.append(
+                    f'Variable "{name}" declared in multiple files of module '
+                    f"`{root}`: {', '.join(locations)}"
+                )
+
+    for root, outputs_by_name in sorted(output_by_root.items()):
+        for name, locations in sorted(outputs_by_name.items()):
+            if len(locations) > 1:
+                errors.append(
+                    f'Output "{name}" declared in multiple files of module '
+                    f"`{root}`: {', '.join(locations)}"
+                )
+
+    for root, locations in sorted(prov_by_root.items()):
+        if len(locations) > 1:
+            errors.append(
+                f"required_providers block found in multiple files of module "
+                f"`{root}`: {', '.join(locations)}"
+            )
+
+    return errors
+
+
 def _contains_dangerous_public_ingress(content: str) -> bool:
     has_public_cidr = _CIDR_BLOCK_V4.search(content) or _CIDR_BLOCK_V6.search(content)
     if not has_public_cidr:
@@ -135,6 +195,7 @@ def static_review_generated_files(generated_files: dict[str, str]) -> Validation
             warnings.append(f"Module README `{path}` is missing terraform-docs markers.")
 
     errors.extend(_find_undeclared_module_references(generated_files))
+    errors.extend(_find_cross_file_duplicates(generated_files))
 
     if errors:
         status = ValidationStatus.FAILED
