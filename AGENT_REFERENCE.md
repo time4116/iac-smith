@@ -242,6 +242,17 @@ After all files are generated in parallel:
 - Prefer private networking, encryption, least privilege
 - Follow all `error`-severity rules; follow `warning`/`preference` rules unless conflict
 
+**Canonical file shape examples injected (`_CANONICAL_FILE_SHAPES`):**
+
+Six annotated structural templates are appended to every generation prompt immediately after the non-negotiable rules. They cover:
+- `versions.tf` — sole owner of `required_providers`; explicitly labelled "must NEVER appear in main.tf"
+- `main.tf` — resources and data sources only; no `terraform{}` block, no variable/output declarations
+- `variables.tf` — all `variable` declarations; shows `var.xxx` cross-file reference pattern
+- `outputs.tf` — all `output` declarations only
+- `environments/non-prod/terragrunt.hcl` (root) — `remote_state`, `locals`, `generate` block
+- `environments/non-prod/<stack>/terragrunt.hcl` (stack) — `include`, `dependency` blocks, `inputs`; explicitly warns "NEVER write `module.<name>.output_name`"
+- `.github/workflows/terraform-pr-check.yml` — trigger path and working-directory alignment example
+
 ---
 
 ## Static Review Checks
@@ -262,7 +273,7 @@ class ValidationResult(BaseModel):
 - AWS access key pattern matched (`AKIA...` / `ASIA...` 20-char)
 - Private key header found (`BEGIN RSA/OPENSSH/EC/DSA PRIVATE KEY`)
 - `aws_access_key_id=` or `aws_secret_access_key=` literal found
-- Generic secret pattern: `(password|token|secret)\s*=\s*"[^"]{6,}"`
+- Generic secret pattern: `(password|token|secret)\s*=\s*["'][^"']{6,}["']` (single or double quotes)
 - Terraform apply workflow has `pull_request` trigger without branch filter
 - Terragrunt remote state key does not use `path_relative_to_include()`
 - Duplicate `variable` declarations across files in same module
@@ -272,7 +283,7 @@ class ValidationResult(BaseModel):
 - `module.xxx` referenced but the `module "xxx"` block not found
 
 **PARTIAL (warnings, no block) if:**
-- Public ingress to SSH (22), RDP (3389), or database ports (3306/5432) from 0.0.0.0/0
+- Public ingress (0.0.0.0/0 or ::/0) to any of: SSH (22), RDP (3389), PostgreSQL (5432), MySQL (3306), MSSQL (1433), Redis (6379), MongoDB (27017)
 - Module README missing terraform-docs markers
 
 ---
@@ -320,6 +331,14 @@ for attempt in range(IAC_SMITH_RUNTIME_REPAIR_ATTEMPTS):
 else:
     return status=blocked
 ```
+
+**File selection for repair (`_path_needs_repair`):**
+
+A file is selected for repair if it appears in any error string, with two refinements:
+1. **"keep in" exclusion** — for duplicate-declaration errors the hint reads "Remove from X, keep in Y." The canonical file (Y) is excluded from repair so its declarations are not dropped.
+2. **Directory-based fallback** — runtime validation errors name the module/stack directory (e.g. `terraform validate modules/ecs-fargate failed`), not individual file paths. Any file whose parent directory matches the error is implicated. A negative-lookahead regex (`(?!/)`) prevents a shorter directory name (e.g. `environments`) from matching errors about a deeper path (e.g. `environments/non-prod/foundation`).
+
+If no files match either criterion, all files are repaired as a fallback.
 
 `repair_files` sends the original Bedrock generation prompt plus a repair section containing:
 - Each validation failure message
