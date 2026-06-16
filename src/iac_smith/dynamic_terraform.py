@@ -122,6 +122,125 @@ def _rules_payload(ruleset: Ruleset | None) -> list[dict[str, str]]:
     ]
 
 
+_CANONICAL_FILE_SHAPES = """
+Canonical file shapes — treat these as structural templates:
+
+--- versions.tf (SOLE location for required_providers; this block must NEVER appear in main.tf) ---
+```hcl
+terraform {
+  required_version = ">= 1.5"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+```
+
+--- main.tf (resources and data sources ONLY — NO terraform{} block, NO variable declarations, NO output declarations) ---
+```hcl
+resource "aws_vpc" "main" {
+  cidr_block           = var.vpc_cidr   # var.xxx comes from variables.tf, never declared here
+  enable_dns_hostnames = true
+  tags = { Name = var.environment }
+}
+
+data "aws_availability_zones" "available" {}
+```
+
+--- variables.tf (ALL variable declarations for the module — referenced as var.xxx in main.tf) ---
+```hcl
+variable "vpc_cidr" {
+  description = "CIDR block for the VPC"
+  type        = string
+}
+
+variable "environment" {
+  description = "Deployment environment name"
+  type        = string
+}
+```
+
+--- outputs.tf (ALL output declarations — no resources, no variable blocks here) ---
+```hcl
+output "vpc_id" {
+  description = "ID of the VPC"
+  value       = aws_vpc.main.id
+}
+
+output "private_subnet_ids" {
+  description = "IDs of private subnets"
+  value       = aws_subnet.private[*].id
+}
+```
+
+--- environments/non-prod/terragrunt.hcl (root config — remote_state, shared locals) ---
+```hcl
+locals {
+  environment = "non-prod"
+  aws_region  = "us-east-1"
+}
+
+remote_state {
+  backend = "s3"
+  config = {
+    bucket         = "my-terraform-state"
+    key            = "${path_relative_to_include()}/terraform.tfstate"
+    region         = local.aws_region
+    encrypt        = true
+    dynamodb_table = "terraform-locks"
+  }
+  generate = {
+    path      = "backend.tf"
+    if_exists = "overwrite_terragrunt"
+  }
+}
+```
+
+--- environments/non-prod/<stack>/terragrunt.hcl (stack config — source, dependency blocks, inputs) ---
+```hcl
+include "root" {
+  path = find_in_parent_folders()
+}
+
+terraform {
+  source = "../../../modules/ecs-fargate"
+}
+
+# ALWAYS use dependency blocks to consume outputs from another stack.
+# NEVER write module.<name>.output_name — that syntax only works inside a Terraform module, not in terragrunt.
+dependency "foundation" {
+  config_path = "../foundation"
+}
+
+inputs = {
+  environment        = local.environment
+  vpc_id             = dependency.foundation.outputs.vpc_id
+  private_subnet_ids = dependency.foundation.outputs.private_subnet_ids
+}
+```
+
+--- .github/workflows/terraform-pr-check.yml (trigger paths and working-dirs must match files_to_generate exactly) ---
+```yaml
+on:
+  pull_request:
+    paths:
+      - "environments/**"
+      - "modules/**"
+
+jobs:
+  terraform-plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: terragrunt plan
+        working-directory: environments/non-prod/foundation
+        run: terragrunt --non-interactive plan -input=false -lock=false
+```
+"""
+
+
 def build_generation_prompt(
     *,
     intent: InfrastructureIntent,
@@ -206,7 +325,7 @@ Non-negotiable rules:
   and use `environments/` subdirectories as their job working-directories. Do not
   hallucinate independent folder structures such as `envs/`, `live/`, or `environments/non-prod`
   (without the trailing `environments/` prefix) that are not present in the files_to_generate list.
-{repair_section}
+{_CANONICAL_FILE_SHAPES}{repair_section}
 Generation context JSON:
 {json.dumps(context, indent=2)}
 """
