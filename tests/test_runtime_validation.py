@@ -29,10 +29,9 @@ def test_validate_generated_iac_runs_terraform_and_terragrunt_plan(monkeypatch, 
 
     assert result.passed
     commands = [call[0] for call in calls]
-    # hclfmt command may be "hclfmt" or "hcl format" depending on version
+    # hclfmt runs in auto-format mode (no --check); command varies by version
     hclfmt_found = any(
-        cmd == ["terragrunt", "hclfmt", "--check", "--diff"]
-        or cmd == ["terragrunt", "hcl", "format", "--check", "--diff"]
+        cmd == ["terragrunt", "hclfmt"] or cmd == ["terragrunt", "hcl", "format"]
         for cmd in commands
     )
     assert hclfmt_found, f"No hclfmt/hcl-format command found in {commands}"
@@ -41,7 +40,8 @@ def test_validate_generated_iac_runs_terraform_and_terragrunt_plan(monkeypatch, 
     assert ["terraform", "validate"] in commands
     assert any("plan" in command for command in commands)
     assert any(
-        command[:3] == ["terragrunt", "--terragrunt-non-interactive", "plan"]
+        command[:2] in (["terragrunt", "--non-interactive"], ["terragrunt", "--terragrunt-non-interactive"])
+        and "plan" in command
         for command in commands
     )
 

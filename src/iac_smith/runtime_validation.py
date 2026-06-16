@@ -40,6 +40,10 @@ def _detect_terragrunt(env: dict[str, str]) -> tuple[list[str], str]:
 
     Terragrunt v0.71.0+ renamed ``hclfmt`` → ``hcl format`` and
     ``--terragrunt-non-interactive`` → ``--non-interactive``.
+
+    hclfmt_cmd runs the formatter in auto-fix mode (no --check flag) so that
+    whitespace/indentation issues are silently corrected in place. Syntax errors
+    still cause a non-zero exit.
     """
     import re
 
@@ -58,9 +62,9 @@ def _detect_terragrunt(env: dict[str, str]) -> tuple[list[str], str]:
         major, minor = int(match.group(1)), int(match.group(2))
         is_new = major >= 1 or (major == 0 and minor >= 71)
     hclfmt_cmd = (
-        ["terragrunt", "hcl", "format", "--check", "--diff"]
+        ["terragrunt", "hcl", "format"]
         if is_new
-        else ["terragrunt", "hclfmt", "--check", "--diff"]
+        else ["terragrunt", "hclfmt"]
     )
     non_interactive = "--non-interactive" if is_new else "--terragrunt-non-interactive"
     return hclfmt_cmd, non_interactive
