@@ -209,10 +209,12 @@ def _find_undeclared_variable_references(generated_files: dict[str, str]) -> lis
         for name in sorted(var_refs):
             if name not in declared:
                 locations = var_refs[name]
+                variables_tf = f"{root}/variables.tf"
                 errors.append(
                     f'Variable "{name}" is referenced via var.{name} in '
                     f"`{root}` ({', '.join(locations)}) but no "
-                    f'variable "{name}" is declared in any file of this module.'
+                    f'variable "{name}" is declared in any file of this module. '
+                    f'Add variable "{name}" to {variables_tf}.'
                 )
 
     return errors

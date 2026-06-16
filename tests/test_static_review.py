@@ -101,6 +101,8 @@ class TestUndeclaredVariableReferences:
         assert "name_prefix" in errors[0]
         assert "var.name_prefix" in errors[0]
         assert "but no variable" in errors[0]
+        assert "Add variable" in errors[0]
+        assert "variables.tf" in errors[0]
 
     def test_var_referenced_in_outputs(self) -> None:
         """var references in outputs.tf should also be checked."""
