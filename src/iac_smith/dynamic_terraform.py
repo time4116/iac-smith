@@ -314,28 +314,47 @@ class BedrockTerraformGenerator:
             repair_errors=repair_errors,
             previous_content=previous_content,
         )
-        response = self._invoke_model_with_retries(
-            modelId=self.model_id,
-            contentType="application/json",
-            accept="application/json",
-            body=json.dumps(
-                {
-                    "anthropic_version": "bedrock-2023-05-31",
-                    "max_tokens": 8000,
-                    "temperature": 0,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "output_config": {
-                        "format": {
-                            "type": "json_schema",
-                            "schema": TERRAFORM_FILE_SCHEMA,
-                        }
-                    },
-                }
-            ),
+        last_error: Exception | None = None
+        for attempt in range(3):
+            response = self._invoke_model_with_retries(
+                modelId=self.model_id,
+                contentType="application/json",
+                accept="application/json",
+                body=json.dumps(
+                    {
+                        "anthropic_version": "bedrock-2023-05-31",
+                        "max_tokens": 16384,
+                        "temperature": 0,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "output_config": {
+                            "format": {
+                                "type": "json_schema",
+                                "schema": TERRAFORM_FILE_SCHEMA,
+                            }
+                        },
+                    }
+                ),
+            )
+            raw_body = response["body"].read().decode("utf-8")
+            try:
+                generated = parse_single_file_generation_payload(raw_body, expected_path=path)
+                return generated.content
+            except (ValueError, json.JSONDecodeError) as exc:
+                last_error = exc
+                self._log(
+                    f"IaC Smith: JSON parse failed for {path} (attempt {attempt + 1}/3): "
+                    f"{len(raw_body)} chars received, error: {exc}"
+                )
+                # Truncation often means the content is too complex — ask the model
+                # to be more concise on retry by appending a hint to the prompt
+                if attempt == 0:
+                    prompt += (
+                        "\n\nYour previous response was truncated or contained invalid JSON. "
+                        "Be more concise. Focus on essential resources only."
+                    )
+        raise ValueError(
+            f"Failed to generate valid JSON for `{path}` after 3 attempts: {last_error}"
         )
-        raw_body = response["body"].read().decode("utf-8")
-        generated = parse_single_file_generation_payload(raw_body, expected_path=path)
-        return generated.content
 
     def _generate_reviewed_file(
         self,
