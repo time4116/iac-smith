@@ -244,7 +244,7 @@ After all files are generated in parallel:
 
 **Canonical file shape examples injected (`_CANONICAL_FILE_SHAPES`):**
 
-Six annotated structural templates are appended to every generation prompt immediately after the non-negotiable rules. They cover:
+Seven annotated structural templates are appended to every generation prompt immediately after the non-negotiable rules. They cover:
 - `versions.tf` — sole owner of `required_providers`; explicitly labelled "must NEVER appear in main.tf"
 - `main.tf` — resources and data sources only; no `terraform{}` block, no variable/output declarations
 - `variables.tf` — all `variable` declarations; shows `var.xxx` cross-file reference pattern
