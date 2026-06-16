@@ -14,6 +14,24 @@ from iac_smith.models.validation import ValidationStatus
 from iac_smith.nodes.static_review import static_review_generated_files
 
 
+def _path_needs_repair(path: str, errors: list[str]) -> bool:
+    """Return True if `path` appears in any error as a file that needs to be changed.
+
+    For duplicate-declaration errors the hint reads "Remove from X, keep in Y."
+    The file at Y is the canonical one — it does not need repair.  Only X does.
+    This function returns False when the path appears exclusively as a "keep in"
+    target so that variables.tf / outputs.tf / versions.tf are not unnecessarily
+    regenerated (which can drop declarations that main.tf still references).
+    """
+    for error in errors:
+        if path not in error:
+            continue
+        if f"keep in {path}." in error and f"Remove from {path}," not in error:
+            continue
+        return True
+    return False
+
+
 class BedrockRuntime(Protocol):
     def invoke_model(self, **kwargs: Any) -> dict[str, Any]: ...
 
@@ -459,7 +477,7 @@ class BedrockTerraformGenerator:
             paths_to_repair = [
                 path
                 for path in change_plan.files_to_generate
-                if any(path in error for error in validation.errors)
+                if _path_needs_repair(path, validation.errors)
             ] or list(change_plan.files_to_generate)
             path_positions = {
                 path: index for index, path in enumerate(change_plan.files_to_generate, start=1)
@@ -526,7 +544,7 @@ class BedrockTerraformGenerator:
         paths_to_repair = [
             path
             for path in change_plan.files_to_generate
-            if any(path in error for error in repair_errors)
+            if _path_needs_repair(path, repair_errors)
         ] or list(change_plan.files_to_generate)
         total_files = len(change_plan.files_to_generate)
         path_positions = {

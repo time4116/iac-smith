@@ -7,6 +7,7 @@ import pytest
 
 from iac_smith.dynamic_terraform import (
     BedrockTerraformGenerator,
+    _path_needs_repair,
     build_generation_prompt,
     parse_generation_payload,
     parse_single_file_generation_payload,
@@ -548,3 +549,133 @@ def test_bedrock_terraform_generator_uses_extended_bedrock_timeout(monkeypatch):
     assert kwargs["region_name"] == "us-west-2"
     assert kwargs["config"].read_timeout >= 180
     assert kwargs["config"].retries["max_attempts"] >= 3
+
+
+class TestPathNeedsRepair:
+    def test_returns_true_for_remove_from_target(self):
+        errors = [
+            'Variable "env" declared in multiple files of module `modules/foundation`: '
+            "modules/foundation/main.tf, modules/foundation/variables.tf. "
+            "Remove from modules/foundation/main.tf, keep in modules/foundation/variables.tf."
+        ]
+        assert _path_needs_repair("modules/foundation/main.tf", errors) is True
+
+    def test_returns_false_for_keep_in_target_only(self):
+        errors = [
+            'Variable "env" declared in multiple files of module `modules/foundation`: '
+            "modules/foundation/main.tf, modules/foundation/variables.tf. "
+            "Remove from modules/foundation/main.tf, keep in modules/foundation/variables.tf."
+        ]
+        assert _path_needs_repair("modules/foundation/variables.tf", errors) is False
+
+    def test_returns_false_when_path_not_in_any_error(self):
+        errors = [
+            'Variable "env" declared in multiple files of module `modules/foundation`: '
+            "modules/foundation/main.tf, modules/foundation/variables.tf. "
+            "Remove from modules/foundation/main.tf, keep in modules/foundation/variables.tf."
+        ]
+        assert _path_needs_repair("modules/other/main.tf", errors) is False
+
+    def test_returns_true_for_non_duplicate_error_mentioning_path(self):
+        errors = [
+            "Terragrunt state key in `environments/non-prod/ecs-fargate/terragrunt.hcl` "
+            "must use path_relative_to_include()."
+        ]
+        assert _path_needs_repair("environments/non-prod/ecs-fargate/terragrunt.hcl", errors) is True
+
+    def test_returns_true_when_path_appears_as_both_remove_and_keep(self):
+        errors = [
+            'Variable "x" declared in multiple files: a.tf, modules/foundation/variables.tf. '
+            "Remove from modules/foundation/variables.tf, keep in a.tf.",
+            'Variable "y" declared in multiple files: modules/foundation/variables.tf, b.tf. '
+            "Remove from c.tf, keep in modules/foundation/variables.tf.",
+        ]
+        assert _path_needs_repair("modules/foundation/variables.tf", errors) is True
+
+    def test_returns_true_when_keep_in_target_has_other_errors(self):
+        errors = [
+            'Variable "env" declared in multiple files of module `modules/foundation`: '
+            "modules/foundation/main.tf, modules/foundation/variables.tf. "
+            "Remove from modules/foundation/main.tf, keep in modules/foundation/variables.tf.",
+            'Variable "project" is referenced via var.project in `modules/foundation` '
+            "(modules/foundation/variables.tf) but no variable \"project\" is declared.",
+        ]
+        assert _path_needs_repair("modules/foundation/variables.tf", errors) is True
+
+
+def test_variables_tf_not_repaired_when_only_main_tf_has_duplicate_declarations():
+    """Regression: when main.tf duplicates variable decls from variables.tf, repair
+    must only regenerate main.tf — not variables.tf.  Regenerating variables.tf can
+    drop declarations (e.g. var.project, var.region) that main.tf still references,
+    causing a second static review failure for undeclared variables.
+    """
+    main_tf_bad = (
+        'variable "env" { type = string }\n'
+        'resource "aws_vpc" "this" { cidr_block = var.vpc_cidr }\n'
+        'resource "aws_internet_gateway" "this" { tags = { Project = var.project, Region = var.region } }\n'
+    )
+    main_tf_fixed = (
+        'resource "aws_vpc" "this" { cidr_block = var.vpc_cidr }\n'
+        'resource "aws_internet_gateway" "this" { tags = { Project = var.project, Region = var.region } }\n'
+    )
+    variables_tf = (
+        'variable "env" { type = string }\n'
+        'variable "vpc_cidr" { type = string }\n'
+        'variable "project" { type = string }\n'
+        'variable "region" { type = string }\n'
+    )
+
+    files = {
+        "modules/foundation/main.tf": main_tf_bad,
+        "modules/foundation/variables.tf": variables_tf,
+        "modules/foundation/outputs.tf": 'output "vpc_id" { value = aws_vpc.this.id }\n',
+    }
+
+    call_count_by_path: dict[str, int] = {}
+
+    class TrackingBedrockRuntime:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def invoke_model(self, **kwargs):
+            self.calls.append(kwargs)
+            body = json.loads(kwargs["body"])
+            prompt = body["messages"][0]["content"]
+            context = json.loads(prompt.split("Generation context JSON:\n", 1)[1])
+            path = context["files_to_generate"][0]
+            call_count_by_path[path] = call_count_by_path.get(path, 0) + 1
+            in_repair = "Static review failures:" in prompt
+            content = main_tf_fixed if (in_repair and path == "modules/foundation/main.tf") else files[path]
+            return {
+                "body": FakeBody(
+                    json.dumps(
+                        {"path": path, "content": content, "assumptions": [], "warnings": []}
+                    ).encode()
+                )
+            }
+
+    runtime = TrackingBedrockRuntime()
+    plan = ChangePlan(
+        stack_name="foundation",
+        environments=["non-prod"],
+        files_to_generate=list(files),
+        backend_resources={},
+        summary=["foundation module"],
+    )
+    generator = BedrockTerraformGenerator(
+        model_id="anthropic.test-model",
+        bedrock_runtime=runtime,
+    )
+
+    result = generator.generate_files(
+        intent=_intent(),
+        change_plan=plan,
+        repo_patterns=RepoPatterns(),
+        ruleset=_ruleset(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+
+    assert result["modules/foundation/main.tf"] == main_tf_fixed
+    assert result["modules/foundation/variables.tf"] == variables_tf
+    assert call_count_by_path.get("modules/foundation/main.tf", 0) == 2
+    assert call_count_by_path.get("modules/foundation/variables.tf", 0) == 1

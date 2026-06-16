@@ -208,7 +208,7 @@ def _find_undeclared_variable_references(generated_files: dict[str, str]) -> lis
         declared = decls_by_root.get(root, set())
         for name in sorted(var_refs):
             if name not in declared:
-                locations = var_refs[name]
+                locations = sorted(set(var_refs[name]))
                 variables_tf = f"{root}/variables.tf"
                 errors.append(
                     f'Variable "{name}" is referenced via var.{name} in '
