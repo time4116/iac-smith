@@ -7,7 +7,7 @@ SECRET_PATTERNS = [
     re.compile(r"ASIA[0-9A-Z]{16}"),
     re.compile(r"BEGIN (RSA |OPENSSH |EC |DSA )?PRIVATE KEY"),
     re.compile(r"aws_(access_key_id|secret_access_key)\s*=", re.IGNORECASE),
-    re.compile(r"(password|token|secret)\s*=\s*[\"'][^\"']{6,}[\"']", re.IGNORECASE),
+    re.compile(r"""(password|token|secret)\s*=\s*(?:"[^"]{6,}"|'[^']{6,}')""", re.IGNORECASE),
 ]
 
 # Matches both old-style bracket form and newer aws_vpc_security_group_ingress_rule form.

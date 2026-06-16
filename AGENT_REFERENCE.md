@@ -273,7 +273,7 @@ class ValidationResult(BaseModel):
 - AWS access key pattern matched (`AKIA...` / `ASIA...` 20-char)
 - Private key header found (`BEGIN RSA/OPENSSH/EC/DSA PRIVATE KEY`)
 - `aws_access_key_id=` or `aws_secret_access_key=` literal found
-- Generic secret pattern: `(password|token|secret)\s*=\s*["'][^"']{6,}["']` (single or double quotes)
+- Generic secret pattern: `(password|token|secret)\s*=\s*(?:"[^"]{6,}"|'[^']{6,}')` — alternation keeps each delimiter paired with its own exclusion class, so values containing the opposite quote character are still caught
 - Terraform apply workflow has `pull_request` trigger without branch filter
 - Terragrunt remote state key does not use `path_relative_to_include()`
 - Duplicate `variable` declarations across files in same module
