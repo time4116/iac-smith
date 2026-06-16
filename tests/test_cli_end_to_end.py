@@ -151,7 +151,7 @@ def test_run_iac_smith_repairs_runtime_validation_failures_before_pr(tmp_path: P
         ValidationResult(True),
     ]
 
-    def fake_validate(repo_path):
+    def fake_validate(repo_path, **kwargs):
         return validation_results.pop(0)
 
     class RepairingFileGenerator:
@@ -230,7 +230,7 @@ def test_run_iac_smith_blocks_when_runtime_validation_fails(tmp_path: Path, monk
         errors = ["terragrunt plan failed"]
 
     monkeypatch.setattr(
-        "iac_smith.cli.validate_generated_iac", lambda repo_path: FailedValidation()
+        "iac_smith.cli.validate_generated_iac", lambda repo_path, **kwargs: FailedValidation()
     )
 
     result = run_iac_smith(

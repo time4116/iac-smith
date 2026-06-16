@@ -35,7 +35,9 @@ def _changed_roots(repo_path: Path) -> tuple[list[Path], list[Path]]:
     return module_roots, terragrunt_stacks
 
 
-def validate_generated_iac(repo_path: str | Path) -> RuntimeValidationResult:
+def validate_generated_iac(
+    repo_path: str | Path, env_override: dict[str, str] | None = None
+) -> RuntimeValidationResult:
     """Run local IaC validation before IaC Smith commits and opens a PR.
 
     This intentionally never applies infrastructure. Terragrunt plan is included so
@@ -47,10 +49,10 @@ def validate_generated_iac(repo_path: str | Path) -> RuntimeValidationResult:
     checks: list[str] = []
     errors: list[str] = []
     env = {
-        **os.environ,
+        **(env_override or os.environ),
         "TF_INPUT": "false",
         "TF_IN_AUTOMATION": "true",
-        "CI": os.environ.get("CI", "true"),
+        "CI": (env_override or os.environ).get("CI", "true"),
     }
 
     required_commands = ["terraform", "terragrunt"]

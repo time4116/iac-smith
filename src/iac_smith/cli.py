@@ -22,6 +22,7 @@ from iac_smith.services.github import (
     GitHubPullRequestClient,
 )
 from iac_smith.state import IaCSmithState
+from iac_smith.version_detection import ensure_terraform_terragrunt
 from iac_smith.workspace import apply_generated_files, commit_generated_files, create_branch
 
 
@@ -263,10 +264,13 @@ def run_iac_smith(
     apply_generated_files(repo_path, result["generated_files"])
 
     if env.get("IAC_SMITH_SKIP_RUNTIME_VALIDATION") != "1":
+        _log("IaC Smith: ensuring terraform/terragrunt versions for target repo.")
+        version_env = ensure_terraform_terragrunt(repo_path)
+
         max_runtime_repairs = _runtime_repair_attempts(env)
         for repair_attempt in range(max_runtime_repairs + 1):
             _log("IaC Smith: running Terraform/Terragrunt validation and plan before commit.")
-            runtime_validation = validate_generated_iac(repo_path)
+            runtime_validation = validate_generated_iac(repo_path, env_override=version_env)
             if runtime_validation.passed:
                 if repair_attempt:
                     _log(
