@@ -31,3 +31,8 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "integration: tests that call external APIs (Bedrock, GitHub)",
+    "bedrock: tests that call the Bedrock API specifically",
+    "need_binaries: tests that require terraform/terragrunt on PATH",
+]
