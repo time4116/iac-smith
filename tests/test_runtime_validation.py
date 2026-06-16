@@ -19,8 +19,8 @@ def test_validate_generated_iac_runs_terraform_and_terragrunt_plan(monkeypatch, 
     )
     calls = []
 
-    def fake_run(command, cwd, env, text, capture_output, check):
-        calls.append((command, cwd))
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs.get("cwd")))
         return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
 
     monkeypatch.setattr("iac_smith.runtime_validation.subprocess.run", fake_run)
@@ -29,7 +29,13 @@ def test_validate_generated_iac_runs_terraform_and_terragrunt_plan(monkeypatch, 
 
     assert result.passed
     commands = [call[0] for call in calls]
-    assert ["terragrunt", "hclfmt", "--check", "--diff"] in commands
+    # hclfmt command may be "hclfmt" or "hcl format" depending on version
+    hclfmt_found = any(
+        cmd == ["terragrunt", "hclfmt", "--check", "--diff"]
+        or cmd == ["terragrunt", "hcl", "format", "--check", "--diff"]
+        for cmd in commands
+    )
+    assert hclfmt_found, f"No hclfmt/hcl-format command found in {commands}"
     assert ["terraform", "fmt", "-check", "-recursive", "-diff", "modules"] in commands
     assert ["terraform", "init", "-backend=false", "-input=false"] in commands
     assert ["terraform", "validate"] in commands
@@ -46,7 +52,7 @@ def test_validate_generated_iac_fails_before_pr_when_plan_fails(monkeypatch, tmp
         "iac_smith.runtime_validation.shutil.which", lambda command: f"/bin/{command}"
     )
 
-    def fake_run(command, cwd, env, text, capture_output, check):
+    def fake_run(command, **kwargs):
         returncode = 1 if command[:2] == ["terragrunt", "plan"] else 0
         return subprocess.CompletedProcess(command, returncode, stdout="bad plan", stderr="")
 

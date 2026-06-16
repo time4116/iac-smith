@@ -35,6 +35,32 @@ def _changed_roots(repo_path: Path) -> tuple[list[Path], list[Path]]:
     return module_roots, terragrunt_stacks
 
 
+def _terragrunt_hclfmt_cmd(env: dict[str, str]) -> list[str]:
+    """Return the correct hclfmt/hcl-format command for the installed terragrunt version.
+
+    Terragrunt v0.71.0+ renamed ``hclfmt`` to ``hcl format``. Older versions
+    use ``hclfmt``. Detect once and cache the decision.
+    """
+    result = subprocess.run(
+        ["terragrunt", "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+        env=env,
+    )
+    version_out = (result.stdout + result.stderr).strip()
+    # Match a dotted semver after 'v' — "terragrunt version v0.71.1" → "0.71.1"
+    import re
+
+    match = re.search(r"v?(\d+)\.(\d+)", version_out)
+    if match:
+        major, minor = int(match.group(1)), int(match.group(2))
+        if major >= 1 or (major == 0 and minor >= 71):
+            return ["terragrunt", "hcl", "format", "--check", "--diff"]
+    return ["terragrunt", "hclfmt", "--check", "--diff"]
+
+
 def validate_generated_iac(
     repo_path: str | Path, env_override: dict[str, str] | None = None
 ) -> RuntimeValidationResult:
@@ -65,10 +91,11 @@ def validate_generated_iac(
 
     command_specs: list[tuple[str, list[str], Path]] = []
     if (root / "environments").exists():
+        terragrunt_hclfmt_cmd = _terragrunt_hclfmt_cmd(env)
         command_specs.append(
             (
                 "terragrunt hclfmt",
-                ["terragrunt", "hclfmt", "--check", "--diff"],
+                terragrunt_hclfmt_cmd,
                 root / "environments",
             )
         )
