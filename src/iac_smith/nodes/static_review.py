@@ -183,13 +183,17 @@ _VAR_REF_RE = re.compile(r"\bvar\.([A-Za-z0-9_-]+)\b")
 def _find_undeclared_variable_references(generated_files: dict[str, str]) -> list[str]:
     """Detect ``var.xxx`` references in module files that lack a ``variable "xxx"`` declaration.
 
-    Bedrock sometimes references variables in ``main.tf`` (e.g. ``var.name_prefix``)
-    without declaring them in ``variables.tf``. This function cross-references
-    all ``var.xxx`` usages against all ``variable "xxx"`` declarations within each
-    module root to catch missing variable declarations.
+    Bedrock sometimes references variables in ``main.tf`` without declaring them in
+    ``variables.tf``.  When a module has a ``variables.tf``, only declarations in
+    that file count as valid — declarations in ``main.tf`` alone are treated as
+    undeclared because they violate module file-organization rules and get removed
+    when ``main.tf`` is repaired.  For modules without a ``variables.tf``, all
+    declaration sites are accepted.
     """
     refs_by_root: dict[str, dict[str, list[str]]] = {}
-    decls_by_root: dict[str, set[str]] = {}
+    all_decls_by_root: dict[str, set[str]] = {}
+    vars_tf_decls_by_root: dict[str, set[str]] = {}
+    roots_with_vars_tf: set[str] = set()
     errors = []
 
     for path, content in generated_files.items():
@@ -197,15 +201,24 @@ def _find_undeclared_variable_references(generated_files: dict[str, str]) -> lis
         if not root:
             continue
 
+        is_vars_tf = path.endswith("/variables.tf")
+        if is_vars_tf:
+            roots_with_vars_tf.add(root)
+
         for m in _VAR_REF_RE.finditer(content):
-            name = m.group(1)
-            refs_by_root.setdefault(root, {}).setdefault(name, []).append(path)
+            refs_by_root.setdefault(root, {}).setdefault(m.group(1), []).append(path)
 
         for m in _VAR_DECL_RE.finditer(content):
-            decls_by_root.setdefault(root, set()).add(m.group(1))
+            name = m.group(1)
+            all_decls_by_root.setdefault(root, set()).add(name)
+            if is_vars_tf:
+                vars_tf_decls_by_root.setdefault(root, set()).add(name)
 
     for root, var_refs in sorted(refs_by_root.items()):
-        declared = decls_by_root.get(root, set())
+        if root in roots_with_vars_tf:
+            declared = vars_tf_decls_by_root.get(root, set())
+        else:
+            declared = all_decls_by_root.get(root, set())
         for name in sorted(var_refs):
             if name not in declared:
                 locations = sorted(set(var_refs[name]))

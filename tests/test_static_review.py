@@ -130,6 +130,47 @@ class TestUndeclaredVariableReferences:
         }
         assert _find_undeclared_variable_references(files) == []
 
+    def test_var_declared_only_in_main_tf_flagged_when_variables_tf_exists(self) -> None:
+        """A var declared only in main.tf is treated as undeclared when variables.tf exists.
+
+        The LLM sometimes puts variable blocks in main.tf that aren't in variables.tf.
+        They pass the duplicate check (only one file has them) but when main.tf is
+        repaired the variable blocks are removed, making the var truly undeclared.
+        Catching this in the first review gives the repair prompt the right context.
+        """
+        files = {
+            "modules/foundation/main.tf": (
+                'variable "name_prefix" { type = string }\n'
+                'resource "aws_vpc" "this" { tags = { Name = var.name_prefix } }\n'
+            ),
+            "modules/foundation/variables.tf": 'variable "vpc_cidr" { type = string }',
+        }
+        errors = _find_undeclared_variable_references(files)
+        assert any("name_prefix" in e for e in errors)
+
+    def test_var_declared_only_in_main_tf_valid_when_no_variables_tf(self) -> None:
+        """Without a variables.tf, variable declarations in main.tf are valid."""
+        files = {
+            "modules/foundation/main.tf": (
+                'variable "name_prefix" { type = string }\n'
+                'resource "aws_vpc" "this" { tags = { Name = var.name_prefix } }\n'
+            ),
+        }
+        errors = _find_undeclared_variable_references(files)
+        assert errors == []
+
+    def test_location_deduplication(self) -> None:
+        """Each file is listed only once even if var is referenced multiple times."""
+        files = {
+            "modules/ecs-fargate/main.tf": (
+                'resource "a" "b" { x = var.env; y = var.env; z = var.env }'
+            ),
+            "modules/ecs-fargate/variables.tf": "",
+        }
+        errors = _find_undeclared_variable_references(files)
+        assert len(errors) == 1
+        assert errors[0].count("modules/ecs-fargate/main.tf") == 1
+
 
 class TestStaticReviewIntegration:
     def test_duplicate_variable_triggers_failed(self) -> None:
