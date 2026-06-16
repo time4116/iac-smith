@@ -35,12 +35,14 @@ def _changed_roots(repo_path: Path) -> tuple[list[Path], list[Path]]:
     return module_roots, terragrunt_stacks
 
 
-def _terragrunt_hclfmt_cmd(env: dict[str, str]) -> list[str]:
-    """Return the correct hclfmt/hcl-format command for the installed terragrunt version.
+def _detect_terragrunt(env: dict[str, str]) -> tuple[list[str], str]:
+    """Return (hclfmt_cmd, non_interactive_flag) for the installed terragrunt version.
 
-    Terragrunt v0.71.0+ renamed ``hclfmt`` to ``hcl format``. Older versions
-    use ``hclfmt``. Detect once and cache the decision.
+    Terragrunt v0.71.0+ renamed ``hclfmt`` → ``hcl format`` and
+    ``--terragrunt-non-interactive`` → ``--non-interactive``.
     """
+    import re
+
     result = subprocess.run(
         ["terragrunt", "--version"],
         capture_output=True,
@@ -50,15 +52,18 @@ def _terragrunt_hclfmt_cmd(env: dict[str, str]) -> list[str]:
         env=env,
     )
     version_out = (result.stdout + result.stderr).strip()
-    # Match a dotted semver after 'v' — "terragrunt version v0.71.1" → "0.71.1"
-    import re
-
     match = re.search(r"v?(\d+)\.(\d+)", version_out)
+    is_new = False
     if match:
         major, minor = int(match.group(1)), int(match.group(2))
-        if major >= 1 or (major == 0 and minor >= 71):
-            return ["terragrunt", "hcl", "format", "--check", "--diff"]
-    return ["terragrunt", "hclfmt", "--check", "--diff"]
+        is_new = major >= 1 or (major == 0 and minor >= 71)
+    hclfmt_cmd = (
+        ["terragrunt", "hcl", "format", "--check", "--diff"]
+        if is_new
+        else ["terragrunt", "hclfmt", "--check", "--diff"]
+    )
+    non_interactive = "--non-interactive" if is_new else "--terragrunt-non-interactive"
+    return hclfmt_cmd, non_interactive
 
 
 def validate_generated_iac(
@@ -89,9 +94,9 @@ def validate_generated_iac(
             errors=["Missing required validation command(s): " + ", ".join(missing)],
         )
 
+    terragrunt_hclfmt_cmd, non_interactive = _detect_terragrunt(env)
     command_specs: list[tuple[str, list[str], Path]] = []
     if (root / "environments").exists():
-        terragrunt_hclfmt_cmd = _terragrunt_hclfmt_cmd(env)
         command_specs.append(
             (
                 "terragrunt hclfmt",
@@ -131,14 +136,14 @@ def validate_generated_iac(
         command_specs.append(
             (
                 f"terragrunt init {label}",
-                ["terragrunt", "--terragrunt-non-interactive", "init", "-reconfigure"],
+                ["terragrunt", non_interactive, "init", "-reconfigure"],
                 stack,
             )
         )
         command_specs.append(
             (
                 f"terragrunt validate {label}",
-                ["terragrunt", "--terragrunt-non-interactive", "validate"],
+                ["terragrunt", non_interactive, "validate"],
                 stack,
             )
         )
@@ -147,7 +152,7 @@ def validate_generated_iac(
                 f"terragrunt plan {label}",
                 [
                     "terragrunt",
-                    "--terragrunt-non-interactive",
+                    non_interactive,
                     "plan",
                     "-input=false",
                     "-lock=false",
