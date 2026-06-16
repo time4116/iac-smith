@@ -8,10 +8,12 @@ from pathlib import Path
 import pytest
 
 from iac_smith.version_detection import (
+    _check_version_supported,
     _installed_version,
     _latest_release_tag,
     _read_version_file,
     _version_from_tag,
+    _version_tuple,
     ensure_terraform_terragrunt,
 )
 
@@ -67,6 +69,32 @@ class TestLatestReleaseTag:
         parts = v.split(".")
         assert len(parts) >= 2
         assert all(p.isdigit() for p in parts[:2])
+
+
+class TestVersionCheck:
+    def test_version_tuple_parses_semver(self) -> None:
+        assert _version_tuple("1.10.0") == (1, 10, 0)
+        assert _version_tuple("0.68.1") == (0, 68, 1)
+        assert _version_tuple("1.0") == (1, 0)
+
+    def test_check_version_supported_above_min(self) -> None:
+        assert _check_version_supported("Terraform", "1.10.0", "1.0.0") is None
+        assert _check_version_supported("Terragrunt", "0.71.0", "0.68.0") is None
+
+    def test_check_version_supported_below_min(self) -> None:
+        warning = _check_version_supported("Terraform", "0.12.0", "1.0.0")
+        assert warning is not None
+        assert "below the minimum tested" in warning
+        assert "Terraform" in warning
+
+    def test_check_version_supported_exact_min(self) -> None:
+        assert _check_version_supported("Terraform", "1.0.0", "1.0.0") is None
+        assert _check_version_supported("Terragrunt", "0.68.0", "0.68.0") is None
+
+    def test_check_version_supported_unparseable(self) -> None:
+        warning = _check_version_supported("Terraform", "latest", "1.0.0")
+        assert warning is not None
+        assert "Could not parse" in warning
 
 
 class TestEnsureTerraformTerragrunt:

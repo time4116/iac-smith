@@ -13,11 +13,23 @@ import platform
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
 import zipfile
 from pathlib import Path
+
+# Minimum versions IaC Smith is tested against. Versions below these will
+# generate a warning — they may still work but are not in the CI regression
+# suite. The runtime validation layer (hclfmt → hcl format rename at v0.71)
+# attempts to handle known cross-version differences automatically.
+_MINIMUM_TERRAFORM_VERSION = "1.0.0"
+_MINIMUM_TERRAGRUNT_VERSION = "0.68.0"
+
+
+def _warn(message: str) -> None:
+    print(f"[IaC Smith version check] {message}", file=sys.stderr, flush=True)
 
 
 def _arch_suffix() -> str:
@@ -50,6 +62,28 @@ def _github_api(url: str, retries: int = 3) -> dict:
                 raise
             time.sleep(1.5**attempt)
     raise RuntimeError(f"Failed to fetch {url}")
+
+
+def _version_tuple(v: str) -> tuple[int, ...]:
+    """Parse a semver string into a comparable tuple. '1.10.0' → (1, 10, 0)."""
+    return tuple(int(p) for p in v.split("."))  # type: ignore[return-value]
+
+
+def _check_version_supported(tool: str, raw_version: str, minimum: str) -> str | None:
+    """Return a warning string if *raw_version* is below *minimum*, else None."""
+    try:
+        parsed = _version_tuple(raw_version)
+        min_parsed = _version_tuple(minimum)
+        if parsed < min_parsed:
+            return (
+                f"{tool} version `{raw_version}` is below the minimum tested "
+                f"version `{minimum}`. IaC Smith may still work, but the "
+                f"runtime validation layer is not regression-tested against "
+                f"this version."
+            )
+    except (ValueError, TypeError):
+        return f"Could not parse {tool} version `{raw_version}` — proceeding anyway."
+    return None
 
 
 def _latest_release_tag(owner: str, repo: str) -> str:
@@ -148,6 +182,9 @@ def _resolve_tf_version(repo_path: Path, bin_dir: Path) -> bool:
     version_file = _read_version_file(repo_path, ".terraform-version")
     if version_file:
         target = _version_from_tag(version_file)
+        warning = _check_version_supported("Terraform", target, _MINIMUM_TERRAFORM_VERSION)
+        if warning:
+            _warn(warning)
     else:
         # Greenfield: check if already installed
         installed = _installed_version("terraform")
@@ -169,6 +206,9 @@ def _resolve_tg_version(repo_path: Path, bin_dir: Path) -> bool:
     version_file = _read_version_file(repo_path, ".terragrunt-version")
     if version_file:
         target = _version_from_tag(version_file)
+        warning = _check_version_supported("Terragrunt", target, _MINIMUM_TERRAGRUNT_VERSION)
+        if warning:
+            _warn(warning)
     else:
         installed = _installed_version("terragrunt")
         if installed:
