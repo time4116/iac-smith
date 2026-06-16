@@ -304,13 +304,11 @@ def run_iac_smith(
                     "IaC Smith: static review failed after runtime repair: "
                     + "; ".join(static_check.errors)
                 )
-                if repair_attempt + 1 < max_runtime_repairs:
-                    repaired_files = _repair_generated_files(
-                        repairer=runtime_repairer,
-                        result=result,
-                        repair_errors=[*repair_errors, *static_check.errors],
-                    )
-                    repair_attempt += 1
+                repaired_files = _repair_generated_files(
+                    repairer=runtime_repairer,
+                    result=result,
+                    repair_errors=[*repair_errors, *static_check.errors],
+                )
             result["generated_files"] = repaired_files
             apply_generated_files(repo_path, repaired_files)
 
