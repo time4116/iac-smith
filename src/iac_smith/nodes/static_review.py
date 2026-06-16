@@ -101,9 +101,18 @@ _OUTPUT_DECL_RE = re.compile(r'\boutput\s+"([^"]+)"')
 _REQUIRED_PROVIDERS_RE = re.compile(r"required_providers\s*{")
 
 
-def _suggest_keep_file(locations: list[str], preferred: str, deprecated: str = "main.tf") -> str:
-    """Suggest which file to keep based on Terraform conventions."""
-    keep = preferred if preferred in locations else locations[0]
+def _suggest_keep_file(locations: list[str], preferred: str) -> str:
+    """Suggest which file to keep based on Terraform conventions.
+
+    Compares the basename or suffix since locations are full module paths
+    like ``modules/ecs-fargate/variables.tf`` and preferred is a short
+    name like ``variables.tf``.
+    """
+    keep = locations[0]
+    for loc in locations:
+        if loc.endswith(f"/{preferred}") or loc == preferred:
+            keep = loc
+            break
     remove = [loc for loc in locations if loc != keep]
     if remove:
         return f"Remove from {remove[0]}, keep in {keep}."

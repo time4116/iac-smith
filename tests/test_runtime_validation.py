@@ -57,7 +57,10 @@ def test_validate_generated_iac_fails_before_pr_when_plan_fails(monkeypatch, tmp
     )
 
     def fake_run(command, **kwargs):
-        returncode = 1 if command[:2] == ["terragrunt", "--terragrunt-non-interactive"] and "plan" in command else 0
+        is_plan = (
+            command[:2] == ["terragrunt", "--terragrunt-non-interactive"] and "plan" in command
+        )
+        returncode = 1 if is_plan else 0
         return subprocess.CompletedProcess(command, returncode, stdout="bad plan", stderr="")
 
     monkeypatch.setattr("iac_smith.runtime_validation.subprocess.run", fake_run)
