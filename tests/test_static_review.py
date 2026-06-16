@@ -5,6 +5,7 @@ from __future__ import annotations
 from iac_smith.models.validation import ValidationStatus
 from iac_smith.nodes.static_review import (
     _find_cross_file_duplicates,
+    _find_undeclared_variable_references,
     static_review_generated_files,
 )
 
@@ -75,10 +76,57 @@ class TestCrossFileDuplicates:
         """Files outside modules/ should not trigger false positives."""
         files = {
             "README.md": "just docs",
-            "environments/non-prod/terragrunt.hcl": 'variable "region" { default = "us-west-2" }',
+            "environments/non-prod/terragrunt.hcl": ('variable "region" { default = "us-west-2" }'),
         }
         errors = _find_cross_file_duplicates(files)
         assert errors == []
+
+
+class TestUndeclaredVariableReferences:
+    def test_var_referenced_and_declared_passes(self) -> None:
+        files = {
+            "modules/ecs-fargate/main.tf": "locals { prefix = var.name_prefix }",
+            "modules/ecs-fargate/variables.tf": ('variable "name_prefix" { type = string }'),
+        }
+        assert _find_undeclared_variable_references(files) == []
+
+    def test_var_referenced_but_not_declared(self) -> None:
+        main_tf = 'resource "aws_vpc" "this" { tags = { Name = var.name_prefix } }'
+        files = {
+            "modules/ecs-fargate/main.tf": main_tf,
+            "modules/ecs-fargate/variables.tf": 'variable "vpc_id" { type = string }',
+        }
+        errors = _find_undeclared_variable_references(files)
+        assert len(errors) == 1
+        assert "name_prefix" in errors[0]
+        assert "var.name_prefix" in errors[0]
+        assert "but no variable" in errors[0]
+
+    def test_var_referenced_in_outputs(self) -> None:
+        """var references in outputs.tf should also be checked."""
+        files = {
+            "modules/ecs-fargate/main.tf": 'resource "aws_vpc" "this" {}',
+            "modules/ecs-fargate/outputs.tf": ('output "vpc_id" { value = var.custom_id }'),
+            "modules/ecs-fargate/variables.tf": 'variable "vpc_id" { type = string }',
+        }
+        errors = _find_undeclared_variable_references(files)
+        assert any("custom_id" in e for e in errors)
+
+    def test_multiple_vars_missing(self) -> None:
+        files = {
+            "modules/ecs-fargate/main.tf": ('resource "x" "y" { a = var.foo; b = var.bar }'),
+            "modules/ecs-fargate/variables.tf": 'variable "other" { type = string }',
+        }
+        errors = _find_undeclared_variable_references(files)
+        assert len(errors) == 2
+        assert any("foo" in e for e in errors)
+        assert any("bar" in e for e in errors)
+
+    def test_non_module_files_ignored(self) -> None:
+        files = {
+            "environments/non-prod/terragrunt.hcl": ("inputs = { name = var.region }"),
+        }
+        assert _find_undeclared_variable_references(files) == []
 
 
 class TestStaticReviewIntegration:

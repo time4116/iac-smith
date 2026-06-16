@@ -177,6 +177,47 @@ def _find_cross_file_duplicates(generated_files: dict[str, str]) -> list[str]:
     return errors
 
 
+_VAR_REF_RE = re.compile(r"\bvar\.([A-Za-z0-9_-]+)\b")
+
+
+def _find_undeclared_variable_references(generated_files: dict[str, str]) -> list[str]:
+    """Detect ``var.xxx`` references in module files that lack a ``variable "xxx"`` declaration.
+
+    Bedrock sometimes references variables in ``main.tf`` (e.g. ``var.name_prefix``)
+    without declaring them in ``variables.tf``. This function cross-references
+    all ``var.xxx`` usages against all ``variable "xxx"`` declarations within each
+    module root to catch missing variable declarations.
+    """
+    refs_by_root: dict[str, dict[str, list[str]]] = {}
+    decls_by_root: dict[str, set[str]] = {}
+    errors = []
+
+    for path, content in generated_files.items():
+        root = _module_root(path)
+        if not root:
+            continue
+
+        for m in _VAR_REF_RE.finditer(content):
+            name = m.group(1)
+            refs_by_root.setdefault(root, {}).setdefault(name, []).append(path)
+
+        for m in _VAR_DECL_RE.finditer(content):
+            decls_by_root.setdefault(root, set()).add(m.group(1))
+
+    for root, var_refs in sorted(refs_by_root.items()):
+        declared = decls_by_root.get(root, set())
+        for name in sorted(var_refs):
+            if name not in declared:
+                locations = var_refs[name]
+                errors.append(
+                    f'Variable "{name}" is referenced via var.{name} in '
+                    f"`{root}` ({', '.join(locations)}) but no "
+                    f'variable "{name}" is declared in any file of this module.'
+                )
+
+    return errors
+
+
 def _contains_dangerous_public_ingress(content: str) -> bool:
     has_public_cidr = _CIDR_BLOCK_V4.search(content) or _CIDR_BLOCK_V6.search(content)
     if not has_public_cidr:
@@ -217,6 +258,7 @@ def static_review_generated_files(generated_files: dict[str, str]) -> Validation
 
     errors.extend(_find_undeclared_module_references(generated_files))
     errors.extend(_find_cross_file_duplicates(generated_files))
+    errors.extend(_find_undeclared_variable_references(generated_files))
 
     if errors:
         status = ValidationStatus.FAILED
