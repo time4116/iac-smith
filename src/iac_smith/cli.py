@@ -28,6 +28,13 @@ from iac_smith.version_detection import ensure_terraform_terragrunt
 from iac_smith.workspace import apply_generated_files, commit_generated_files, create_branch
 
 
+def _is_bedrock_throttle(exc: BaseException) -> bool:
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return False
+    return response.get("Error", {}).get("Code") == "ThrottlingException"
+
+
 class IssueClient(Protocol):
     def fetch_issue(self, repo: str, issue_number: int) -> GitHubIssue: ...
 
@@ -248,7 +255,15 @@ def run_iac_smith(
         else build_graph(file_generator_fn=selected_file_generator)
     )
     _log("IaC Smith: running graph.")
-    result = cast(IaCSmithState, graph.invoke(state))
+    try:
+        result = cast(IaCSmithState, graph.invoke(state))
+    except Exception as exc:
+        if _is_bedrock_throttle(exc):
+            return IaCSmithRunResult(
+                status="blocked",
+                block_reason=f"Bedrock throttled: {exc}",
+            )
+        raise
     _log(f"IaC Smith: graph finished with status {result.get('status')}.")
 
     if result.get("status") in {"ignored", "blocked"}:
@@ -293,23 +308,32 @@ def run_iac_smith(
                 f"from runtime failure ({repair_attempt + 1}/{max_runtime_repairs})."
             )
             repair_errors = list(runtime_validation.errors)
-            repaired_files = _repair_generated_files(
-                repairer=runtime_repairer,
-                result=result,
-                repair_errors=repair_errors,
-            )
-            static_check = static_review_generated_files(repaired_files)
-            if static_check.status == ValidationStatus.FAILED:
-                _log(
-                    "IaC Smith: static review failed after runtime repair: "
-                    + "; ".join(static_check.errors)
-                )
-                result["generated_files"] = repaired_files
+            try:
                 repaired_files = _repair_generated_files(
                     repairer=runtime_repairer,
                     result=result,
-                    repair_errors=[*repair_errors, *static_check.errors],
+                    repair_errors=repair_errors,
                 )
+                static_check = static_review_generated_files(repaired_files)
+                if static_check.status == ValidationStatus.FAILED:
+                    _log(
+                        "IaC Smith: static review failed after runtime repair: "
+                        + "; ".join(static_check.errors)
+                    )
+                    result["generated_files"] = repaired_files
+                    repaired_files = _repair_generated_files(
+                        repairer=runtime_repairer,
+                        result=result,
+                        repair_errors=[*repair_errors, *static_check.errors],
+                    )
+            except Exception as exc:
+                if _is_bedrock_throttle(exc):
+                    return IaCSmithRunResult(
+                        status="blocked",
+                        branch=branch,
+                        block_reason=f"Bedrock throttled during repair: {exc}",
+                    )
+                raise
             result["generated_files"] = repaired_files
             apply_generated_files(repo_path, repaired_files)
 

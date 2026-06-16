@@ -516,53 +516,6 @@ class BedrockTerraformGenerator:
             f"Failed to generate valid JSON for `{path}` after 3 attempts: {last_error}"
         )
 
-    def _generate_reviewed_file(
-        self,
-        *,
-        path: str,
-        generated_files: dict[str, str],
-        intent: InfrastructureIntent,
-        change_plan: ChangePlan,
-        repo_patterns: RepoPatterns,
-        ruleset: Ruleset | None,
-        target_repo: str,
-        file_index: int,
-        total_files: int,
-    ) -> str:
-        self._log(f"IaC Smith: generating file {file_index}/{total_files}: {path}")
-        content = self._generate_planned_file(
-            path=path,
-            intent=intent,
-            change_plan=change_plan,
-            repo_patterns=repo_patterns,
-            ruleset=ruleset,
-            target_repo=target_repo,
-        )
-        for _attempt in range(self.max_repair_attempts + 1):
-            validation = static_review_generated_files({**generated_files, path: content})
-            if validation.status != ValidationStatus.FAILED:
-                if _attempt:
-                    self._log(f"IaC Smith: static review passed for {path} after repair.")
-                else:
-                    self._log(f"IaC Smith: static review passed for {path}.")
-                return content
-            self._log(f"IaC Smith: static review failed for {path}: {'; '.join(validation.errors)}")
-            if _attempt >= self.max_repair_attempts:
-                joined_errors = "; ".join(validation.errors)
-                raise ValueError(f"Generated file `{path}` failed static review: {joined_errors}")
-            self._log(f"IaC Smith: repairing file {file_index}/{total_files}: {path}")
-            content = self._generate_planned_file(
-                path=path,
-                intent=intent,
-                change_plan=change_plan,
-                repo_patterns=repo_patterns,
-                ruleset=ruleset,
-                target_repo=target_repo,
-                repair_errors=validation.errors,
-                previous_content=content,
-            )
-        return content
-
     def generate_files(
         self,
         *,
