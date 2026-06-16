@@ -31,8 +31,27 @@ def apply_generated_files(repo_path: str | Path, generated_files: dict[str, str]
     return written
 
 
+_TF_GITIGNORE_PATTERNS = [
+    ".terraform/",
+    ".terragrunt-cache/",
+    "*.tfplan",
+    "tfplan.binary",
+]
+
+
+def _ensure_tf_gitignore(repo_path: Path) -> None:
+    gitignore = repo_path / ".gitignore"
+    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    missing = [p for p in _TF_GITIGNORE_PATTERNS if p not in existing]
+    if not missing:
+        return
+    sep = "" if (not existing or existing.endswith("\n")) else "\n"
+    gitignore.write_text(existing + sep + "\n".join(missing) + "\n", encoding="utf-8")
+
+
 def commit_generated_files(repo_path: str | Path, message: str) -> bool:
     root = Path(repo_path)
+    _ensure_tf_gitignore(root)
     status = _run_git(root, ["status", "--porcelain"]).stdout.strip()
     if not status:
         return False
