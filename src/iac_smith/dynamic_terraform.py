@@ -577,7 +577,7 @@ class BedrockTerraformGenerator:
         max_workers = min(self.concurrency, max(1, total_files))
         self._log(
             f"IaC Smith: generating {total_files} planned file(s) with Bedrock "
-            f"using concurrency {max_workers}."
+            f"(model: {self.model_id}, concurrency: {max_workers})."
         )
 
         def generate_one(path: str, file_index: int) -> tuple[str, str]:
