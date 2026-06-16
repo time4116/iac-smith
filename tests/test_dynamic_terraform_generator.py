@@ -602,6 +602,43 @@ class TestPathNeedsRepair:
         ]
         assert _path_needs_repair("modules/foundation/variables.tf", errors) is True
 
+    def test_returns_true_via_directory_match_for_runtime_validate_error(self):
+        # Runtime errors name the module directory, not individual .tf files.
+        # All files in that directory should be considered for repair.
+        errors = [
+            "terraform validate modules/ecs-fargate failed in `modules/ecs-fargate`:\n"
+            "│ Error: Reference to undeclared resource\n"
+            "│   on main.tf line 42\n"
+        ]
+        assert _path_needs_repair("modules/ecs-fargate/main.tf", errors) is True
+        assert _path_needs_repair("modules/ecs-fargate/variables.tf", errors) is True
+
+    def test_directory_match_does_not_match_sibling_module(self):
+        # A runtime error for modules/ecs-fargate must not implicate modules/foundation.
+        errors = [
+            "terraform validate modules/ecs-fargate failed in `modules/ecs-fargate`:\n"
+            "│ Error: Reference to undeclared resource\n"
+        ]
+        assert _path_needs_repair("modules/foundation/main.tf", errors) is False
+
+    def test_directory_match_does_not_match_parent_directory(self):
+        # `environments` must not match an error about `environments/non-prod/foundation`.
+        errors = [
+            "terragrunt init environments/non-prod/foundation failed in "
+            "`environments/non-prod/foundation`:\n│ Error: Duplicate required providers\n"
+        ]
+        assert _path_needs_repair("environments/terragrunt.hcl", errors) is False
+
+    def test_keep_in_exclusion_not_bypassed_by_directory_match(self):
+        # If a file is explicitly marked "keep in", the directory match must not
+        # override that and cause it to be regenerated.
+        errors = [
+            "required_providers block found in multiple files of module `modules/foundation`: "
+            "modules/foundation/main.tf, modules/foundation/versions.tf. "
+            "Remove from modules/foundation/main.tf, keep in modules/foundation/versions.tf."
+        ]
+        assert _path_needs_repair("modules/foundation/versions.tf", errors) is False
+
 
 def test_variables_tf_not_repaired_when_only_main_tf_has_duplicate_declarations():
     """Regression: when main.tf duplicates variable decls from variables.tf, repair

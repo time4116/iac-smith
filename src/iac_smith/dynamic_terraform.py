@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Protocol
@@ -22,13 +23,35 @@ def _path_needs_repair(path: str, errors: list[str]) -> bool:
     This function returns False when the path appears exclusively as a "keep in"
     target so that variables.tf / outputs.tf / versions.tf are not unnecessarily
     regenerated (which can drop declarations that main.tf still references).
+
+    Also matches via the parent directory of `path`: runtime validation errors
+    label failures with the module or stack directory (e.g. "terraform validate
+    modules/ecs-fargate failed"), not with individual file paths, so file-level
+    matching alone would miss them and trigger the expensive all-files fallback.
     """
+    explicitly_excluded = False
     for error in errors:
         if path not in error:
             continue
         if f"keep in {path}." in error and f"Remove from {path}," not in error:
+            explicitly_excluded = True
             continue
         return True
+
+    # Honour the "keep in" hint: don't repair the canonical file.
+    if explicitly_excluded:
+        return False
+
+    # Directory-based fallback: match when the error names the parent directory.
+    # Use a negative lookahead for "/" to avoid matching a shorter directory
+    # name that is a prefix of a longer path (e.g. `environments` must not
+    # match an error about `environments/non-prod/foundation`).
+    path_dir = path.rpartition("/")[0]
+    if path_dir:
+        dir_pattern = re.escape(path_dir) + r"(?!/)"
+        if any(re.search(dir_pattern, error) for error in errors):
+            return True
+
     return False
 
 
