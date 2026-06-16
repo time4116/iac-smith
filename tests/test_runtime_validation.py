@@ -39,7 +39,11 @@ def test_validate_generated_iac_runs_terraform_and_terragrunt_plan(monkeypatch, 
     assert ["terraform", "fmt", "-check", "-recursive", "-diff", "modules"] in commands
     assert ["terraform", "init", "-backend=false", "-input=false"] in commands
     assert ["terraform", "validate"] in commands
-    assert any(command[:2] == ["terragrunt", "plan"] for command in commands)
+    assert any("plan" in command for command in commands)
+    assert any(
+        command[:3] == ["terragrunt", "--terragrunt-non-interactive", "plan"]
+        for command in commands
+    )
 
 
 def test_validate_generated_iac_fails_before_pr_when_plan_fails(monkeypatch, tmp_path: Path):
@@ -53,7 +57,7 @@ def test_validate_generated_iac_fails_before_pr_when_plan_fails(monkeypatch, tmp
     )
 
     def fake_run(command, **kwargs):
-        returncode = 1 if command[:2] == ["terragrunt", "plan"] else 0
+        returncode = 1 if command[:2] == ["terragrunt", "--terragrunt-non-interactive"] and "plan" in command else 0
         return subprocess.CompletedProcess(command, returncode, stdout="bad plan", stderr="")
 
     monkeypatch.setattr("iac_smith.runtime_validation.subprocess.run", fake_run)

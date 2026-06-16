@@ -32,6 +32,8 @@ class TestCrossFileDuplicates:
         assert len(errors) == 1
         assert 'Variable "vpc_id"' in errors[0]
         assert "modules/ecs-fargate" in errors[0]
+        assert "Remove from" in errors[0]
+        assert "keep in" in errors[0]
 
     def test_duplicate_output_across_files(self) -> None:
         files = {

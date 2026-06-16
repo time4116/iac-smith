@@ -131,14 +131,14 @@ def validate_generated_iac(
         command_specs.append(
             (
                 f"terragrunt init {label}",
-                ["terragrunt", "init", "-reconfigure", "--terragrunt-non-interactive"],
+                ["terragrunt", "--terragrunt-non-interactive", "init", "-reconfigure"],
                 stack,
             )
         )
         command_specs.append(
             (
                 f"terragrunt validate {label}",
-                ["terragrunt", "validate", "--terragrunt-non-interactive"],
+                ["terragrunt", "--terragrunt-non-interactive", "validate"],
                 stack,
             )
         )
@@ -147,11 +147,11 @@ def validate_generated_iac(
                 f"terragrunt plan {label}",
                 [
                     "terragrunt",
+                    "--terragrunt-non-interactive",
                     "plan",
                     "-input=false",
                     "-lock=false",
                     "-out=tfplan.binary",
-                    "--terragrunt-non-interactive",
                 ],
                 stack,
             )

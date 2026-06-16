@@ -101,6 +101,15 @@ _OUTPUT_DECL_RE = re.compile(r'\boutput\s+"([^"]+)"')
 _REQUIRED_PROVIDERS_RE = re.compile(r"required_providers\s*{")
 
 
+def _suggest_keep_file(locations: list[str], preferred: str, deprecated: str = "main.tf") -> str:
+    """Suggest which file to keep based on Terraform conventions."""
+    keep = preferred if preferred in locations else locations[0]
+    remove = [loc for loc in locations if loc != keep]
+    if remove:
+        return f"Remove from {remove[0]}, keep in {keep}."
+    return "Keep one declaration only."
+
+
 def _find_cross_file_duplicates(generated_files: dict[str, str]) -> list[str]:
     """Detect variable/output/provider declarations duplicated across files in the same module.
 
@@ -133,24 +142,27 @@ def _find_cross_file_duplicates(generated_files: dict[str, str]) -> list[str]:
     for root, vars_by_name in sorted(var_by_root.items()):
         for name, locations in sorted(vars_by_name.items()):
             if len(locations) > 1:
+                hint = _suggest_keep_file(locations, preferred="variables.tf")
                 errors.append(
                     f'Variable "{name}" declared in multiple files of module '
-                    f"`{root}`: {', '.join(locations)}"
+                    f"`{root}`: {', '.join(locations)}. {hint}"
                 )
 
     for root, outputs_by_name in sorted(output_by_root.items()):
         for name, locations in sorted(outputs_by_name.items()):
             if len(locations) > 1:
+                hint = _suggest_keep_file(locations, preferred="outputs.tf")
                 errors.append(
                     f'Output "{name}" declared in multiple files of module '
-                    f"`{root}`: {', '.join(locations)}"
+                    f"`{root}`: {', '.join(locations)}. {hint}"
                 )
 
     for root, locations in sorted(prov_by_root.items()):
         if len(locations) > 1:
+            hint = _suggest_keep_file(locations, preferred="versions.tf")
             errors.append(
                 f"required_providers block found in multiple files of module "
-                f"`{root}`: {', '.join(locations)}"
+                f"`{root}`: {', '.join(locations)}. {hint}"
             )
 
     return errors
