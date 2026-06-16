@@ -304,6 +304,7 @@ def run_iac_smith(
                     "IaC Smith: static review failed after runtime repair: "
                     + "; ".join(static_check.errors)
                 )
+                result["generated_files"] = repaired_files
                 repaired_files = _repair_generated_files(
                     repairer=runtime_repairer,
                     result=result,
