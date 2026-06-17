@@ -238,7 +238,10 @@ After all files are generated in parallel:
 - File organization rules: `variables.tf` = variables only, `outputs.tf` = outputs only, `versions.tf` = terraform block + required_providers only, `main.tf` = resources + data sources only
 - No duplicate declarations across files in a module
 - No hardcoded credentials
-- Apply workflows must never trigger on `pull_request`
+- Apply workflows must never trigger on `pull_request`; `terraform-apply.yml` must trigger only on push to `main` — never `master`, never both
+- `terraform-apply.yml` must have a `bootstrap` job that runs first (before any stack apply job); the bootstrap job imports `aws_s3_bucket.terraform_state` and `aws_dynamodb_table.terraform_locks` before applying, making it idempotent on ephemeral CI runners
+- `terraform-apply.yml` must use `secrets.AWS_ROLE_ARN_NON_PROD` for `role-to-assume` — never `AWS_ROLE_TO_ASSUME`, `AWS_ROLE_ARN`, or any other name
+- Bootstrap module S3 resource must be named `aws_s3_bucket.terraform_state`; DynamoDB must be `aws_dynamodb_table.terraform_locks`; variables must be `state_bucket_name` and `state_lock_table_name` — these names are hardcoded in the apply workflow's import step
 - Prefer private networking, encryption, least privilege
 - Follow all `error`-severity rules; follow `warning`/`preference` rules unless conflict
 - Generated workflows that require AWS access must use OIDC (`aws-actions/configure-aws-credentials` with `role-to-assume`); never emit `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY`
@@ -250,7 +253,7 @@ After all files are generated in parallel:
 
 **Canonical file shape examples injected (`_CANONICAL_FILE_SHAPES`):**
 
-Seven annotated structural templates are appended to every generation prompt immediately after the non-negotiable rules. They cover:
+Eight annotated structural templates are appended to every generation prompt immediately after the non-negotiable rules. They cover:
 - `versions.tf` — sole owner of `required_providers`; explicitly labelled "must NEVER appear in main.tf"
 - `main.tf` — resources and data sources only; no `terraform{}` block, no variable/output declarations
 - `variables.tf` — all `variable` declarations; shows `var.xxx` cross-file reference pattern
@@ -258,6 +261,7 @@ Seven annotated structural templates are appended to every generation prompt imm
 - `environments/non-prod/terragrunt.hcl` (root) — `remote_state`, `locals`, `generate` block
 - `environments/non-prod/<stack>/terragrunt.hcl` (stack) — `include`, `dependency` blocks, `inputs`; explicitly warns "NEVER write `module.<name>.output_name`"
 - `.github/workflows/terraform-pr-check.yml` — trigger path and working-directory alignment example
+- `.github/workflows/terraform-apply.yml` — bootstrap job with idempotent imports, apply-foundation and stack apply jobs with `needs:` dependencies, `secrets.AWS_ROLE_ARN_NON_PROD` usage
 
 ---
 
@@ -476,7 +480,7 @@ All other Bedrock errors (auth failures, model errors) are not caught and propag
 
 - IaC Smith **never** runs `terraform apply` or `terragrunt apply`.
 - IaC Smith **never** commits to `main` on the target repo; always creates a new branch.
-- Generated apply workflows must have a `push` trigger scoped to `main`/`master` only — never `pull_request`.
+- Generated apply workflows must have a `push` trigger scoped to `main` only — never `master`, never `pull_request`.
 - Terragrunt remote state keys must always use `path_relative_to_include()` — hardcoded keys are a FAILED static check.
 - File organization within a Terraform module is strictly partitioned: declarations belong in exactly one canonical file. Cross-file duplicates are a FAILED static check.
 - Path traversal in generated file paths is rejected before write (`..` and leading `/` are invalid).
