@@ -114,7 +114,7 @@ class TestBedrockGenerationSmoke:
         )
         result = generator.generate_files(
             intent=_vpc_intent(),
-            change_plan=_change_plan_main_tf(),
+            change_plan=_change_plan_multifile(),
             repo_patterns=_repo_patterns(),
             ruleset=None,
             target_repo="time4116/iac-smith-demo-infra",
@@ -149,7 +149,7 @@ class TestBedrockRepairFlow:
         """Generate a file with a known 0.0.0.0/0 violation, feed errors back,
         and verify Bedrock removes the dangerous ingress."""
         intent = _vpc_intent()
-        change_plan = _change_plan_main_tf()
+        change_plan = _change_plan_multifile()
         repo_patterns = _repo_patterns()
 
         # First generation — let Bedrock produce something

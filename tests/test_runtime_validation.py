@@ -40,7 +40,11 @@ def test_validate_generated_iac_runs_terraform_and_terragrunt_plan(monkeypatch, 
     assert ["terraform", "validate"] in commands
     assert any("plan" in command for command in commands)
     assert any(
-        command[:2] in (["terragrunt", "--non-interactive"], ["terragrunt", "--terragrunt-non-interactive"])
+        command[:2]
+        in (
+            ["terragrunt", "--non-interactive"],
+            ["terragrunt", "--terragrunt-non-interactive"],
+        )
         and "plan" in command
         for command in commands
     )

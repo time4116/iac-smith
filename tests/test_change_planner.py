@@ -24,7 +24,10 @@ def test_plan_derives_stack_name_from_resource_type():
     assert "modules/eks-fargate/README.md" in plan.files_to_generate
     assert ".github/workflows/terraform-pr-check.yml" in plan.files_to_generate
     assert ".github/workflows/terraform-apply.yml" in plan.files_to_generate
-    assert plan.backend_resources["non-prod"].bucket == "iac-smith-state-non-prod-iac-smith-demo-infra"
+    assert (
+        plan.backend_resources["non-prod"].bucket
+        == "iac-smith-state-non-prod-iac-smith-demo-infra"
+    )
     assert plan.backend_resources["non-prod"].lock_table == "iac-smith-lock-non-prod"
     assert (
         "Generate AWS infrastructure with secure defaults regardless of prompt wording"
@@ -112,7 +115,10 @@ def test_plan_ecs_fargate_adds_foundation_stack_and_module():
     assert "environments/non-prod/foundation/terragrunt.hcl" in plan.files_to_generate
     assert "modules/foundation/main.tf" in plan.files_to_generate
     assert "modules/ecs-fargate/main.tf" in plan.files_to_generate
-    assert plan.backend_resources["non-prod"].bucket == "iac-smith-state-non-prod-iac-smith-demo-infra"
+    assert (
+        plan.backend_resources["non-prod"].bucket
+        == "iac-smith-state-non-prod-iac-smith-demo-infra"
+    )
     assert plan.backend_resources["non-prod"].lock_table == "iac-smith-lock-non-prod"
 
 

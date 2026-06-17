@@ -474,7 +474,8 @@ def test_bedrock_terraform_generator_logs_generation_and_repair_progress():
     )
 
     assert messages[0] == (
-        "IaC Smith: generating 4 planned file(s) with Bedrock (model: anthropic.test-model, concurrency: 4)."
+        "IaC Smith: generating 4 planned file(s) with Bedrock"
+        " (model: anthropic.test-model, concurrency: 4)."
     )
     assert (
         "IaC Smith: generating file 1/4: environments/non-prod/ecs-fargate/terragrunt.hcl"
@@ -581,7 +582,10 @@ class TestPathNeedsRepair:
             "Terragrunt state key in `environments/non-prod/ecs-fargate/terragrunt.hcl` "
             "must use path_relative_to_include()."
         ]
-        assert _path_needs_repair("environments/non-prod/ecs-fargate/terragrunt.hcl", errors) is True
+        assert (
+            _path_needs_repair("environments/non-prod/ecs-fargate/terragrunt.hcl", errors)
+            is True
+        )
 
     def test_returns_true_when_path_appears_as_both_remove_and_keep(self):
         errors = [
@@ -649,11 +653,13 @@ def test_variables_tf_not_repaired_when_only_main_tf_has_duplicate_declarations(
     main_tf_bad = (
         'variable "env" { type = string }\n'
         'resource "aws_vpc" "this" { cidr_block = var.vpc_cidr }\n'
-        'resource "aws_internet_gateway" "this" { tags = { Project = var.project, Region = var.region } }\n'
+        'resource "aws_internet_gateway" "this"'
+        ' { tags = { Project = var.project, Region = var.region } }\n'
     )
     main_tf_fixed = (
         'resource "aws_vpc" "this" { cidr_block = var.vpc_cidr }\n'
-        'resource "aws_internet_gateway" "this" { tags = { Project = var.project, Region = var.region } }\n'
+        'resource "aws_internet_gateway" "this"'
+        ' { tags = { Project = var.project, Region = var.region } }\n'
     )
     variables_tf = (
         'variable "env" { type = string }\n'
@@ -682,7 +688,11 @@ def test_variables_tf_not_repaired_when_only_main_tf_has_duplicate_declarations(
             path = context["files_to_generate"][0]
             call_count_by_path[path] = call_count_by_path.get(path, 0) + 1
             in_repair = "Static review failures:" in prompt
-            content = main_tf_fixed if (in_repair and path == "modules/foundation/main.tf") else files[path]
+            content = (
+                main_tf_fixed
+                if (in_repair and path == "modules/foundation/main.tf")
+                else files[path]
+            )
             return {
                 "body": FakeBody(
                     json.dumps(
