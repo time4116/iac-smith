@@ -8,14 +8,14 @@ The goal is not to blindly apply infrastructure. The goal is to turn natural-lan
 
 ## Prerequisites
 
-- **Two GitHub repositories**: a controller repo (this one) and a target infrastructure repo (starts empty)
+- **Two GitHub repositories**: a controller repo (this one) and a target infrastructure repo (new or existing Terraform)
 - **AWS account** with Bedrock enabled in your chosen region and model access granted
 - **AWS IAM OIDC role** trusted by GitHub Actions — see [docs/SETUP.md](docs/SETUP.md)
 - **Python 3.12+** and [uv](https://docs.astral.sh/uv/) (for local development only)
 
 ## Quickstart
 
-1. Fork this repo and create an empty target infrastructure repo
+1. Fork this repo and point it at a target infrastructure repo (empty or existing)
 2. Configure the required GitHub Actions secrets and variables (see table below)
 3. Create a GitHub issue describing the AWS infrastructure you want
 4. Apply the `iac-smith` label to the issue
@@ -37,15 +37,13 @@ Configure these in the controller repo under **Settings → Secrets and variable
 
 See [docs/SETUP.md](docs/SETUP.md) for full setup instructions including the IAM trust policy shape and fine-grained PAT scope.
 
-## Supported request families
+## What IaC Smith can handle
 
-1. Baseline Terraform/Terragrunt repo with backend bootstrap
-2. VPC foundation
-3. EKS Fargate
-4. ECS Fargate
-5. Private RDS PostgreSQL
+IaC Smith is not limited to a fixed set of infrastructure types. The agent reads the target repo's existing conventions, module layout, and Terragrunt stacks before generating anything — so it produces changes that fit the repo rather than starting from scratch every time.
 
-IaC Smith refuses unsupported or risky requests rather than hallucinating Terraform.
+It handles greenfield repos (first issue creates the backend bootstrap and repo structure) and iterative additions to existing repos (new module, new stack, changes to existing resources) equally.
+
+IaC Smith will refuse requests that are genuinely destructive or risky rather than hallucinating a broken implementation.
 
 ## Documentation
 

@@ -165,6 +165,33 @@ def test_generation_prompt_contains_rules_repo_patterns_and_requested_paths():
     assert "Do not generate files outside files_to_generate" in prompt
 
 
+def test_generation_prompt_includes_existing_file_content_when_provided():
+    prompt = build_generation_prompt(
+        intent=_intent(),
+        change_plan=_plan(),
+        repo_patterns=RepoPatterns(),
+        ruleset=None,
+        target_repo="time4116/iac-smith-demo-infra",
+        existing_content="# existing README\n## ECS Fargate\nPrevious section.\n",
+    )
+
+    assert "existing README" in prompt
+    assert "Preserve all existing content" in prompt
+    assert "Do not start from scratch" in prompt
+
+
+def test_generation_prompt_omits_existing_section_when_not_provided():
+    prompt = build_generation_prompt(
+        intent=_intent(),
+        change_plan=_plan(),
+        repo_patterns=RepoPatterns(),
+        ruleset=None,
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+
+    assert "Preserve all existing content" not in prompt
+
+
 def test_parse_generation_payload_accepts_anthropic_json_files():
     payload = json.dumps(
         {

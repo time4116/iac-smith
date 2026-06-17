@@ -29,7 +29,7 @@ def _fake_intent_parser(issue_text: str) -> InfrastructureIntent:
     )
 
 
-def _fake_graph_file_generator(*, intent, change_plan, repo_patterns, ruleset, target_repo):
+def _fake_graph_file_generator(*, intent, change_plan, repo_patterns, ruleset, target_repo, repo_path=None):
     return {"modules/eks-fargate/main.tf": 'resource "aws_ecs_cluster" "this" { name = "test" }\n'}
 
 
@@ -84,7 +84,7 @@ def test_default_file_generator_uses_bedrock_dynamic_generator(monkeypatch):
 def test_graph_passes_ruleset_and_repo_context_to_injected_file_generator(tmp_path):
     calls = []
 
-    def fake_file_generator(*, intent, change_plan, repo_patterns, ruleset, target_repo):
+    def fake_file_generator(*, intent, change_plan, repo_patterns, ruleset, target_repo, repo_path=None):
         calls.append(
             {
                 "intent": intent,
@@ -130,6 +130,34 @@ def test_graph_passes_ruleset_and_repo_context_to_injected_file_generator(tmp_pa
     assert calls[0]["repo_patterns"].uses_terragrunt is True
     assert isinstance(calls[0]["ruleset"], Ruleset)
     assert calls[0]["ruleset"].rules[0].id == "dynamic-generation-rule"
+
+
+def test_graph_passes_repo_path_to_file_generator(tmp_path):
+    received_repo_path = []
+
+    def fake_file_generator(*, intent, change_plan, repo_patterns, ruleset, target_repo, repo_path=None):
+        received_repo_path.append(repo_path)
+        return {"modules/eks-fargate/main.tf": 'resource "aws_ecs_cluster" "this" { name = "test" }\n'}
+
+    graph = build_graph(
+        intent_parser_fn=_fake_intent_parser,
+        file_generator_fn=fake_file_generator,
+    )
+    graph.invoke(
+        IaCSmithState(
+            issue_number=12,
+            issue_title="Create EKS Fargate infra",
+            issue_body="Create AWS infrastructure for a non-prod EKS Fargate setup in us-west-2.",
+            issue_url="https://github.com/time4116/iac-smith/issues/12",
+            labels=["iac-smith"],
+            target_repo="time4116/iac-smith-demo-infra",
+            target_repo_path=str(tmp_path),
+        )
+    )
+
+    from pathlib import Path
+
+    assert received_repo_path[0] == Path(tmp_path)
 
 
 def test_graph_compiles_and_routes_supported_issue_to_generated_pr_ready(tmp_path):

@@ -30,6 +30,7 @@ class FileGenerator(Protocol):
         repo_patterns: RepoPatterns,
         ruleset: Ruleset | None,
         target_repo: str,
+        repo_path: Path | None = None,
     ) -> dict[str, str]: ...
 
 
@@ -40,6 +41,7 @@ def default_file_generator(
     repo_patterns: RepoPatterns,
     ruleset: Ruleset | None,
     target_repo: str,
+    repo_path: Path | None = None,
 ) -> dict[str, str]:
     return BedrockTerraformGenerator().generate_files(
         intent=intent,
@@ -47,6 +49,7 @@ def default_file_generator(
         repo_patterns=repo_patterns,
         ruleset=ruleset,
         target_repo=target_repo,
+        repo_path=repo_path,
     )
 
 
@@ -118,12 +121,14 @@ def make_code_generator(file_generator_fn: FileGenerator):
             return {**state, "status": "generated"}
 
         # Perform Bedrock generation or recovery attempt
+        raw_repo_path = state.get("target_repo_path")
         generated_files = file_generator_fn(
             intent=state["intent"],
             change_plan=state["change_plan"],
             repo_patterns=state["repo_patterns"],
             ruleset=state.get("ruleset"),
             target_repo=state["target_repo"],
+            repo_path=Path(raw_repo_path) if raw_repo_path else None,
         )
         return {
             **state,

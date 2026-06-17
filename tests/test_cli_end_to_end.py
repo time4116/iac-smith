@@ -40,7 +40,7 @@ def _fake_intent_parser(issue_text: str) -> InfrastructureIntent:
     )
 
 
-def _fake_file_generator(*, intent, change_plan, repo_patterns, ruleset, target_repo):
+def _fake_file_generator(*, intent, change_plan, repo_patterns, ruleset, target_repo, repo_path=None):
     main_tf = 'resource "aws_vpc" "this" { cidr_block = "10.0.0.0/16" }\n'
     readme = "# vpc-foundation\n<!-- BEGIN_TF_DOCS -->\n<!-- END_TF_DOCS -->\n"
     return {
@@ -158,7 +158,7 @@ def test_run_iac_smith_repairs_runtime_validation_failures_before_pr(tmp_path: P
         def __init__(self):
             self.repair_errors: list[str] = []
 
-        def __call__(self, *, intent, change_plan, repo_patterns, ruleset, target_repo):
+        def __call__(self, *, intent, change_plan, repo_patterns, ruleset, target_repo, repo_path=None):
             return _fake_file_generator(
                 intent=intent,
                 change_plan=change_plan,

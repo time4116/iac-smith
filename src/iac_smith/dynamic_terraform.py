@@ -3,6 +3,7 @@ import os
 import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
@@ -406,6 +407,7 @@ def build_generation_prompt(
     repair_errors: list[str] | None = None,
     previous_content: str | None = None,
     sibling_content: dict[str, str] | None = None,
+    existing_content: str | None = None,
 ) -> str:
     context = {
         "target_repo": target_repo,
@@ -424,6 +426,18 @@ def build_generation_prompt(
             " (READ-ONLY — do not regenerate these; use them to ensure resource"
             " names, variable names, and output references are consistent with"
             " what is actually declared in the module):\n\n" + "\n\n".join(parts)
+        )
+
+    existing_section = ""
+    if existing_content:
+        existing_section = (
+            "\n\nThis file already exists in the target repository. Current content:\n"
+            f"```\n{existing_content}\n```\n"
+            "Update this file to incorporate the new infrastructure. "
+            "Preserve all existing content that remains valid. "
+            "For README.md, add new sections rather than replacing existing ones. "
+            "For workflow YAML, add or update relevant jobs while keeping the canonical structure. "
+            "Do not start from scratch when the existing content is substantially correct."
         )
 
     repair_section = ""
@@ -532,7 +546,7 @@ Non-negotiable rules:
 * `terraform-pr-check.yml` MUST use a single job named `validate`. Do NOT split
   into multiple jobs per stack — that wastes runners, installs tools multiple times,
   and makes some tool installs appear unused.
-{_CANONICAL_FILE_SHAPES}{sibling_section}{repair_section}
+{_CANONICAL_FILE_SHAPES}{sibling_section}{existing_section}{repair_section}
 Generation context JSON:
 {json.dumps(context, indent=2)}
 """
@@ -671,6 +685,7 @@ class BedrockTerraformGenerator:
         repair_errors: list[str] | None = None,
         previous_content: str | None = None,
         sibling_content: dict[str, str] | None = None,
+        existing_content: str | None = None,
     ) -> str:
         single_file_plan = change_plan.model_copy(update={"files_to_generate": [path]})
         prompt = build_generation_prompt(
@@ -682,6 +697,7 @@ class BedrockTerraformGenerator:
             repair_errors=repair_errors,
             previous_content=previous_content,
             sibling_content=sibling_content,
+            existing_content=existing_content,
         )
         last_error: Exception | None = None
         for attempt in range(3):
@@ -733,6 +749,7 @@ class BedrockTerraformGenerator:
         repo_patterns: RepoPatterns,
         ruleset: Ruleset | None,
         target_repo: str,
+        repo_path: Path | None = None,
     ) -> dict[str, str]:
         generated_files: dict[str, str] = {}
         total_files = len(change_plan.files_to_generate)
@@ -743,6 +760,16 @@ class BedrockTerraformGenerator:
             f"IaC Smith: generating {total_files} planned file(s) with Bedrock "
             f"(model: {self.model_id}, concurrency: {self.concurrency})."
         )
+
+        existing_contents: dict[str, str] = {}
+        if repo_path is not None:
+            for file_path in change_plan.files_to_generate:
+                candidate = repo_path / file_path
+                if candidate.is_file():
+                    try:
+                        existing_contents[file_path] = candidate.read_text(encoding="utf-8")
+                    except (OSError, UnicodeDecodeError):
+                        pass
 
         # Group files by directory and sort within each group so main.tf is
         # generated before outputs.tf and variables.tf, giving those files
@@ -767,6 +794,7 @@ class BedrockTerraformGenerator:
                     ruleset=ruleset,
                     target_repo=target_repo,
                     sibling_content=_sibling_content(path, accumulated) or None,
+                    existing_content=existing_contents.get(path),
                 )
                 accumulated[path] = content
                 results.append((path, content))
