@@ -38,8 +38,8 @@ def test_validate_generated_iac_runs_terraform_and_terragrunt_plan(monkeypatch, 
     assert ["terraform", "fmt", "-check", "-recursive", "-diff", "modules"] in commands
     assert ["terraform", "init", "-backend=false", "-input=false"] in commands
     assert ["terraform", "validate"] in commands
-    assert any("plan" in command for command in commands)
-    assert any(
+    # terragrunt init/validate/plan are skipped for stacks — dependencies aren't deployed
+    assert not any(
         command[:2]
         in (
             ["terragrunt", "--non-interactive"],
@@ -50,10 +50,12 @@ def test_validate_generated_iac_runs_terraform_and_terragrunt_plan(monkeypatch, 
     )
 
 
-def test_validate_generated_iac_fails_before_pr_when_plan_fails(monkeypatch, tmp_path: Path):
-    (tmp_path / "environments" / "non-prod" / "ecs-fargate").mkdir(parents=True)
-    (tmp_path / "environments" / "non-prod" / "ecs-fargate" / "terragrunt.hcl").write_text(
-        'terraform { source = "../../../modules/ecs-fargate" }\n'
+def test_validate_generated_iac_fails_before_pr_when_terraform_validate_fails(
+    monkeypatch, tmp_path: Path
+):
+    (tmp_path / "modules" / "ecs-fargate").mkdir(parents=True)
+    (tmp_path / "modules" / "ecs-fargate" / "main.tf").write_text(
+        'resource "aws_instance" "x" {}\n'
     )
 
     monkeypatch.setattr(
@@ -61,16 +63,16 @@ def test_validate_generated_iac_fails_before_pr_when_plan_fails(monkeypatch, tmp
     )
 
     def fake_run(command, **kwargs):
-        is_plan = (
-            command[:2] == ["terragrunt", "--terragrunt-non-interactive"] and "plan" in command
+        is_validate = command == ["terraform", "validate"]
+        returncode = 1 if is_validate else 0
+        return subprocess.CompletedProcess(
+            command, returncode, stdout="bad validate" if is_validate else "", stderr=""
         )
-        returncode = 1 if is_plan else 0
-        return subprocess.CompletedProcess(command, returncode, stdout="bad plan", stderr="")
 
     monkeypatch.setattr("iac_smith.runtime_validation.subprocess.run", fake_run)
 
     result = validate_generated_iac(tmp_path)
 
     assert not result.passed
-    assert "terragrunt plan" in result.errors[0]
-    assert "bad plan" in result.errors[0]
+    assert "terraform validate" in result.errors[0]
+    assert "bad validate" in result.errors[0]
