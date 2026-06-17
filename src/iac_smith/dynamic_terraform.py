@@ -241,6 +241,18 @@ jobs:
 """
 
 
+def _sibling_content(path: str, all_files: dict[str, str]) -> dict[str, str]:
+    """Return current content of other non-Markdown files in the same directory as path."""
+    path_dir = path.rpartition("/")[0]
+    if not path_dir:
+        return {}
+    return {
+        p: c
+        for p, c in all_files.items()
+        if p != path and p.rpartition("/")[0] == path_dir and not p.endswith(".md")
+    }
+
+
 def build_generation_prompt(
     *,
     intent: InfrastructureIntent,
@@ -250,6 +262,7 @@ def build_generation_prompt(
     target_repo: str,
     repair_errors: list[str] | None = None,
     previous_content: str | None = None,
+    sibling_content: dict[str, str] | None = None,
 ) -> str:
     context = {
         "target_repo": target_repo,
@@ -260,6 +273,16 @@ def build_generation_prompt(
         "files_to_generate": change_plan.files_to_generate,
     }
     shape = '{"path": "path/to/file.tf", "content": "file body", "assumptions": [], "warnings": []}'
+    sibling_section = ""
+    if sibling_content:
+        parts = [f"--- {p} ---\n```\n{c}\n```" for p, c in sorted(sibling_content.items())]
+        sibling_section = (
+            "\n\nCurrent content of sibling files in the same module"
+            " (READ-ONLY — do not regenerate these; use them to ensure resource"
+            " names, variable names, and output references are consistent with"
+            " what is actually declared in the module):\n\n" + "\n\n".join(parts)
+        )
+
     repair_section = ""
     if repair_errors:
         repair_section = f"""
@@ -274,7 +297,7 @@ Previous generated content that failed review:
 ```text
 {previous_content or ""}
 ```
-
+{sibling_section}
 Regenerate the same file path only. Fix every validation failure. Do not
 repeat the failing pattern. Validation failures may come from static review,
 terraform fmt/init/validate, terragrunt hclfmt/init/validate, or terragrunt plan.
@@ -463,6 +486,7 @@ class BedrockTerraformGenerator:
         target_repo: str,
         repair_errors: list[str] | None = None,
         previous_content: str | None = None,
+        sibling_content: dict[str, str] | None = None,
     ) -> str:
         single_file_plan = change_plan.model_copy(update={"files_to_generate": [path]})
         prompt = build_generation_prompt(
@@ -473,6 +497,7 @@ class BedrockTerraformGenerator:
             target_repo=target_repo,
             repair_errors=repair_errors,
             previous_content=previous_content,
+            sibling_content=sibling_content,
         )
         last_error: Exception | None = None
         for attempt in range(3):
@@ -599,6 +624,7 @@ class BedrockTerraformGenerator:
                     target_repo=target_repo,
                     repair_errors=repair_errors,
                     previous_content=previous_files[path],
+                    sibling_content=_sibling_content(path, previous_files) or None,
                 )
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -662,6 +688,7 @@ class BedrockTerraformGenerator:
                 target_repo=target_repo,
                 repair_errors=repair_errors,
                 previous_content=generated_files[path],
+                sibling_content=_sibling_content(path, generated_files) or None,
             )
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
