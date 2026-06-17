@@ -241,6 +241,12 @@ After all files are generated in parallel:
 - Apply workflows must never trigger on `pull_request`
 - Prefer private networking, encryption, least privilege
 - Follow all `error`-severity rules; follow `warning`/`preference` rules unless conflict
+- Generated workflows that require AWS access must use OIDC (`aws-actions/configure-aws-credentials` with `role-to-assume`); never emit `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY`
+- Install terragrunt via the authenticated `curl` pattern; never use `autero1/action-terragrunt`
+- `terraform-pr-check.yml` must use a single job named `validate`; never split into multiple jobs
+- `terraform-pr-check.yml` must not include `terragrunt validate` or `terragrunt plan` steps — those require a deployed S3 backend that does not exist for brand-new infrastructure
+- `terraform-pr-check.yml` must use `terragrunt hcl format --check` for HCL format checking; never `terragrunt hclfmt --check` (the `--check` flag does not exist on the `hclfmt` subcommand)
+- `terraform-pr-check.yml` does not need AWS credentials or `id-token: write` — `terraform init -backend=false` and `terraform validate` are schema-only operations
 
 **Canonical file shape examples injected (`_CANONICAL_FILE_SHAPES`):**
 
@@ -297,10 +303,11 @@ class ValidationResult(BaseModel):
 
 | Scope | Command |
 |---|---|
-| `environments/` (if exists) | `terragrunt hcl format` (v0.71+) or `terragrunt hclfmt` |
-| `modules/` and `bootstrap/` | `terraform fmt -check -recursive -diff` |
+| `environments/` (if exists) | `terragrunt hcl format` (v0.71+) or `terragrunt hclfmt` — auto-fix, no `--check` |
+| `modules/` and `bootstrap/` | `terraform fmt -recursive` — auto-fix, silently corrects formatting in place |
 | Each dir in `modules/` with `*.tf` | `terraform init -backend=false -input=false` then `terraform validate` |
-| Each dir in `environments/` with `terragrunt.hcl` | `terragrunt init -reconfigure` then `terragrunt validate` then `terragrunt plan -lock=false -out=tfplan.binary` |
+
+Terragrunt stacks under `environments/` are **not** validated at runtime. `terragrunt init/validate/plan` require all dependency stacks to be deployed, which is never true for brand-new infrastructure. HCL syntax errors are caught by the formatter; provider and schema errors are caught by `terraform validate` on the underlying modules.
 
 **Environment set for all commands:**
 ```

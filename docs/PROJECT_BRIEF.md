@@ -289,17 +289,18 @@ Runs on pull requests.
 
 Responsibilities:
 - checkout,
-- configure AWS credentials using GitHub Actions OIDC,
 - install Terraform/OpenTofu-compatible tooling as needed,
 - install Terragrunt,
 - install tflint,
 - install terraform-docs,
-- run Terragrunt formatting checks,
-- run validation,
+- run Terragrunt HCL format check (`terragrunt hcl format --check`),
+- run `terraform fmt -check` on modules,
+- run `terraform init -backend=false && terraform validate` per module,
 - run tflint,
 - run terraform-docs validation,
-- run plan where possible,
-- surface validation/plan results.
+- surface validation results.
+
+Note: this workflow must not configure AWS credentials — `terraform init -backend=false` and `terraform validate` are schema-only and require no AWS access. `terragrunt validate` and `terragrunt plan` on environment stacks must not be included; those require a deployed S3 backend that does not exist for brand-new infrastructure.
 
 ### Apply Workflow
 
@@ -534,7 +535,7 @@ Use Terraform/Terragrunt language in README and positioning for familiarity.
 Implementation should standardize on OpenTofu-compatible workflows where practical, with Terragrunt as the primary interface.
 
 Primary commands should be Terragrunt-based:
-- `terragrunt hclfmt --check`,
+- `terragrunt hcl format --check`,
 - `terragrunt validate`,
 - `terragrunt plan`,
 - `terragrunt apply`.

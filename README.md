@@ -2,7 +2,7 @@
 
 IaC Smith turns freeform GitHub issues into validated Terraform/Terragrunt pull requests using AWS Bedrock and LangGraph.
 
-When a GitHub issue is labeled `iac-smith`, a GitHub Actions workflow runs the LangGraph-based agent. The agent reads the issue, infers the AWS infrastructure intent, scans the target infrastructure repository for existing conventions, generates a complete Terraform/Terragrunt change, validates it with static checks and a runtime plan, and opens a reviewable PR.
+When a GitHub issue is labeled `iac-smith`, a GitHub Actions workflow runs the LangGraph-based agent. The agent reads the issue, infers the AWS infrastructure intent, scans the target infrastructure repository for existing conventions, generates a complete Terraform/Terragrunt change, validates it with static checks and runtime validation, and opens a reviewable PR.
 
 The goal is not to blindly apply infrastructure. The goal is to turn natural-language infrastructure requests into clear, supportable, validated IaC that can be reviewed, merged, and applied through normal GitOps workflows.
 
