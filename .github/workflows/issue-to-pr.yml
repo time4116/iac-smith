@@ -3,6 +3,16 @@ name: Issue to Terraform PR
 on:
   issues:
     types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Issue number in the source repo'
+        required: true
+        type: number
+      source_repo:
+        description: 'Repo containing the issue (e.g. time4116/iac-smith-demo-infra)'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -10,12 +20,14 @@ permissions:
   issues: read
 
 concurrency:
-  group: iac-smith-issue-${{ github.event.issue.number }}
+  group: iac-smith-issue-${{ inputs.issue_number || github.event.issue.number }}
   cancel-in-progress: false
 
 jobs:
   iac-smith:
-    if: github.event.label.name == 'iac-smith' && github.actor == 'time4116'
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.actor == 'time4116') ||
+      (github.event_name == 'issues' && github.event.label.name == 'iac-smith' && github.actor == 'time4116')
     runs-on: ubuntu-latest
     env:
       IAC_SMITH_ALLOWED_TARGET_REPO: time4116/iac-smith-demo-infra
@@ -44,8 +56,8 @@ jobs:
         env:
           IAC_SMITH_TARGET_REPO_TOKEN: ${{ secrets.IAC_SMITH_TARGET_REPO_PAT }}
           IAC_SMITH_GITHUB_TOKEN: ${{ github.token }}
-          IAC_SMITH_SOURCE_REPO: ${{ github.repository }}
-          IAC_SMITH_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          IAC_SMITH_SOURCE_REPO: ${{ inputs.source_repo || github.repository }}
+          IAC_SMITH_ISSUE_NUMBER: ${{ inputs.issue_number || github.event.issue.number }}
           BEDROCK_MODEL_ID: ${{ secrets.BEDROCK_MODEL_ID }}
           IAC_SMITH_TARGET_REPO: time4116/iac-smith-demo-infra
         run: uv run python -m iac_smith.cli
