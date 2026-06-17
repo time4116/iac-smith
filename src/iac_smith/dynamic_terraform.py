@@ -240,14 +240,14 @@ on:
       - "environments/**"
       - "modules/**"
 
+# No id-token permission needed — init uses -backend=false, validate is schema-only.
 permissions:
   contents: read
-  id-token: write
   pull-requests: write
 
 jobs:
-  validate-foundation:
-    name: Validate / Plan — foundation
+  validate:
+    name: Validate Terraform modules and HCL
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -259,11 +259,6 @@ jobs:
           TG_VERSION=$(curl -sL -H "Authorization: Bearer ${GH_TOKEN}" "https://api.github.com/repos/gruntwork-io/terragrunt/releases/latest" | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
           curl -sL "https://github.com/gruntwork-io/terragrunt/releases/download/${TG_VERSION}/terragrunt_linux_amd64" -o /usr/local/bin/terragrunt
           chmod +x /usr/local/bin/terragrunt
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN_NON_PROD }}
-          aws-region: us-west-2
       - name: HCL format check
         working-directory: environments
         run: terragrunt hcl format --check
@@ -281,10 +276,17 @@ jobs:
           terraform validate
 ```
 
-IMPORTANT: The `<stack-name>` placeholder above is a template — replace it with the actual stack module
-name(s) being generated. Add one step per module under `modules/`. Never leave `<stack-name>` literally
-in the output. Do NOT add `terragrunt validate` or `terragrunt plan` steps — those require a deployed
-S3 backend which does not exist for brand-new infrastructure.
+IMPORTANT:
+- The `<stack-name>` placeholder above is a template — replace it with the actual stack module
+  name(s) from files_to_generate. Add one step per module under `modules/`. Never leave
+  `<stack-name>` literally in the output.
+- This MUST be a single job. Do NOT split into multiple jobs per stack — that installs
+  terragrunt multiple times and only uses it once.
+- Do NOT add `Configure AWS credentials` — `terraform init -backend=false` and
+  `terraform validate` are schema-only and do not contact AWS. No OIDC or AWS secrets needed.
+- Do NOT add `terragrunt validate` or `terragrunt plan` steps — those require a deployed
+  S3 backend which does not exist for brand-new infrastructure. `terraform validate` is
+  the correct check: it validates provider schema and attribute types without a backend.
 """
 
 
@@ -417,6 +419,12 @@ Non-negotiable rules:
   format checking — NEVER `terragrunt hclfmt --check` (that flag does not exist on
   the `hclfmt` subcommand and will always fail). Since CI installs the latest
   terragrunt, `hcl format` is always available.
+* `terraform-pr-check.yml` does NOT need `Configure AWS credentials` or
+  `id-token: write` — `terraform init -backend=false` and `terraform validate` are
+  schema-only operations that never contact AWS. Do not add OIDC steps.
+* `terraform-pr-check.yml` MUST use a single job named `validate`. Do NOT split
+  into multiple jobs per stack — that wastes runners, installs tools multiple times,
+  and makes some tool installs appear unused.
 {_CANONICAL_FILE_SHAPES}{sibling_section}{repair_section}
 Generation context JSON:
 {json.dumps(context, indent=2)}
