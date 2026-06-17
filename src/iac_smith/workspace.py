@@ -51,12 +51,12 @@ def _ensure_tf_gitignore(repo_path: Path) -> None:
 
 def commit_generated_files(repo_path: str | Path, message: str) -> bool:
     root = Path(repo_path)
-    _ensure_tf_gitignore(root)
     status = _run_git(root, ["status", "--porcelain"]).stdout.strip()
     if not status:
         return False
+    _ensure_tf_gitignore(root)
     _run_git(root, ["config", "--local", "user.email", "time4116@users.noreply.github.com"])
-    _run_git(root, ["config", "--local", "user.name", "IaC Smith"])
+    _run_git(root, ["config", "--local", "user.name", "time4116"])
     _run_git(root, ["add", "-A"])
     _run_git(root, ["commit", "-m", message])
     return True

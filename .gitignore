@@ -5,4 +5,11 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 .env
+.env.*
 .DS_Store
+*.pem
+*.key
+*.p12
+trust-policy.json
+permissions.json
+credentials.json

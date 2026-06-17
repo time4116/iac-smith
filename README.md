@@ -1,29 +1,57 @@
 # IaC Smith
 
-IaC Smith is an AWS-focused agentic IaC workflow that turns freeform GitHub issues into validated Terraform/Terragrunt pull requests.
+IaC Smith turns freeform GitHub issues into validated Terraform/Terragrunt pull requests using AWS Bedrock and LangGraph.
 
-## Current status
+When a GitHub issue is labeled `iac-smith`, a GitHub Actions workflow runs the LangGraph-based agent. The agent reads the issue, infers the AWS infrastructure intent, scans the target infrastructure repository for existing conventions, generates a complete Terraform/Terragrunt change, validates it with static checks and a runtime plan, and opens a reviewable PR.
 
-IaC Smith's issue-to-PR MVP path is implemented for narrow AWS Terraform/Terragrunt request families. It can fetch a labeled GitHub issue, use Bedrock to parse infrastructure intent, scan the target repository for existing patterns and representative Terraform snippets, dynamically generate bounded Terraform/Terragrunt files, run per-file static guardrails with one bounded Bedrock repair attempt, commit to a target-repo branch, and open a pull request.
+The goal is not to blindly apply infrastructure. The goal is to turn natural-language infrastructure requests into clear, supportable, validated IaC that can be reviewed, merged, and applied through normal GitOps workflows.
 
-Implemented pieces include the Python project structure, LangGraph routing, ruleset loading, mandatory Bedrock intent parsing, target repo pattern scanning, change planning, Bedrock-backed Terraform/Terragrunt generation, fail-fast static review and repair guardrails, progress logging for GitHub Actions runs, PR summary generation, target repo branch/commit/PR creation, hardened GitHub Actions, setup documentation, and regression tests.
+## Prerequisites
 
-`BEDROCK_MODEL_ID` is supplied by GitHub Actions secret or environment configuration. IaC Smith does not hardcode AWS account IDs, account-specific Bedrock ARNs, or model IDs.
+- **Two GitHub repositories**: a controller repo (this one) and a target infrastructure repo (starts empty)
+- **AWS account** with Bedrock enabled in your chosen region and model access granted
+- **AWS IAM OIDC role** trusted by GitHub Actions — see [docs/SETUP.md](docs/SETUP.md)
+- **Python 3.12+** and [uv](https://docs.astral.sh/uv/) (for local development only)
 
-It uses AWS Bedrock and LangGraph to infer infrastructure intent, apply an opinionated ruleset, generate Terraform/Terragrunt projects from issue text plus repo-discovered conventions, validate the output, and open a reviewable PR against a target infrastructure repository.
+## Quickstart
 
-The goal is not to blindly apply infrastructure. The goal is to turn natural-language infrastructure requests into clear, supportable, validated IaC changes that can be reviewed, merged, and applied through normal GitOps-style workflows.
+1. Fork this repo and create an empty target infrastructure repo
+2. Configure the required GitHub Actions secrets and variables (see table below)
+3. Create a GitHub issue describing the AWS infrastructure you want
+4. Apply the `iac-smith` label to the issue
+5. Watch the workflow run and open a PR in the target repo
 
-## MVP boundary
+The more detail you provide in the issue, the better the generated Terraform PR will be.
 
-IaC Smith v1 is intentionally narrow. It supports AWS infrastructure generation for a small set of safe request families and refuses unsupported or risky requests rather than hallucinating Terraform.
+## Required secrets and variables
 
-Supported MVP request families:
+Configure these in the controller repo under **Settings → Secrets and variables → Actions**:
+
+| Name | Type | Description |
+|---|---|---|
+| `AWS_ROLE_ARN_NON_PROD` | Secret | IAM role ARN trusted by GitHub Actions OIDC for Bedrock access and non-prod validation |
+| `AWS_ROLE_ARN_PROD` | Secret | IAM role ARN for generated prod validation workflows |
+| `IAC_SMITH_TARGET_REPO_PAT` | Secret | Fine-grained PAT scoped only to the target repo with Contents and Pull requests write |
+| `BEDROCK_MODEL_ID` | Secret | Bedrock model ID or inference profile ARN (e.g. `anthropic.claude-haiku-4-5-20251001`) |
+| `AWS_REGION` | Variable | AWS region (default: `us-west-2`) |
+
+See [docs/SETUP.md](docs/SETUP.md) for full setup instructions including the IAM trust policy shape and fine-grained PAT scope.
+
+## Supported request families
 
 1. Baseline Terraform/Terragrunt repo with backend bootstrap
 2. VPC foundation
-3. EKS Fargate foundation
-4. ECS Fargate foundation
-5. Private RDS PostgreSQL with encrypted storage and AWS-managed master password
+3. EKS Fargate
+4. ECS Fargate
+5. Private RDS PostgreSQL
 
-IaC Smith never applies infrastructure from the controller repo.
+IaC Smith refuses unsupported or risky requests rather than hallucinating Terraform.
+
+## Documentation
+
+- [docs/SETUP.md](docs/SETUP.md) — full setup guide
+- [AGENT_REFERENCE.md](AGENT_REFERENCE.md) — architecture and implementation reference
+
+## License
+
+Apache 2.0 — see [LICENSE](LICENSE).

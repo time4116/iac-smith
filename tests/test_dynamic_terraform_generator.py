@@ -474,7 +474,7 @@ def test_bedrock_terraform_generator_logs_generation_and_repair_progress():
     )
 
     assert messages[0] == (
-        "IaC Smith: generating 4 planned file(s) with Bedrock using concurrency 4."
+        "IaC Smith: generating 4 planned file(s) with Bedrock (model: anthropic.test-model, concurrency: 4)."
     )
     assert (
         "IaC Smith: generating file 1/4: environments/non-prod/ecs-fargate/terragrunt.hcl"

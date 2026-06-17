@@ -783,23 +783,3 @@ It uses AWS Bedrock, Claude Sonnet, and LangGraph to infer infrastructure intent
 The goal is not to blindly apply infrastructure. The goal is to turn natural-language infrastructure requests into clear, supportable, validated IaC changes that can be reviewed, merged, and applied through normal GitOps-style workflows.
 ```
 
-## Implementation Notes for Next Agent
-
-Ask clarifying questions one by one if additional naming, structure, workflow, permission, or scope decisions are needed.
-
-Do not ask multiple unrelated questions at once.
-
-Use the decisions in this brief as the source of truth unless the user changes them.
-
-Prioritize a clean MVP that demonstrates:
-- freeform issue input,
-- LangGraph StateGraph orchestration,
-- AWS Bedrock Claude Sonnet,
-- ruleset-driven Terraform/Terragrunt generation,
-- backend/bootstrap generation,
-- generated workflows,
-- validation/plan,
-- target repo PR creation,
-- post-merge apply workflow.
-
-Avoid expanding scope into app deployment, multi-cloud, local CLI, or advanced security scanning unless explicitly requested.

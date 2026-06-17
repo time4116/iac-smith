@@ -10,9 +10,9 @@ def _repo_slug(target_repo: str) -> str:
     return re.sub(r"[^a-z0-9-]", "-", name.lower()).strip("-")[:40]
 
 
-def _backend_resource(env: str) -> BackendResource:
+def _backend_resource(env: str, repo_slug: str) -> BackendResource:
     return BackendResource(
-        bucket=f"iac-smith-state-{env}-322264632107",
+        bucket=f"iac-smith-state-{env}-{repo_slug}",
         lock_table=f"iac-smith-lock-{env}",
     )
 
@@ -90,7 +90,8 @@ def plan_changes(
 
     stack_name = _stack_name(intent)
     environments = _planned_environments(intent, repo_patterns)
-    backend_resources = {env: _backend_resource(env) for env in environments}
+    slug = _repo_slug(target_repo)
+    backend_resources = {env: _backend_resource(env, slug) for env in environments}
 
     files = [
         "README.md",

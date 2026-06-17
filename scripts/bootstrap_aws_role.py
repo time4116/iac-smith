@@ -45,6 +45,10 @@ def main():
         )
 
     # 3. Create Trust Policy
+    # Controller repo is scoped to refs/heads/main only — do not broaden to :* unless
+    # you intentionally accept PR workflows assuming this role. See docs/SETUP.md.
+    # Target repo uses :* so PR check workflows can assume the role for validation;
+    # tighten to specific branches if your threat model requires it.
     trust_policy = {
         "Version": "2012-10-17",
         "Statement": [
@@ -53,15 +57,21 @@ def main():
                 "Principal": {"Federated": f"arn:aws:iam::{account_id}:oidc-provider/{oidc_url}"},
                 "Action": "sts:AssumeRoleWithWebIdentity",
                 "Condition": {
-                    "StringLike": {
-                        f"{oidc_url}:sub": [
-                            f"repo:{CONTROLLER_REPO}:*",
-                            f"repo:{TARGET_REPO}:*",
-                        ]
+                    "StringEquals": {
+                        f"{oidc_url}:sub": f"repo:{CONTROLLER_REPO}:ref:refs/heads/main",
+                        f"{oidc_url}:aud": "sts.amazonaws.com",
                     },
+                },
+            },
+            {
+                "Effect": "Allow",
+                "Principal": {"Federated": f"arn:aws:iam::{account_id}:oidc-provider/{oidc_url}"},
+                "Action": "sts:AssumeRoleWithWebIdentity",
+                "Condition": {
+                    "StringLike": {f"{oidc_url}:sub": f"repo:{TARGET_REPO}:*"},
                     "StringEquals": {f"{oidc_url}:aud": "sts.amazonaws.com"},
                 },
-            }
+            },
         ],
     }
     with open("trust-policy.json", "w") as f:
