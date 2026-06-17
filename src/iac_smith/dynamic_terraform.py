@@ -264,9 +264,9 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_NON_PROD }}
           aws-region: us-west-2
-      - name: HCL syntax check
+      - name: HCL format check
         working-directory: environments
-        run: terragrunt hclfmt
+        run: terragrunt hcl format --check
       - name: Terraform format check
         run: terraform fmt -check -recursive -diff modules
       - name: Terraform init and validate — foundation
@@ -410,9 +410,13 @@ Non-negotiable rules:
 * `terraform-pr-check.yml` MUST NOT run `terragrunt validate` or `terragrunt plan`
   on any environment stack. Those commands require a deployed S3 backend which does
   not exist for brand-new infrastructure and will always fail on first PR. Instead,
-  validate HCL syntax with `terragrunt hclfmt` on `environments/` and validate each
-  module with `terraform init -backend=false -input=false && terraform validate` in
-  the corresponding `modules/<name>` directory.
+  validate HCL syntax with `terragrunt hcl format --check` on `environments/` and
+  validate each module with `terraform init -backend=false -input=false &&
+  terraform validate` in the corresponding `modules/<name>` directory.
+* In `terraform-pr-check.yml`, always use `terragrunt hcl format --check` for HCL
+  format checking — NEVER `terragrunt hclfmt --check` (that flag does not exist on
+  the `hclfmt` subcommand and will always fail). Since CI installs the latest
+  terragrunt, `hcl format` is always available.
 {_CANONICAL_FILE_SHAPES}{sibling_section}{repair_section}
 Generation context JSON:
 {json.dumps(context, indent=2)}
