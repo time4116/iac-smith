@@ -297,7 +297,6 @@ Previous generated content that failed review:
 ```text
 {previous_content or ""}
 ```
-{sibling_section}
 Regenerate the same file path only. Fix every validation failure. Do not
 repeat the failing pattern. Validation failures may come from static review,
 terraform fmt/init/validate, terragrunt hclfmt/init/validate, or terragrunt plan.
@@ -348,7 +347,7 @@ Non-negotiable rules:
   and use `environments/` subdirectories as their job working-directories. Do not
   hallucinate independent folder structures such as `envs/`, `live/`, or `environments/non-prod`
   (without the trailing `environments/` prefix) that are not present in the files_to_generate list.
-{_CANONICAL_FILE_SHAPES}{repair_section}
+{_CANONICAL_FILE_SHAPES}{sibling_section}{repair_section}
 Generation context JSON:
 {json.dumps(context, indent=2)}
 """
@@ -552,31 +551,49 @@ class BedrockTerraformGenerator:
     ) -> dict[str, str]:
         generated_files: dict[str, str] = {}
         total_files = len(change_plan.files_to_generate)
-        max_workers = min(self.concurrency, max(1, total_files))
+        path_positions = {
+            path: index for index, path in enumerate(change_plan.files_to_generate, start=1)
+        }
         self._log(
             f"IaC Smith: generating {total_files} planned file(s) with Bedrock "
-            f"(model: {self.model_id}, concurrency: {max_workers})."
+            f"(model: {self.model_id}, concurrency: {self.concurrency})."
         )
 
-        def generate_one(path: str, file_index: int) -> tuple[str, str]:
-            self._log(f"IaC Smith: generating file {file_index}/{total_files}: {path}")
-            return path, self._generate_planned_file(
-                path=path,
-                intent=intent,
-                change_plan=change_plan,
-                repo_patterns=repo_patterns,
-                ruleset=ruleset,
-                target_repo=target_repo,
-            )
+        # Group files by directory and sort within each group so main.tf is
+        # generated before outputs.tf and variables.tf, giving those files
+        # concrete sibling context for consistent resource names.
+        _GEN_ORDER = {"main.tf": 0, "variables.tf": 1, "outputs.tf": 2, "versions.tf": 3}
+        groups: dict[str, list[str]] = {}
+        for path in change_plan.files_to_generate:
+            groups.setdefault(path.rpartition("/")[0], []).append(path)
+        for paths in groups.values():
+            paths.sort(key=lambda p: _GEN_ORDER.get(p.rpartition("/")[2], 4))
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(generate_one, path, file_index): path
-                for file_index, path in enumerate(change_plan.files_to_generate, start=1)
-            }
+        def generate_group(paths: list[str]) -> list[tuple[str, str]]:
+            results: list[tuple[str, str]] = []
+            accumulated: dict[str, str] = {}
+            for path in paths:
+                file_index = path_positions[path]
+                self._log(f"IaC Smith: generating file {file_index}/{total_files}: {path}")
+                content = self._generate_planned_file(
+                    path=path,
+                    intent=intent,
+                    change_plan=change_plan,
+                    repo_patterns=repo_patterns,
+                    ruleset=ruleset,
+                    target_repo=target_repo,
+                    sibling_content=_sibling_content(path, accumulated) or None,
+                )
+                accumulated[path] = content
+                results.append((path, content))
+            return results
+
+        group_workers = min(self.concurrency, max(1, len(groups)))
+        with ThreadPoolExecutor(max_workers=group_workers) as executor:
+            futures = {executor.submit(generate_group, paths): paths for paths in groups.values()}
             for future in as_completed(futures):
-                path, content = future.result()
-                generated_files[path] = content
+                for path, content in future.result():
+                    generated_files[path] = content
 
         generated_files = {path: generated_files[path] for path in change_plan.files_to_generate}
 
@@ -599,9 +616,6 @@ class BedrockTerraformGenerator:
                 for path in change_plan.files_to_generate
                 if _path_needs_repair(path, validation.errors)
             ] or list(change_plan.files_to_generate)
-            path_positions = {
-                path: index for index, path in enumerate(change_plan.files_to_generate, start=1)
-            }
             self._log(
                 f"IaC Smith: repairing {len(paths_to_repair)} file(s) after static review failure."
             )
@@ -627,7 +641,8 @@ class BedrockTerraformGenerator:
                     sibling_content=_sibling_content(path, previous_files) or None,
                 )
 
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            repair_workers = min(self.concurrency, max(1, len(paths_to_repair)))
+            with ThreadPoolExecutor(max_workers=repair_workers) as executor:
                 futures = {
                     executor.submit(repair_one, path, path_positions[path]): path
                     for path in paths_to_repair
