@@ -35,7 +35,7 @@ def test_validate_generated_iac_runs_terraform_and_terragrunt_plan(monkeypatch, 
         for cmd in commands
     )
     assert hclfmt_found, f"No hclfmt/hcl-format command found in {commands}"
-    assert ["terraform", "fmt", "-check", "-recursive", "-diff", "modules"] in commands
+    assert ["terraform", "fmt", "-recursive", "modules"] in commands
     assert ["terraform", "init", "-backend=false", "-input=false"] in commands
     assert ["terraform", "validate"] in commands
     # terragrunt init/validate/plan are skipped for stacks — dependencies aren't deployed

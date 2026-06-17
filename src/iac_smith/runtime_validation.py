@@ -106,10 +106,12 @@ def validate_generated_iac(
         )
     fmt_paths = [path.name for path in [root / "modules", root / "bootstrap"] if path.exists()]
     if fmt_paths:
+        # Auto-fix rather than check-and-fail: minor alignment differences are silently
+        # corrected in place so repair attempts are reserved for real schema errors.
         command_specs.append(
             (
                 "terraform fmt",
-                ["terraform", "fmt", "-check", "-recursive", "-diff", *fmt_paths],
+                ["terraform", "fmt", "-recursive", *fmt_paths],
                 root,
             )
         )
