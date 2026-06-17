@@ -61,6 +61,12 @@ Status: `{validation.status.value}`
 
 {_bullets([*intent.warnings, *validation.warnings])}
 
+## Iterating on this infrastructure
+
+To add to or modify this infrastructure, create a new GitHub issue in the controller repository
+labeled `iac-smith` describing the change. IaC Smith reads existing files in the target repo
+before generating anything — follow-on PRs build on what was already merged.
+
 ## Expected post-merge apply behavior
 
 The target repository apply workflow is expected to run after merge to `main`, configure AWS

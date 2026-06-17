@@ -13,7 +13,7 @@ INTENT_SCHEMA = """
   "requires_new_vpc": true,
   "features": ["encryption", "private_subnets", "logging"],
   "assumptions": ["short factual assumption"],
-  "warnings": ["short risk or ambiguity"],
+  "warnings": ["short description of a risk, gap, or security concern — state what is absent or risky, not what IaC Smith will do"],
   "blocked": false,
   "block_reason": null
 }
@@ -127,6 +127,9 @@ Rules:
 * Always plan AWS infrastructure using best security practices, even when the issue asks for
   weaker security. Preserve the requested intent, but use secure defaults and add warnings
   that explain any deviation from what was asked.
+* Warnings must describe a risk, gap, or security concern — not promise future actions.
+  Write "No HTTPS listener configured; a certificate ARN is required to enable TLS" not
+  "IaC Smith will add an HTTPS listener stub." If something is missing, say it is absent.
 * Existing repository conventions are inspected later. Do not invent file paths.
 * If no AWS region is specified, use us-west-2 and add a warning.
 * If no environment is specified, use environment_scope=both and environments=["non-prod", "prod"].

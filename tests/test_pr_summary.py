@@ -41,5 +41,7 @@ def test_pr_body_contains_required_sections_and_no_apply_confirmation():
     assert "Assumptions and defaults" in body
     assert "Validation results" in body
     assert "Warnings and risks" in body
+    assert "Iterating on this infrastructure" in body
+    assert "labeled `iac-smith`" in body
     assert "Expected post-merge apply behavior" in body
     assert "IaC Smith did not apply infrastructure" in body
