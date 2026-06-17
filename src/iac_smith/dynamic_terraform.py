@@ -125,7 +125,7 @@ def _rules_payload(ruleset: Ruleset | None) -> list[dict[str, str]]:
     ]
 
 
-_CANONICAL_FILE_SHAPES = """
+_CANONICAL_FILE_SHAPES = r"""
 Canonical file shapes — treat these as structural templates:
 
 --- versions.tf (SOLE location for required_providers; this block must NEVER appear in main.tf) ---
@@ -287,6 +287,100 @@ IMPORTANT:
 - Do NOT add `terragrunt validate` or `terragrunt plan` steps — those require a deployed
   S3 backend which does not exist for brand-new infrastructure. `terraform validate` is
   the correct check: it validates provider schema and attribute types without a backend.
+
+--- .github/workflows/terraform-apply.yml ---
+```yaml
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "environments/**"
+      - "modules/**"
+      - "bootstrap/**"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  bootstrap:
+    name: Bootstrap state backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_NON_PROD }}
+          aws-region: us-west-2
+      - name: Bootstrap state backend (idempotent)
+        working-directory: bootstrap/backend/non-prod
+        run: |
+          terraform init
+          BUCKET=$(python3 -c "import re; txt=open('variables.tf').read(); m=re.search(r'variable\s+\"state_bucket_name\".*?default\s*=\s*\"([^\"]+)\"', txt, re.DOTALL); print(m.group(1) if m else '')")
+          TABLE=$(python3 -c "import re; txt=open('variables.tf').read(); m=re.search(r'variable\s+\"state_lock_table_name\".*?default\s*=\s*\"([^\"]+)\"', txt, re.DOTALL); print(m.group(1) if m else '')")
+          terraform import aws_s3_bucket.terraform_state "$BUCKET" 2>/dev/null || true
+          terraform import aws_dynamodb_table.terraform_locks "$TABLE" 2>/dev/null || true
+          terraform apply -auto-approve
+
+  apply-foundation:
+    name: Apply — non-prod/foundation
+    needs: bootstrap
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Install terragrunt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TG_VERSION=$(curl -sL -H "Authorization: Bearer ${GH_TOKEN}" "https://api.github.com/repos/gruntwork-io/terragrunt/releases/latest" | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+          curl -sL "https://github.com/gruntwork-io/terragrunt/releases/download/${TG_VERSION}/terragrunt_linux_amd64" -o /usr/local/bin/terragrunt
+          chmod +x /usr/local/bin/terragrunt
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_NON_PROD }}
+          aws-region: us-west-2
+      - name: Apply foundation
+        working-directory: environments/non-prod/foundation
+        run: terragrunt apply --non-interactive --auto-approve
+
+  apply-<stack-name>:
+    name: Apply — non-prod/<stack-name>
+    needs: apply-foundation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Install terragrunt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TG_VERSION=$(curl -sL -H "Authorization: Bearer ${GH_TOKEN}" "https://api.github.com/repos/gruntwork-io/terragrunt/releases/latest" | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+          curl -sL "https://github.com/gruntwork-io/terragrunt/releases/download/${TG_VERSION}/terragrunt_linux_amd64" -o /usr/local/bin/terragrunt
+          chmod +x /usr/local/bin/terragrunt
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_NON_PROD }}
+          aws-region: us-west-2
+      - name: Apply <stack-name>
+        working-directory: environments/non-prod/<stack-name>
+        run: terragrunt apply --non-interactive --auto-approve
+```
+
+IMPORTANT for terraform-apply.yml:
+- Replace `<stack-name>` with actual stack names from files_to_generate. Add one job per stack
+  beyond foundation. Each non-foundation stack job must declare `needs: apply-foundation`.
+- The `bootstrap` job runs first and is idempotent — it imports existing S3/DynamoDB resources
+  before applying so the workflow is safe to run on ephemeral CI runners without persisted state.
+- Always use `secrets.AWS_ROLE_ARN_NON_PROD` — never `AWS_ROLE_TO_ASSUME` or `AWS_ROLE_ARN`.
+- Only trigger on branch `main`, not `master`.
 """
 
 
@@ -366,8 +460,21 @@ Non-negotiable rules:
   issue request or existing repo convention; explain conflicts in warnings.
 * Never apply infrastructure, destroy resources, or include plaintext credentials.
 * Terraform apply workflows must never run on pull_request events or feature
-  branches. `.github/workflows/terraform-apply.yml` may run only on push events
-  to `main` or `master`.
+  branches. `.github/workflows/terraform-apply.yml` must trigger only on push
+  to `main` — never `master`, never both.
+* `terraform-apply.yml` must have a `bootstrap` job that runs first (before any
+  stack apply job). The bootstrap job runs `terraform apply -auto-approve` in
+  `bootstrap/backend/non-prod` and imports existing resources first to be
+  idempotent on ephemeral CI runners. All stack apply jobs must declare
+  `needs: bootstrap` (or `needs: apply-foundation` for dependent stacks).
+* `terraform-apply.yml` must use `secrets.AWS_ROLE_ARN_NON_PROD` for the
+  `role-to-assume` input — never `AWS_ROLE_TO_ASSUME`, `AWS_ROLE_ARN`, or any
+  other name.
+* The bootstrap module's S3 bucket resource MUST be named
+  `aws_s3_bucket.terraform_state` and the DynamoDB table MUST be named
+  `aws_dynamodb_table.terraform_locks`. The variables for their names MUST be
+  `state_bucket_name` and `state_lock_table_name`. These names are hardcoded in
+  the apply workflow's idempotent import step and must match exactly.
 * Prefer secure AWS defaults: private networking, encryption, least privilege,
   no dangerous public ingress.
 * If a workload stack depends on foundation outputs for VPC/subnets, do not
