@@ -240,12 +240,31 @@ on:
       - "environments/**"
       - "modules/**"
 
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
 jobs:
-  terraform-plan:
+  validate-foundation:
+    name: Validate / Plan — foundation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: terragrunt plan
+      - uses: hashicorp/setup-terraform@v3
+      - name: Install terragrunt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TG_VERSION=$(curl -sL -H "Authorization: Bearer ${GH_TOKEN}" "https://api.github.com/repos/gruntwork-io/terragrunt/releases/latest" | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+          curl -sL "https://github.com/gruntwork-io/terragrunt/releases/download/${TG_VERSION}/terragrunt_linux_amd64" -o /usr/local/bin/terragrunt
+          chmod +x /usr/local/bin/terragrunt
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-west-2
+      - name: Terragrunt plan
         working-directory: environments/non-prod/foundation
         run: terragrunt --non-interactive plan -input=false -lock=false
 ```
@@ -363,6 +382,14 @@ Non-negotiable rules:
   is required so that `terragrunt plan` succeeds in CI before the dependency
   stack has been deployed. The mock values must match the output types declared
   in the dependency module (strings for IDs, lists for subnet ID lists, etc.).
+* Generated CI workflows MUST use OIDC for AWS credentials — never static keys.
+  Use `aws-actions/configure-aws-credentials` with `role-to-assume` and set
+  `permissions: id-token: write` on the job or workflow. Never emit
+  `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` in any workflow step.
+* Install terragrunt in CI via the authenticated `curl` pattern shown in the
+  canonical workflow template. Never use `autero1/action-terragrunt` or any
+  other third-party terragrunt installer action — the curl approach avoids
+  pinning an old version and avoids incorrect action input names.
 {_CANONICAL_FILE_SHAPES}{sibling_section}{repair_section}
 Generation context JSON:
 {json.dumps(context, indent=2)}
