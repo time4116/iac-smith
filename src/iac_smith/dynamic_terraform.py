@@ -55,6 +55,9 @@ def _path_needs_repair(path: str, errors: list[str]) -> bool:
     return False
 
 
+_GEN_ORDER = {"main.tf": 0, "variables.tf": 1, "outputs.tf": 2, "versions.tf": 3}
+
+
 class BedrockRuntime(Protocol):
     def invoke_model(self, **kwargs: Any) -> dict[str, Any]: ...
 
@@ -562,7 +565,6 @@ class BedrockTerraformGenerator:
         # Group files by directory and sort within each group so main.tf is
         # generated before outputs.tf and variables.tf, giving those files
         # concrete sibling context for consistent resource names.
-        _GEN_ORDER = {"main.tf": 0, "variables.tf": 1, "outputs.tf": 2, "versions.tf": 3}
         groups: dict[str, list[str]] = {}
         for path in change_plan.files_to_generate:
             groups.setdefault(path.rpartition("/")[0], []).append(path)
@@ -622,34 +624,46 @@ class BedrockTerraformGenerator:
             repair_errors = list(validation.errors)
             previous_files = dict(generated_files)
 
-            def repair_one(
-                path: str,
-                file_index: int,
+            repair_groups: dict[str, list[str]] = {}
+            for path in paths_to_repair:
+                repair_groups.setdefault(path.rpartition("/")[0], []).append(path)
+            for paths in repair_groups.values():
+                paths.sort(key=lambda p: _GEN_ORDER.get(p.rpartition("/")[2], 4))
+
+            def repair_group(
+                paths: list[str],
                 repair_errors: list[str] = repair_errors,
                 previous_files: dict[str, str] = previous_files,
-            ) -> tuple[str, str]:
-                self._log(f"IaC Smith: repairing file {file_index}/{total_files}: {path}")
-                return path, self._generate_planned_file(
-                    path=path,
-                    intent=intent,
-                    change_plan=change_plan,
-                    repo_patterns=repo_patterns,
-                    ruleset=ruleset,
-                    target_repo=target_repo,
-                    repair_errors=repair_errors,
-                    previous_content=previous_files[path],
-                    sibling_content=_sibling_content(path, previous_files) or None,
-                )
+            ) -> list[tuple[str, str]]:
+                accumulated = dict(previous_files)
+                results: list[tuple[str, str]] = []
+                for path in paths:
+                    self._log(
+                        f"IaC Smith: repairing file {path_positions[path]}/{total_files}: {path}"
+                    )
+                    content = self._generate_planned_file(
+                        path=path,
+                        intent=intent,
+                        change_plan=change_plan,
+                        repo_patterns=repo_patterns,
+                        ruleset=ruleset,
+                        target_repo=target_repo,
+                        repair_errors=repair_errors,
+                        previous_content=previous_files[path],
+                        sibling_content=_sibling_content(path, accumulated) or None,
+                    )
+                    accumulated[path] = content
+                    results.append((path, content))
+                return results
 
-            repair_workers = min(self.concurrency, max(1, len(paths_to_repair)))
-            with ThreadPoolExecutor(max_workers=repair_workers) as executor:
+            repair_group_workers = min(self.concurrency, max(1, len(repair_groups)))
+            with ThreadPoolExecutor(max_workers=repair_group_workers) as executor:
                 futures = {
-                    executor.submit(repair_one, path, path_positions[path]): path
-                    for path in paths_to_repair
+                    executor.submit(repair_group, paths): paths for paths in repair_groups.values()
                 }
                 for future in as_completed(futures):
-                    path, content = future.result()
-                    generated_files[path] = content
+                    for path, content in future.result():
+                        generated_files[path] = content
 
             generated_files = {
                 path: generated_files[path] for path in change_plan.files_to_generate
@@ -686,30 +700,44 @@ class BedrockTerraformGenerator:
         path_positions = {
             path: index for index, path in enumerate(change_plan.files_to_generate, start=1)
         }
-        max_workers = min(self.concurrency, max(1, len(paths_to_repair)))
         repaired_files = dict(generated_files)
         self._log(
             f"IaC Smith: repairing {len(paths_to_repair)} file(s) after runtime validation failure."
         )
 
-        def repair_one(path: str) -> tuple[str, str]:
-            self._log(f"IaC Smith: repairing file {path_positions[path]}/{total_files}: {path}")
-            return path, self._generate_planned_file(
-                path=path,
-                intent=intent,
-                change_plan=change_plan,
-                repo_patterns=repo_patterns,
-                ruleset=ruleset,
-                target_repo=target_repo,
-                repair_errors=repair_errors,
-                previous_content=generated_files[path],
-                sibling_content=_sibling_content(path, generated_files) or None,
-            )
+        repair_groups: dict[str, list[str]] = {}
+        for path in paths_to_repair:
+            repair_groups.setdefault(path.rpartition("/")[0], []).append(path)
+        for paths in repair_groups.values():
+            paths.sort(key=lambda p: _GEN_ORDER.get(p.rpartition("/")[2], 4))
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(repair_one, path): path for path in paths_to_repair}
+        def repair_group(paths: list[str]) -> list[tuple[str, str]]:
+            accumulated = dict(generated_files)
+            results: list[tuple[str, str]] = []
+            for path in paths:
+                self._log(f"IaC Smith: repairing file {path_positions[path]}/{total_files}: {path}")
+                content = self._generate_planned_file(
+                    path=path,
+                    intent=intent,
+                    change_plan=change_plan,
+                    repo_patterns=repo_patterns,
+                    ruleset=ruleset,
+                    target_repo=target_repo,
+                    repair_errors=repair_errors,
+                    previous_content=generated_files[path],
+                    sibling_content=_sibling_content(path, accumulated) or None,
+                )
+                accumulated[path] = content
+                results.append((path, content))
+            return results
+
+        repair_group_workers = min(self.concurrency, max(1, len(repair_groups)))
+        with ThreadPoolExecutor(max_workers=repair_group_workers) as executor:
+            futures = {
+                executor.submit(repair_group, paths): paths for paths in repair_groups.values()
+            }
             for future in as_completed(futures):
-                path, content = future.result()
-                repaired_files[path] = content
+                for path, content in future.result():
+                    repaired_files[path] = content
 
         return {path: repaired_files[path] for path in change_plan.files_to_generate}
