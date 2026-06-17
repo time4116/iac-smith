@@ -32,23 +32,29 @@ Configure these in the controller repo under **Settings → Secrets and variable
 | `AWS_ROLE_ARN_NON_PROD` | Secret | IAM role ARN trusted by GitHub Actions OIDC for Bedrock access and non-prod validation |
 | `AWS_ROLE_ARN_PROD` | Secret | IAM role ARN for generated prod validation workflows |
 | `IAC_SMITH_TARGET_REPO_PAT` | Secret | Fine-grained PAT scoped only to the target repo with Contents and Pull requests write |
-| `BEDROCK_MODEL_ID` | Secret | Bedrock model ID or inference profile ARN (e.g. `anthropic.claude-haiku-4-5-20251001`) |
+| `BEDROCK_MODEL_ID` | Secret | Bedrock model ID or inference profile ARN (e.g. `anthropic.claude-haiku-4-5-20251001`; verify in the Bedrock console before use) |
 | `AWS_REGION` | Variable | AWS region (default: `us-west-2`) |
 
 See [docs/SETUP.md](docs/SETUP.md) for full setup instructions including the IAM trust policy shape and fine-grained PAT scope.
 
 ## What IaC Smith can handle
 
-IaC Smith is not limited to a fixed set of infrastructure types. The agent reads the target repo's existing conventions, module layout, and Terragrunt stacks before generating anything — so it produces changes that fit the repo rather than starting from scratch every time.
+IaC Smith is not limited to a fixed set of infrastructure types. The agent reads the target repo's existing conventions, module layout, and Terragrunt stacks before generating anything, so it produces changes that fit the repo rather than starting from scratch every time.
 
 It handles greenfield repos (first issue creates the backend bootstrap and repo structure) and iterative additions to existing repos (new module, new stack, changes to existing resources) equally.
+
+Before opening a PR, IaC Smith runs:
+
+- **Static review**: pattern-based checks across all generated files (hardcoded state keys, missing required blocks, undeclared variables, and more)
+- **Runtime validation**: `terraform validate` and `terragrunt plan` against real AWS state
+- **Repair loop**: if checks fail, the agent retries generation with the error context up to three times before blocking
 
 IaC Smith will refuse requests that are genuinely destructive or risky rather than hallucinating a broken implementation.
 
 ## Documentation
 
-- [docs/SETUP.md](docs/SETUP.md) — full setup guide
-- [AGENT_REFERENCE.md](AGENT_REFERENCE.md) — architecture and implementation reference
+- [docs/SETUP.md](docs/SETUP.md): full setup guide
+- [AGENT_REFERENCE.md](AGENT_REFERENCE.md): architecture and implementation reference
 
 ## License
 
