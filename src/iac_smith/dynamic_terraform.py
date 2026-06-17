@@ -213,8 +213,16 @@ terraform {
 
 # ALWAYS use dependency blocks to consume outputs from another stack.
 # NEVER write module.<name>.output_name — that syntax only works inside a Terraform module, not in terragrunt.
+# ALWAYS include mock_outputs so that `terragrunt plan` works in CI before the dependency is deployed.
 dependency "foundation" {
   config_path = "../foundation"
+
+  mock_outputs = {
+    vpc_id             = "vpc-00000000000000000"
+    private_subnet_ids = ["subnet-00000000000000000"]
+    public_subnet_ids  = ["subnet-11111111111111111"]
+  }
+  mock_outputs_allowed_terraform_commands = ["validate", "plan"]
 }
 
 inputs = {
@@ -350,6 +358,11 @@ Non-negotiable rules:
   and use `environments/` subdirectories as their job working-directories. Do not
   hallucinate independent folder structures such as `envs/`, `live/`, or `environments/non-prod`
   (without the trailing `environments/` prefix) that are not present in the files_to_generate list.
+* Every Terragrunt `dependency` block MUST include `mock_outputs` and
+  `mock_outputs_allowed_terraform_commands = ["validate", "plan"]`. This
+  is required so that `terragrunt plan` succeeds in CI before the dependency
+  stack has been deployed. The mock values must match the output types declared
+  in the dependency module (strings for IDs, lists for subnet ID lists, etc.).
 {_CANONICAL_FILE_SHAPES}{sibling_section}{repair_section}
 Generation context JSON:
 {json.dumps(context, indent=2)}
