@@ -264,10 +264,27 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_NON_PROD }}
           aws-region: us-west-2
-      - name: Terragrunt plan
-        working-directory: environments/non-prod/foundation
-        run: terragrunt --non-interactive plan -input=false -lock=false
+      - name: HCL syntax check
+        working-directory: environments
+        run: terragrunt hclfmt
+      - name: Terraform format check
+        run: terraform fmt -check -recursive -diff modules
+      - name: Terraform init and validate — foundation
+        working-directory: modules/foundation
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+      - name: Terraform init and validate — <stack-name>
+        working-directory: modules/<stack-name>
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
 ```
+
+IMPORTANT: The `<stack-name>` placeholder above is a template — replace it with the actual stack module
+name(s) being generated. Add one step per module under `modules/`. Never leave `<stack-name>` literally
+in the output. Do NOT add `terragrunt validate` or `terragrunt plan` steps — those require a deployed
+S3 backend which does not exist for brand-new infrastructure.
 """
 
 
@@ -379,9 +396,9 @@ Non-negotiable rules:
   (without the trailing `environments/` prefix) that are not present in the files_to_generate list.
 * Every Terragrunt `dependency` block MUST include `mock_outputs` and
   `mock_outputs_allowed_terraform_commands = ["validate", "plan"]`. This
-  is required so that `terragrunt plan` succeeds in CI before the dependency
-  stack has been deployed. The mock values must match the output types declared
-  in the dependency module (strings for IDs, lists for subnet ID lists, etc.).
+  allows `terragrunt plan` to run locally before the dependency stack has been
+  deployed. The mock values must match the output types declared in the
+  dependency module (strings for IDs, lists for subnet ID lists, etc.).
 * Generated CI workflows MUST use OIDC for AWS credentials — never static keys.
   Use `aws-actions/configure-aws-credentials` with `role-to-assume` and set
   `permissions: id-token: write` on the job or workflow. Never emit
@@ -390,6 +407,12 @@ Non-negotiable rules:
   canonical workflow template. Never use `autero1/action-terragrunt` or any
   other third-party terragrunt installer action — the curl approach avoids
   pinning an old version and avoids incorrect action input names.
+* `terraform-pr-check.yml` MUST NOT run `terragrunt validate` or `terragrunt plan`
+  on any environment stack. Those commands require a deployed S3 backend which does
+  not exist for brand-new infrastructure and will always fail on first PR. Instead,
+  validate HCL syntax with `terragrunt hclfmt` on `environments/` and validate each
+  module with `terraform init -backend=false -input=false && terraform validate` in
+  the corresponding `modules/<name>` directory.
 {_CANONICAL_FILE_SHAPES}{sibling_section}{repair_section}
 Generation context JSON:
 {json.dumps(context, indent=2)}
