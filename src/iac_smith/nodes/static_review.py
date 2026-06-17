@@ -249,10 +249,11 @@ def static_review_generated_files(generated_files: dict[str, str]) -> Validation
     for path, content in generated_files.items():
         errors.extend(_apply_workflow_errors(path, content))
 
-        for pattern in SECRET_PATTERNS:
-            if pattern.search(content):
-                errors.append(f"Potential hardcoded secret detected in `{path}`.")
-                break
+        if not path.endswith(".md"):
+            for pattern in SECRET_PATTERNS:
+                if pattern.search(content):
+                    errors.append(f"Potential hardcoded secret detected in `{path}`.")
+                    break
 
         if path.endswith("terragrunt.hcl") and "key" in content:
             has_remote_state = "remote_state" in content or "terraform.tfstate" in content

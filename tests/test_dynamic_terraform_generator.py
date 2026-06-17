@@ -583,8 +583,7 @@ class TestPathNeedsRepair:
             "must use path_relative_to_include()."
         ]
         assert (
-            _path_needs_repair("environments/non-prod/ecs-fargate/terragrunt.hcl", errors)
-            is True
+            _path_needs_repair("environments/non-prod/ecs-fargate/terragrunt.hcl", errors) is True
         )
 
     def test_returns_true_when_path_appears_as_both_remove_and_keep(self):
@@ -602,7 +601,7 @@ class TestPathNeedsRepair:
             "modules/foundation/main.tf, modules/foundation/variables.tf. "
             "Remove from modules/foundation/main.tf, keep in modules/foundation/variables.tf.",
             'Variable "project" is referenced via var.project in `modules/foundation` '
-            "(modules/foundation/variables.tf) but no variable \"project\" is declared.",
+            '(modules/foundation/variables.tf) but no variable "project" is declared.',
         ]
         assert _path_needs_repair("modules/foundation/variables.tf", errors) is True
 
@@ -654,12 +653,12 @@ def test_variables_tf_not_repaired_when_only_main_tf_has_duplicate_declarations(
         'variable "env" { type = string }\n'
         'resource "aws_vpc" "this" { cidr_block = var.vpc_cidr }\n'
         'resource "aws_internet_gateway" "this"'
-        ' { tags = { Project = var.project, Region = var.region } }\n'
+        " { tags = { Project = var.project, Region = var.region } }\n"
     )
     main_tf_fixed = (
         'resource "aws_vpc" "this" { cidr_block = var.vpc_cidr }\n'
         'resource "aws_internet_gateway" "this"'
-        ' { tags = { Project = var.project, Region = var.region } }\n'
+        " { tags = { Project = var.project, Region = var.region } }\n"
     )
     variables_tf = (
         'variable "env" { type = string }\n'

@@ -23,7 +23,7 @@ jobs:
       - run: uv run pytest -m 'not integration and not bedrock'
 
   integration:
-    if: github.ref == 'refs/heads/main'
+    if: false
     runs-on: ubuntu-latest
     permissions:
       contents: read

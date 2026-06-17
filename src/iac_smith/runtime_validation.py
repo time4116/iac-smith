@@ -61,11 +61,7 @@ def _detect_terragrunt(env: dict[str, str]) -> tuple[list[str], str]:
     if match:
         major, minor = int(match.group(1)), int(match.group(2))
         is_new = major >= 1 or (major == 0 and minor >= 71)
-    hclfmt_cmd = (
-        ["terragrunt", "hcl", "format"]
-        if is_new
-        else ["terragrunt", "hclfmt"]
-    )
+    hclfmt_cmd = ["terragrunt", "hcl", "format"] if is_new else ["terragrunt", "hclfmt"]
     non_interactive = "--non-interactive" if is_new else "--terragrunt-non-interactive"
     return hclfmt_cmd, non_interactive
 
