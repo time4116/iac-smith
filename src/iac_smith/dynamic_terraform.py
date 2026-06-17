@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import re
@@ -766,10 +767,8 @@ class BedrockTerraformGenerator:
             for file_path in change_plan.files_to_generate:
                 candidate = repo_path / file_path
                 if candidate.is_file():
-                    try:
+                    with contextlib.suppress(OSError, UnicodeDecodeError):
                         existing_contents[file_path] = candidate.read_text(encoding="utf-8")
-                    except (OSError, UnicodeDecodeError):
-                        pass
 
         # Group files by directory and sort within each group so main.tf is
         # generated before outputs.tf and variables.tf, giving those files

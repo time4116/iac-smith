@@ -29,7 +29,9 @@ def _fake_intent_parser(issue_text: str) -> InfrastructureIntent:
     )
 
 
-def _fake_graph_file_generator(*, intent, change_plan, repo_patterns, ruleset, target_repo, repo_path=None):
+def _fake_graph_file_generator(
+    *, intent, change_plan, repo_patterns, ruleset, target_repo, repo_path=None
+):
     return {"modules/eks-fargate/main.tf": 'resource "aws_ecs_cluster" "this" { name = "test" }\n'}
 
 
@@ -84,7 +86,9 @@ def test_default_file_generator_uses_bedrock_dynamic_generator(monkeypatch):
 def test_graph_passes_ruleset_and_repo_context_to_injected_file_generator(tmp_path):
     calls = []
 
-    def fake_file_generator(*, intent, change_plan, repo_patterns, ruleset, target_repo, repo_path=None):
+    def fake_file_generator(
+        *, intent, change_plan, repo_patterns, ruleset, target_repo, repo_path=None
+    ):
         calls.append(
             {
                 "intent": intent,
@@ -135,9 +139,13 @@ def test_graph_passes_ruleset_and_repo_context_to_injected_file_generator(tmp_pa
 def test_graph_passes_repo_path_to_file_generator(tmp_path):
     received_repo_path = []
 
-    def fake_file_generator(*, intent, change_plan, repo_patterns, ruleset, target_repo, repo_path=None):
+    def fake_file_generator(
+        *, intent, change_plan, repo_patterns, ruleset, target_repo, repo_path=None
+    ):
         received_repo_path.append(repo_path)
-        return {"modules/eks-fargate/main.tf": 'resource "aws_ecs_cluster" "this" { name = "test" }\n'}
+        return {
+            "modules/eks-fargate/main.tf": 'resource "aws_ecs_cluster" "this" { name = "test" }\n'
+        }
 
     graph = build_graph(
         intent_parser_fn=_fake_intent_parser,
