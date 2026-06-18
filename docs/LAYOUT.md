@@ -1,6 +1,8 @@
-# Terraform / Terragrunt layout
+# Terraform / Terragrunt layout (greenfield)
 
-IaC Smith generates a consistent directory layout across all target repositories. This document describes that layout, the rules that govern it, and how to extend an existing repo.
+This document describes the canonical layout IaC Smith generates when starting from an empty or near-empty target repository. It covers the directory structure, the rules that govern it, and how to extend the repo with additional stacks over time.
+
+IaC Smith is designed to scan and adapt to existing Terraform/Terragrunt conventions in the target repository before generating anything — but that path has not been tested against real-world existing infrastructure. Treat this layout as the guaranteed baseline for greenfield projects.
 
 ## Stacks
 
