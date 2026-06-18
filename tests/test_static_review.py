@@ -5,6 +5,10 @@ from __future__ import annotations
 from iac_smith.models.validation import ValidationStatus
 from iac_smith.nodes.static_review import (
     _find_cross_file_duplicates,
+    _find_redacted_placeholders,
+    _find_singleton_resource_duplication,
+    _find_terragrunt_input_variable_mismatches,
+    _find_terragrunt_orphaned_locals,
     _find_undeclared_variable_references,
     static_review_generated_files,
 )
@@ -210,3 +214,170 @@ class TestStaticReviewIntegration:
         assert result.status == ValidationStatus.PARTIAL
         assert result.warnings
         assert any("Static security review passed" in c for c in result.checks)
+
+
+class TestRedactedPlaceholders:
+    def test_redacted_placeholder_in_workflow(self) -> None:
+        files = {
+            ".github/workflows/terraform-apply.yml": (
+                'run: curl -H "Authorization: Bearer ***" https://api.github.com/repos/example'
+            ),
+        }
+        errors = _find_redacted_placeholders(files)
+        assert len(errors) == 1
+        assert "***" in errors[0]
+        assert "terraform-apply.yml" in errors[0]
+
+    def test_clean_workflow_no_false_positive(self) -> None:
+        files = {
+            ".github/workflows/terraform-apply.yml": (
+                'run: curl -H "Authorization: Bearer ${{ github.token }}"'
+                " https://api.github.com/repos/example"
+            ),
+        }
+        assert _find_redacted_placeholders(files) == []
+
+    def test_non_yaml_file_ignored(self) -> None:
+        files = {"modules/network/main.tf": "# *** just a comment"}
+        assert _find_redacted_placeholders(files) == []
+
+
+class TestTerragruntOrphanedLocals:
+    def test_child_references_undeclared_local(self) -> None:
+        files = {
+            "environments/staging/rds-postgres/terragrunt.hcl": (
+                'include "root" {\n  path = find_in_parent_folders()\n}\n'
+                "inputs = { env = local.environment }\n"
+            ),
+        }
+        errors = _find_terragrunt_orphaned_locals(files)
+        assert any("local.environment" in e for e in errors)
+        assert any("environments/staging/rds-postgres/terragrunt.hcl" in e for e in errors)
+
+    def test_root_config_no_include_no_error(self) -> None:
+        files = {
+            "environments/terragrunt.hcl": (
+                'locals {\n  environment = "non-prod"\n}\n'
+                "remote_state {\n"
+                '  config = { key = "${local.environment}/terraform.tfstate" }\n'
+                "}\n"
+            ),
+        }
+        assert _find_terragrunt_orphaned_locals(files) == []
+
+    def test_child_with_declared_local_ok(self) -> None:
+        files = {
+            "environments/prod/s3-backend/terragrunt.hcl": (
+                'include "root" {\n  path = find_in_parent_folders()\n}\n'
+                'locals {\n  environment = "prod"\n}\n'
+                "inputs = { env = local.environment }\n"
+            ),
+        }
+        assert _find_terragrunt_orphaned_locals(files) == []
+
+    def test_each_missing_local_reported_once(self) -> None:
+        files = {
+            "environments/dev/lambda-api/terragrunt.hcl": (
+                'include "root" {\n  path = find_in_parent_folders()\n}\n'
+                "inputs = {\n"
+                "  env    = local.environment\n"
+                "  region = local.aws_region\n"
+                "  env2   = local.environment\n"
+                "}\n"
+            ),
+        }
+        errors = _find_terragrunt_orphaned_locals(files)
+        env_errors = [e for e in errors if "local.environment" in e]
+        assert len(env_errors) == 1
+        assert any("local.aws_region" in e for e in errors)
+
+
+class TestTerragruntInputVariableMismatches:
+    def test_input_not_declared_in_module_variables(self) -> None:
+        files = {
+            "environments/dev/rds-postgres/terragrunt.hcl": (
+                'terraform {\n  source = "../../../modules//rds-postgres"\n}\n'
+                "inputs = {\n  vpc_id = dependency.network.outputs.vpc_id\n}\n"
+            ),
+            "modules/rds-postgres/variables.tf": 'variable "db_name" { type = string }',
+        }
+        errors = _find_terragrunt_input_variable_mismatches(files)
+        assert any("vpc_id" in e for e in errors)
+        assert any("rds-postgres/terragrunt.hcl" in e for e in errors)
+
+    def test_inputs_match_module_variables_ok(self) -> None:
+        files = {
+            "environments/dev/rds-postgres/terragrunt.hcl": (
+                'terraform {\n  source = "../../../modules//rds-postgres"\n}\n'
+                "inputs = {\n  vpc_id = dependency.network.outputs.vpc_id\n}\n"
+            ),
+            "modules/rds-postgres/variables.tf": 'variable "vpc_id" { type = string }',
+        }
+        assert _find_terragrunt_input_variable_mismatches(files) == []
+
+    def test_no_module_variables_tf_skipped(self) -> None:
+        """If the module's variables.tf is not in generated files, skip the check."""
+        files = {
+            "environments/dev/rds-postgres/terragrunt.hcl": (
+                'terraform {\n  source = "../../../modules//rds-postgres"\n}\n'
+                "inputs = {\n  vpc_id = dependency.network.outputs.vpc_id\n}\n"
+            ),
+        }
+        assert _find_terragrunt_input_variable_mismatches(files) == []
+
+    def test_git_source_skipped(self) -> None:
+        files = {
+            "environments/dev/rds-postgres/terragrunt.hcl": (
+                "terraform {\n"
+                '  source = "git::https://github.com/org/modules.git//rds"\n'
+                "}\n"
+                "inputs = { vpc_id = dependency.network.outputs.vpc_id }\n"
+            ),
+        }
+        assert _find_terragrunt_input_variable_mismatches(files) == []
+
+    def test_deeper_environment_path_checked(self) -> None:
+        """Stack configs nested deeper than env/<stack>/ are also checked."""
+        files = {
+            "environments/prod/us-east-1/worker/terragrunt.hcl": (
+                'terraform {\n  source = "../../../../modules//worker"\n}\n'
+                "inputs = {\n  queue_url = dependency.sqs.outputs.queue_url\n}\n"
+            ),
+            "modules/worker/variables.tf": 'variable "timeout" { type = number }',
+        }
+        errors = _find_terragrunt_input_variable_mismatches(files)
+        assert any("queue_url" in e for e in errors)
+
+
+class TestSingletonResourceDuplication:
+    def test_vpc_in_multiple_modules_warns(self) -> None:
+        """aws_vpc in two unrelated modules signals a broken foundation boundary."""
+        files = {
+            "modules/network/main.tf": ('resource "aws_vpc" "this" { cidr_block = "10.0.0.0/16" }'),
+            "modules/rds-postgres/main.tf": (
+                'resource "aws_vpc" "this" { cidr_block = "10.1.0.0/16" }'
+            ),
+        }
+        warnings = _find_singleton_resource_duplication(files)
+        assert any("aws_vpc" in w for w in warnings)
+        assert any("`modules/network`" in w for w in warnings)
+        assert any("`modules/rds-postgres`" in w for w in warnings)
+
+    def test_vpc_in_one_module_ok(self) -> None:
+        files = {
+            "modules/network/main.tf": ('resource "aws_vpc" "this" { cidr_block = "10.0.0.0/16" }'),
+            "modules/lambda-api/main.tf": (
+                'resource "aws_lambda_function" "this" { function_name = "api" }'
+            ),
+        }
+        assert _find_singleton_resource_duplication(files) == []
+
+    def test_non_singleton_type_not_flagged(self) -> None:
+        """aws_security_group legitimately appears in many modules."""
+        files = {
+            "modules/network/main.tf": ('resource "aws_security_group" "this" { name = "sg-a" }'),
+            "modules/rds-postgres/main.tf": (
+                'resource "aws_security_group" "this" { name = "sg-b" }'
+            ),
+        }
+        assert _find_singleton_resource_duplication(files) == []
