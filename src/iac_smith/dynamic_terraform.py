@@ -154,7 +154,7 @@ resource "aws_vpc" "main" {
 data "aws_availability_zones" "available" {}
 ```
 
---- variables.tf (ALL variable declarations for the module — referenced as var.xxx in main.tf) ---
+--- variables.tf (ALL variable declarations — every var.xxx used in main.tf AND every key from the Terragrunt stack's inputs = {}) ---
 ```hcl
 variable "vpc_cidr" {
   description = "CIDR block for the VPC"
@@ -207,6 +207,12 @@ remote_state {
 ```hcl
 include "root" {
   path = find_in_parent_folders()
+}
+
+# locals from the included parent config are NOT available as local.xxx here.
+# Redeclare any values you need from the parent in this locals {} block.
+locals {
+  environment = "non-prod"
 }
 
 terraform {
@@ -547,6 +553,18 @@ Non-negotiable rules:
 * `terraform-pr-check.yml` MUST use a single job named `validate`. Do NOT split
   into multiple jobs per stack — that wastes runners, installs tools multiple times,
   and makes some tool installs appear unused.
+* **Terragrunt locals scoping — CRITICAL:** In any terragrunt.hcl that has an
+  `include` block, locals from the included parent config are NOT accessible as
+  `local.xxx` in the child file. You MUST redeclare any needed values in a
+  `locals {{}}` block in the child file itself, exactly as shown in the canonical
+  stack config template below. Using `local.environment` without a local
+  declaration in the same file will cause `Error: Unsupported attribute` at init.
+* **variables.tf completeness — CRITICAL:** variables.tf MUST declare every
+  variable referenced as var.xxx anywhere in the module (main.tf, outputs.tf,
+  etc.) AND every key listed in the corresponding Terragrunt stack's
+  `inputs = {{}}` block. Before writing variables.tf, enumerate all var.xxx
+  references in main.tf and all keys in the stack's inputs = {{}} to build the
+  complete variable set. Missing any one variable will fail `terraform validate`.
 {_CANONICAL_FILE_SHAPES}{sibling_section}{existing_section}{repair_section}
 Generation context JSON:
 {json.dumps(context, indent=2)}
