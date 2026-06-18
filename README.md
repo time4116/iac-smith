@@ -96,6 +96,7 @@ IaC Smith turns those requests into reviewable pull requests while preserving pl
 ## Documentation
 
 - [docs/SETUP.md](docs/SETUP.md): full setup guide
+- [docs/LAYOUT.md](docs/LAYOUT.md): Terraform/Terragrunt directory layout for generated infrastructure
 - [AGENT_REFERENCE.md](AGENT_REFERENCE.md): architecture and implementation reference
 - [docs/ARCHITECTURE_FLOW.md](docs/ARCHITECTURE_FLOW.md): Mermaid architecture flow
 
