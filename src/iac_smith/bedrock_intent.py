@@ -13,7 +13,9 @@ INTENT_SCHEMA = """
   "requires_new_vpc": true,
   "features": ["encryption", "private_subnets", "logging"],
   "assumptions": ["short factual assumption"],
-  "warnings": ["short description of a risk, gap, or security concern — state what is absent or risky, not what IaC Smith will do"],
+  "warnings": [
+    "short risk/gap/security concern — state what is absent or risky, not future actions"
+  ],
   "blocked": false,
   "block_reason": null
 }
