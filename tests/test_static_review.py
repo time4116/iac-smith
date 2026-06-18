@@ -238,21 +238,21 @@ class TestRedactedPlaceholders:
         assert _find_redacted_placeholders(files) == []
 
     def test_non_yaml_file_ignored(self) -> None:
-        files = {"modules/foundation/main.tf": "# *** just a comment"}
+        files = {"modules/network/main.tf": "# *** just a comment"}
         assert _find_redacted_placeholders(files) == []
 
 
 class TestTerragruntOrphanedLocals:
     def test_child_references_undeclared_local(self) -> None:
         files = {
-            "environments/non-prod/ecs-fargate-stack/terragrunt.hcl": (
+            "environments/staging/rds-postgres/terragrunt.hcl": (
                 'include "root" {\n  path = find_in_parent_folders()\n}\n'
                 "inputs = { env = local.environment }\n"
             ),
         }
         errors = _find_terragrunt_orphaned_locals(files)
         assert any("local.environment" in e for e in errors)
-        assert any("environments/non-prod/ecs-fargate-stack/terragrunt.hcl" in e for e in errors)
+        assert any("environments/staging/rds-postgres/terragrunt.hcl" in e for e in errors)
 
     def test_root_config_no_include_no_error(self) -> None:
         files = {
@@ -267,9 +267,9 @@ class TestTerragruntOrphanedLocals:
 
     def test_child_with_declared_local_ok(self) -> None:
         files = {
-            "environments/non-prod/ecs-fargate-stack/terragrunt.hcl": (
+            "environments/prod/s3-backend/terragrunt.hcl": (
                 'include "root" {\n  path = find_in_parent_folders()\n}\n'
-                'locals {\n  environment = "non-prod"\n}\n'
+                'locals {\n  environment = "prod"\n}\n'
                 "inputs = { env = local.environment }\n"
             ),
         }
@@ -277,7 +277,7 @@ class TestTerragruntOrphanedLocals:
 
     def test_each_missing_local_reported_once(self) -> None:
         files = {
-            "environments/non-prod/ecs-fargate-stack/terragrunt.hcl": (
+            "environments/dev/lambda-api/terragrunt.hcl": (
                 'include "root" {\n  path = find_in_parent_folders()\n}\n'
                 "inputs = {\n"
                 "  env    = local.environment\n"
@@ -295,80 +295,88 @@ class TestTerragruntOrphanedLocals:
 class TestTerragruntInputVariableMismatches:
     def test_input_not_declared_in_module_variables(self) -> None:
         files = {
-            "environments/non-prod/ecs-fargate-stack/terragrunt.hcl": (
-                'terraform {\n  source = "../../../modules//ecs-fargate-stack"\n}\n'
-                "inputs = {\n  vpc_id = dependency.foundation.outputs.vpc_id\n}\n"
+            "environments/dev/rds-postgres/terragrunt.hcl": (
+                'terraform {\n  source = "../../../modules//rds-postgres"\n}\n'
+                "inputs = {\n  vpc_id = dependency.network.outputs.vpc_id\n}\n"
             ),
-            "modules/ecs-fargate-stack/variables.tf": ('variable "environment" { type = string }'),
+            "modules/rds-postgres/variables.tf": 'variable "db_name" { type = string }',
         }
         errors = _find_terragrunt_input_variable_mismatches(files)
         assert any("vpc_id" in e for e in errors)
-        assert any("ecs-fargate-stack/terragrunt.hcl" in e for e in errors)
+        assert any("rds-postgres/terragrunt.hcl" in e for e in errors)
 
     def test_inputs_match_module_variables_ok(self) -> None:
         files = {
-            "environments/non-prod/ecs-fargate-stack/terragrunt.hcl": (
-                'terraform {\n  source = "../../../modules//ecs-fargate-stack"\n}\n'
-                "inputs = {\n  vpc_id = dependency.foundation.outputs.vpc_id\n}\n"
+            "environments/dev/rds-postgres/terragrunt.hcl": (
+                'terraform {\n  source = "../../../modules//rds-postgres"\n}\n'
+                "inputs = {\n  vpc_id = dependency.network.outputs.vpc_id\n}\n"
             ),
-            "modules/ecs-fargate-stack/variables.tf": 'variable "vpc_id" { type = string }',
+            "modules/rds-postgres/variables.tf": 'variable "vpc_id" { type = string }',
         }
         assert _find_terragrunt_input_variable_mismatches(files) == []
 
     def test_no_module_variables_tf_skipped(self) -> None:
         """If the module's variables.tf is not in generated files, skip the check."""
         files = {
-            "environments/non-prod/ecs-fargate-stack/terragrunt.hcl": (
-                'terraform {\n  source = "../../../modules//ecs-fargate-stack"\n}\n'
-                "inputs = {\n  vpc_id = dependency.foundation.outputs.vpc_id\n}\n"
+            "environments/dev/rds-postgres/terragrunt.hcl": (
+                'terraform {\n  source = "../../../modules//rds-postgres"\n}\n'
+                "inputs = {\n  vpc_id = dependency.network.outputs.vpc_id\n}\n"
             ),
         }
         assert _find_terragrunt_input_variable_mismatches(files) == []
 
     def test_git_source_skipped(self) -> None:
         files = {
-            "environments/non-prod/ecs-fargate-stack/terragrunt.hcl": (
+            "environments/dev/rds-postgres/terragrunt.hcl": (
                 "terraform {\n"
-                '  source = "git::https://github.com/org/modules.git//ecs"\n'
+                '  source = "git::https://github.com/org/modules.git//rds"\n'
                 "}\n"
-                "inputs = { vpc_id = dependency.foundation.outputs.vpc_id }\n"
+                "inputs = { vpc_id = dependency.network.outputs.vpc_id }\n"
             ),
         }
         assert _find_terragrunt_input_variable_mismatches(files) == []
 
+    def test_deeper_environment_path_checked(self) -> None:
+        """Stack configs nested deeper than env/<stack>/ are also checked."""
+        files = {
+            "environments/prod/us-east-1/worker/terragrunt.hcl": (
+                'terraform {\n  source = "../../../../modules//worker"\n}\n'
+                "inputs = {\n  queue_url = dependency.sqs.outputs.queue_url\n}\n"
+            ),
+            "modules/worker/variables.tf": 'variable "timeout" { type = number }',
+        }
+        errors = _find_terragrunt_input_variable_mismatches(files)
+        assert any("queue_url" in e for e in errors)
+
 
 class TestSingletonResourceDuplication:
     def test_vpc_in_multiple_modules_warns(self) -> None:
+        """aws_vpc in two unrelated modules signals a broken foundation boundary."""
         files = {
-            "modules/foundation/main.tf": (
-                'resource "aws_vpc" "this" { cidr_block = "10.0.0.0/16" }'
-            ),
-            "modules/ecs-fargate-stack/main.tf": (
+            "modules/network/main.tf": ('resource "aws_vpc" "this" { cidr_block = "10.0.0.0/16" }'),
+            "modules/rds-postgres/main.tf": (
                 'resource "aws_vpc" "this" { cidr_block = "10.1.0.0/16" }'
             ),
         }
         warnings = _find_singleton_resource_duplication(files)
         assert any("aws_vpc" in w for w in warnings)
-        assert any("`modules/foundation`" in w for w in warnings)
-        assert any("`modules/ecs-fargate-stack`" in w for w in warnings)
+        assert any("`modules/network`" in w for w in warnings)
+        assert any("`modules/rds-postgres`" in w for w in warnings)
 
     def test_vpc_in_one_module_ok(self) -> None:
         files = {
-            "modules/foundation/main.tf": (
-                'resource "aws_vpc" "this" { cidr_block = "10.0.0.0/16" }'
-            ),
-            "modules/ecs-fargate-stack/main.tf": (
-                'resource "aws_ecs_cluster" "this" { name = "demo" }'
+            "modules/network/main.tf": ('resource "aws_vpc" "this" { cidr_block = "10.0.0.0/16" }'),
+            "modules/lambda-api/main.tf": (
+                'resource "aws_lambda_function" "this" { function_name = "api" }'
             ),
         }
         assert _find_singleton_resource_duplication(files) == []
 
     def test_non_singleton_type_not_flagged(self) -> None:
+        """aws_security_group legitimately appears in many modules."""
         files = {
-            "modules/foundation/main.tf": (
-                'resource "aws_security_group" "this" { name = "sg-a" }'
-            ),
-            "modules/ecs-fargate-stack/main.tf": (
+            "modules/network/main.tf": ('resource "aws_security_group" "this" { name = "sg-a" }'),
+            "modules/rds-postgres/main.tf": (
                 'resource "aws_security_group" "this" { name = "sg-b" }'
             ),
         }

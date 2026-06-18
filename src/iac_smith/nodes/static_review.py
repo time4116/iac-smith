@@ -274,7 +274,7 @@ def _module_name_from_tg_source(source: str) -> str | None:
 
 def _is_stack_terragrunt(path: str) -> bool:
     parts = path.split("/")
-    return len(parts) == 4 and parts[0] == "environments" and parts[3] == "terragrunt.hcl"
+    return len(parts) >= 4 and parts[0] == "environments" and parts[-1] == "terragrunt.hcl"
 
 
 def _find_redacted_placeholders(generated_files: dict[str, str]) -> list[str]:
