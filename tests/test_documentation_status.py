@@ -18,7 +18,7 @@ def test_readme_documents_architecture_security_model_and_checks():
     assert "## Architecture and security model" in readme
     assert "controller repository" in readme
     assert "target infrastructure repository" in readme
-    assert "Human PR review" in readme
+    assert "human PR review" in readme
     assert "## Security checks" in readme
     assert "owner-gated workflow trigger" in readme
     assert "repository allowlist" in readme
