@@ -45,9 +45,11 @@ It handles greenfield repos (first issue creates the backend bootstrap and repo 
 
 Before opening a PR, IaC Smith runs:
 
-- **Static review**: pattern-based checks across all generated files (hardcoded state keys, missing required blocks, undeclared variables, and more)
-- **Runtime validation**: `terraform validate` and `terragrunt plan` against real AWS state
-- **Repair loop**: if checks fail, the agent retries generation with the error context up to three times before blocking
+- **Static review**: pattern-based checks across all generated files, including unsafe paths, secret patterns, public ingress, duplicate declarations, undeclared references, and workflow safety checks
+- **Runtime validation**: Terraform formatting, Terragrunt HCL formatting, and backend-free module-level `terraform init` / `terraform validate` where possible
+- **Bounded self-repair**: when validation fails, IaC Smith feeds the exact errors back into the generator, rewrites the affected files, and retries before blocking
+
+Runtime validation is intentionally conservative. IaC Smith never runs `terraform apply`. For new infrastructure where remote state or dependency outputs may not exist yet, validation focuses on formatting, backend-free initialization, and module-level Terraform validation rather than pretending every generated stack can be fully planned.
 
 IaC Smith will refuse requests that are genuinely destructive or risky rather than hallucinating a broken implementation.
 
@@ -57,7 +59,21 @@ IaC Smith is split into a controller repository and a target infrastructure repo
 
 The controller does not apply infrastructure. Its durable safety boundary is PR creation only: generated changes must pass static and runtime checks, then Human PR review remains the approval gate before anything is merged or applied.
 
+IaC Smith does not bypass GitOps. It turns an infrastructure request into a bounded, validated pull request with assumptions, warnings, validation results, and an explicit no-apply confirmation in the PR body.
+
 The default public-demo workflow is intentionally narrow. The issue trigger is owner-gated, the target repository is fixed by an allowlist, AWS access is via GitHub Actions OIDC, and target-repo writes use a fine-grained PAT scoped to the target repository rather than broad account credentials.
+
+## Self-healing, not self-applying
+
+IaC Smith is designed to repair generated IaC before it reaches reviewers, not to apply infrastructure automatically.
+
+The controller uses bounded repair loops at multiple stages:
+
+1. **Generation repair**: malformed or unsafe generated files are rejected by static review and regenerated with the exact validation errors.
+2. **Graph-level repair**: the LangGraph controller can route failed validation back through generation with accumulated context.
+3. **Runtime repair**: formatting and backend-free Terraform validation errors can be sent back to the generator for targeted file repair.
+
+Each repair loop has a retry limit. If IaC Smith cannot produce a safe, valid change, it blocks instead of opening a misleading PR.
 
 ## Security checks
 
@@ -71,10 +87,17 @@ IaC Smith runs deterministic checks around the model-generated output before it 
 6. **Terraform/Terragrunt validation**: before commit, IaC Smith runs Terraform/Terragrunt validation and plan checks where backend state and credentials allow; failures trigger a bounded repair loop and otherwise block PR creation.
 7. **PR disclosure**: generated PR bodies include assumptions, warnings, validation results, backend resources, and an explicit no-apply confirmation.
 
+## Why this exists
+
+Infrastructure teams receive repeatable requests through tickets, Slack, and GitHub issues: create a service, add a database, wire a queue, expose a private endpoint, update an environment, or scaffold a new stack.
+
+IaC Smith turns those requests into reviewable pull requests while preserving platform rules, repository conventions, validation, and human approval.
+
 ## Documentation
 
 - [docs/SETUP.md](docs/SETUP.md): full setup guide
 - [AGENT_REFERENCE.md](AGENT_REFERENCE.md): architecture and implementation reference
+- [docs/ARCHITECTURE_FLOW.md](docs/ARCHITECTURE_FLOW.md): Mermaid architecture flow
 
 ## License
 
