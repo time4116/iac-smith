@@ -220,8 +220,7 @@ class TestRedactedPlaceholders:
     def test_redacted_placeholder_in_workflow(self) -> None:
         files = {
             ".github/workflows/terraform-apply.yml": (
-                'run: curl -H "Authorization: Bearer ***"'
-                " https://api.github.com/repos/example"
+                'run: curl -H "Authorization: Bearer ***" https://api.github.com/repos/example'
             ),
         }
         errors = _find_redacted_placeholders(files)
@@ -300,9 +299,7 @@ class TestTerragruntInputVariableMismatches:
                 'terraform {\n  source = "../../../modules//ecs-fargate-stack"\n}\n'
                 "inputs = {\n  vpc_id = dependency.foundation.outputs.vpc_id\n}\n"
             ),
-            "modules/ecs-fargate-stack/variables.tf": (
-                'variable "environment" { type = string }'
-            ),
+            "modules/ecs-fargate-stack/variables.tf": ('variable "environment" { type = string }'),
         }
         errors = _find_terragrunt_input_variable_mismatches(files)
         assert any("vpc_id" in e for e in errors)
@@ -331,7 +328,7 @@ class TestTerragruntInputVariableMismatches:
     def test_git_source_skipped(self) -> None:
         files = {
             "environments/non-prod/ecs-fargate-stack/terragrunt.hcl": (
-                'terraform {\n'
+                "terraform {\n"
                 '  source = "git::https://github.com/org/modules.git//ecs"\n'
                 "}\n"
                 "inputs = { vpc_id = dependency.foundation.outputs.vpc_id }\n"

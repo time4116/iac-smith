@@ -355,8 +355,8 @@ def _find_terragrunt_input_variable_mismatches(generated_files: dict[str, str]) 
         for key in sorted(input_keys - declared_vars):
             errors.append(
                 f"Terragrunt stack `{path}` passes input `{key}` "
-                f"but `{vars_tf_path}` has no `variable \"{key}\"` declaration. "
-                f"Add `variable \"{key}\" {{}}` to `{vars_tf_path}`."
+                f'but `{vars_tf_path}` has no `variable "{key}"` declaration. '
+                f'Add `variable "{key}" {{}}` to `{vars_tf_path}`.'
             )
     return errors
 
