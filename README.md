@@ -51,6 +51,26 @@ Before opening a PR, IaC Smith runs:
 
 IaC Smith will refuse requests that are genuinely destructive or risky rather than hallucinating a broken implementation.
 
+## Architecture and security model
+
+IaC Smith is split into a controller repository and a target infrastructure repository. The controller repository runs the GitHub Actions workflow, reads the source issue, calls Bedrock, scans the target repository, validates generated Terraform/Terragrunt, and opens a pull request. The target infrastructure repository owns the generated IaC and its normal post-merge apply workflow.
+
+The controller does not apply infrastructure. Its durable safety boundary is PR creation only: generated changes must pass static and runtime checks, then Human PR review remains the approval gate before anything is merged or applied.
+
+The default public-demo workflow is intentionally narrow. The issue trigger is owner-gated, the target repository is fixed by an allowlist, AWS access is via GitHub Actions OIDC, and target-repo writes use a fine-grained PAT scoped to the target repository rather than broad account credentials.
+
+## Security checks
+
+IaC Smith runs deterministic checks around the model-generated output before it opens a pull request:
+
+1. **Workflow privilege checks**: controller workflows use least-privilege permissions, pinned third-party actions, locked dependency installs, and an owner-gated workflow trigger before secrets or OIDC credentials are available.
+2. **Target boundary checks**: the repository allowlist in `IAC_SMITH_ALLOWED_TARGET_REPO` fails closed so the agent cannot be redirected to an arbitrary repository.
+3. **Generated file path checks**: generated paths are resolved under the target repository root before writing, blocking path traversal outside the checkout.
+4. **Secret-pattern scan**: generated non-Markdown files are scanned for AWS access keys, private key headers, `aws_access_key_id`, `aws_secret_access_key`, and quoted password/token/secret assignments.
+5. **Terraform safety checks**: static review blocks hardcoded Terragrunt state keys, duplicate variable/output/provider declarations, undeclared module and variable references, unsafe apply workflow triggers, and dangerous public ingress on sensitive ports.
+6. **Terraform/Terragrunt validation**: before commit, IaC Smith runs Terraform/Terragrunt validation and plan checks where backend state and credentials allow; failures trigger a bounded repair loop and otherwise block PR creation.
+7. **PR disclosure**: generated PR bodies include assumptions, warnings, validation results, backend resources, and an explicit no-apply confirmation.
+
 ## Documentation
 
 - [docs/SETUP.md](docs/SETUP.md): full setup guide

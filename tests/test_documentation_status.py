@@ -12,6 +12,21 @@ def test_readme_discloses_mvp_status_and_bedrock_requirement():
     assert "SETUP.md" in readme
 
 
+def test_readme_documents_architecture_security_model_and_checks():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "## Architecture and security model" in readme
+    assert "controller repository" in readme
+    assert "target infrastructure repository" in readme
+    assert "Human PR review" in readme
+    assert "## Security checks" in readme
+    assert "owner-gated workflow trigger" in readme
+    assert "repository allowlist" in readme
+    assert "Secret-pattern scan" in readme
+    assert "dangerous public ingress" in readme
+    assert "Terraform/Terragrunt validation" in readme
+
+
 def test_root_setup_points_to_detailed_setup_and_required_configuration():
     setup = (ROOT / "SETUP.md").read_text(encoding="utf-8")
 
