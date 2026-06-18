@@ -2,7 +2,7 @@
 
 IaC Smith turns freeform GitHub issues into validated Terraform/Terragrunt pull requests using AWS Bedrock and LangGraph.
 
-When a GitHub issue is labeled `iac-smith`, a GitHub Actions workflow runs the LangGraph-based agent. The agent reads the issue, infers the AWS infrastructure intent, scans the target infrastructure repository for existing conventions, generates a complete Terraform/Terragrunt change, validates it with static checks and runtime validation, and opens a reviewable PR.
+When a GitHub issue is labeled `iac-smith`, a GitHub Actions workflow runs the LangGraph-based agent. The agent reads the issue, infers the AWS infrastructure intent, scans the target infrastructure repository for existing conventions, generates a Terraform/Terragrunt change, validates it with static and runtime checks, and opens a reviewable PR.
 
 The goal is not to blindly apply infrastructure. The goal is to turn natural-language infrastructure requests into clear, supportable, validated IaC that can be reviewed, merged, and applied through normal GitOps workflows.
 
@@ -39,9 +39,9 @@ See [docs/SETUP.md](docs/SETUP.md) for full setup instructions including the IAM
 
 ## What IaC Smith can handle
 
-IaC Smith is not limited to a fixed set of infrastructure types. The agent reads the target repo's existing conventions, module layout, and Terragrunt stacks before generating anything, so it produces changes that fit the repo rather than starting from scratch every time.
+IaC Smith is designed to support more than a fixed catalog of infrastructure types. The agent reads the target repo's existing conventions, module layout, and Terragrunt stacks before generating anything, so it produces changes that fit the repo rather than starting from scratch every time.
 
-It handles greenfield repos (first issue creates the backend bootstrap and repo structure) and iterative additions to existing repos (new module, new stack, changes to existing resources) equally.
+It supports both greenfield repos, where the first issue creates the backend bootstrap and repo structure, and iterative additions to existing repos, such as new modules, new stacks, or changes to existing resources.
 
 Before opening a PR, IaC Smith runs:
 
@@ -51,7 +51,7 @@ Before opening a PR, IaC Smith runs:
 
 Runtime validation is intentionally conservative. IaC Smith never runs `terraform apply`. For new infrastructure where remote state or dependency outputs may not exist yet, validation focuses on formatting, backend-free initialization, and module-level Terraform validation rather than pretending every generated stack can be fully planned.
 
-IaC Smith will refuse requests that are genuinely destructive or risky rather than hallucinating a broken implementation.
+IaC Smith will refuse requests that are genuinely destructive or risky rather than generating an unsafe or misleading implementation.
 
 ## Architecture and security model
 
@@ -84,7 +84,7 @@ IaC Smith runs deterministic checks around the model-generated output before it 
 3. **Generated file path checks**: generated paths are resolved under the target repository root before writing, blocking path traversal outside the checkout.
 4. **Secret-pattern scan**: generated non-Markdown files are scanned for AWS access keys, private key headers, `aws_access_key_id`, `aws_secret_access_key`, and quoted password/token/secret assignments.
 5. **Terraform safety checks**: static review blocks hardcoded Terragrunt state keys, duplicate variable/output/provider declarations, undeclared module and variable references, and unsafe apply workflow triggers. It also flags dangerous public ingress on sensitive ports for reviewer attention.
-6. **Terraform/Terragrunt validation**: before commit, IaC Smith runs Terraform formatting, Terragrunt HCL formatting, and backend-free module-level Terraform validation where possible; failures trigger a bounded repair loop and otherwise block PR creation.
+6. **Terraform/Terragrunt validation**: before committing changes, IaC Smith runs Terraform formatting, Terragrunt HCL formatting, and backend-free module-level Terraform validation where possible; failures trigger a bounded repair loop and otherwise block PR creation.
 7. **PR disclosure**: generated PR bodies include assumptions, warnings, validation results, backend resources, and an explicit no-apply confirmation.
 
 ## Why this exists
