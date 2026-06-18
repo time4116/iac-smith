@@ -233,6 +233,165 @@ def _find_undeclared_variable_references(generated_files: dict[str, str]) -> lis
     return errors
 
 
+_TG_LOCALS_HEADER_RE = re.compile(r"\blocals\s*\{")
+_TG_INPUTS_HEADER_RE = re.compile(r"\binputs\s*=\s*\{")
+_TG_INCLUDE_BLOCK_RE = re.compile(r"^\s*include\s*(?:\"[^\"]+\"\s*)?\{", re.MULTILINE)
+_TG_LOCAL_REF_RE = re.compile(r"\blocal\.([A-Za-z0-9_]+)")
+_TG_SOURCE_RE = re.compile(r'source\s*=\s*"([^"]+)"')
+_REDACTED_PLACEHOLDER_RE = re.compile(r"\*{3}")
+_SINGLETON_RESOURCE_TYPES = frozenset({"aws_vpc"})
+_RESOURCE_TYPE_RE = re.compile(r'\bresource\s+"([^"]+)"')
+
+
+def _extract_hcl_block_keys(content: str, header_re: re.Pattern) -> set[str]:
+    """Return the top-level assignment key names inside the first matching HCL block."""
+    m = header_re.search(content)
+    if not m:
+        return set()
+    brace_pos = content.find("{", m.start())
+    if brace_pos == -1:
+        return set()
+    depth = 0
+    end = brace_pos
+    for i in range(brace_pos, len(content)):
+        if content[i] == "{":
+            depth += 1
+        elif content[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    body = content[brace_pos + 1 : end]
+    return {km.group(1) for km in re.finditer(r"^\s*([A-Za-z0-9_]+)\s*=", body, re.MULTILINE)}
+
+
+def _module_name_from_tg_source(source: str) -> str | None:
+    if any(prefix in source for prefix in ("git::", "github.com", "registry.")):
+        return None
+    m = re.search(r"modules/+([A-Za-z0-9_-]+)", source)
+    return m.group(1) if m else None
+
+
+def _is_stack_terragrunt(path: str) -> bool:
+    parts = path.split("/")
+    return len(parts) == 4 and parts[0] == "environments" and parts[3] == "terragrunt.hcl"
+
+
+def _find_redacted_placeholders(generated_files: dict[str, str]) -> list[str]:
+    """Flag `***` redaction artifacts in generated workflow YAML files.
+
+    When the model sees a token in its context that was redacted by the caller,
+    it sometimes reproduces the literal *** placeholder in generated workflow steps.
+    That string is not a valid shell expression and will break the workflow run.
+    """
+    errors = []
+    for path, content in generated_files.items():
+        if not path.endswith((".yml", ".yaml")):
+            continue
+        if _REDACTED_PLACEHOLDER_RE.search(content):
+            errors.append(
+                f"Workflow `{path}` contains a literal `***` redaction artifact. "
+                "Replace with a real GitHub Actions expression such as "
+                "`${{ github.token }}` or `${{ secrets.MY_TOKEN }}`."
+            )
+    return errors
+
+
+def _find_terragrunt_orphaned_locals(generated_files: dict[str, str]) -> list[str]:
+    """Flag `local.<name>` references in child Terragrunt configs where `<name>` is
+    not declared in the same file's `locals {}` block.
+
+    In Terragrunt, including a parent config does NOT merge the parent's locals into
+    `local.*`. A child can only access parent locals via `include.<label>.locals.<name>`
+    when the include block sets `expose = true`. References to `local.env` etc. that
+    are only defined in a parent will cause `Error: Unsupported attribute` at init time.
+    """
+    errors = []
+    for path, content in generated_files.items():
+        if not path.endswith("terragrunt.hcl"):
+            continue
+        if not _TG_INCLUDE_BLOCK_RE.search(content):
+            continue
+        local_keys = _extract_hcl_block_keys(content, _TG_LOCALS_HEADER_RE)
+        seen: set[str] = set()
+        for m in _TG_LOCAL_REF_RE.finditer(content):
+            name = m.group(1)
+            if name in local_keys or name in seen:
+                continue
+            seen.add(name)
+            errors.append(
+                f"Terragrunt config `{path}` references `local.{name}` "
+                f"which is not declared in this file's `locals {{}}` block. "
+                f"Parent locals are not available as `local.*` in child configs; "
+                f"declare `{name}` locally or use "
+                f"`include.<label>.locals.{name}` with `expose = true`."
+            )
+    return errors
+
+
+def _find_terragrunt_input_variable_mismatches(generated_files: dict[str, str]) -> list[str]:
+    """Flag Terragrunt stack inputs that have no matching variable declaration in the module.
+
+    A Terragrunt stack config passes named inputs to its Terraform module. If the module's
+    variables.tf does not declare those names, Terraform will fail with
+    `An argument named X is not expected here` during init/validate.
+    """
+    errors = []
+    for path, content in generated_files.items():
+        if not _is_stack_terragrunt(path):
+            continue
+        source_m = _TG_SOURCE_RE.search(content)
+        if not source_m:
+            continue
+        module_name = _module_name_from_tg_source(source_m.group(1))
+        if not module_name:
+            continue
+        vars_tf_path = f"modules/{module_name}/variables.tf"
+        vars_content = generated_files.get(vars_tf_path)
+        if vars_content is None:
+            continue
+        declared_vars = {m.group(1) for m in _VAR_DECL_RE.finditer(vars_content)}
+        input_keys = _extract_hcl_block_keys(content, _TG_INPUTS_HEADER_RE)
+        for key in sorted(input_keys - declared_vars):
+            errors.append(
+                f"Terragrunt stack `{path}` passes input `{key}` "
+                f"but `{vars_tf_path}` has no `variable \"{key}\"` declaration. "
+                f"Add `variable \"{key}\" {{}}` to `{vars_tf_path}`."
+            )
+    return errors
+
+
+def _find_singleton_resource_duplication(generated_files: dict[str, str]) -> list[str]:
+    """Warn when a foundational resource type (e.g. aws_vpc) appears in more than one module.
+
+    Each foundational resource should be owned by exactly one module (typically `foundation`).
+    All other modules must consume its outputs via Terragrunt dependency blocks rather than
+    creating their own copy, which would produce duplicate infrastructure and naming conflicts.
+    """
+    type_to_modules: dict[str, list[str]] = {}
+    for path, content in generated_files.items():
+        root = _module_root(path)
+        if not root or not path.endswith(".tf"):
+            continue
+        for m in _RESOURCE_TYPE_RE.finditer(content):
+            rtype = m.group(1)
+            if rtype not in _SINGLETON_RESOURCE_TYPES:
+                continue
+            bucket = type_to_modules.setdefault(rtype, [])
+            if root not in bucket:
+                bucket.append(root)
+    warnings = []
+    for rtype, modules in sorted(type_to_modules.items()):
+        if len(modules) > 1:
+            mods = ", ".join(f"`{mod}`" for mod in sorted(modules))
+            warnings.append(
+                f"Resource `{rtype}` is declared in multiple modules: {mods}. "
+                f"Only the foundation/networking module should create this resource; "
+                f"other modules must consume it via Terragrunt `dependency` outputs."
+            )
+    return warnings
+
+
 def _contains_dangerous_public_ingress(content: str) -> bool:
     has_public_cidr = _CIDR_BLOCK_V4.search(content) or _CIDR_BLOCK_V6.search(content)
     if not has_public_cidr:
@@ -272,9 +431,13 @@ def static_review_generated_files(generated_files: dict[str, str]) -> Validation
         ):
             warnings.append(f"Module README `{path}` is missing terraform-docs markers.")
 
+    errors.extend(_find_redacted_placeholders(generated_files))
     errors.extend(_find_undeclared_module_references(generated_files))
     errors.extend(_find_cross_file_duplicates(generated_files))
     errors.extend(_find_undeclared_variable_references(generated_files))
+    errors.extend(_find_terragrunt_orphaned_locals(generated_files))
+    errors.extend(_find_terragrunt_input_variable_mismatches(generated_files))
+    warnings.extend(_find_singleton_resource_duplication(generated_files))
 
     if errors:
         status = ValidationStatus.FAILED
