@@ -2,6 +2,22 @@
 
 IaC Smith generates a consistent directory layout across all target repositories. This document describes that layout, the rules that govern it, and how to extend an existing repo.
 
+## Stacks
+
+A **stack** is one independently deployable unit of infrastructure — a named group of AWS resources that is planned and applied together and owns its own Terraform state. IaC Smith derives the stack name from the issue as a short `snake_case` or `kebab-case` label.
+
+Examples:
+
+| Issue request | Stack name |
+|---|---|
+| ECS Fargate cluster with ALB | `ecs-fargate-stack` |
+| RDS PostgreSQL database | `rds-postgres` |
+| S3 bucket with CloudFront | `s3-cloudfront` |
+| EKS cluster | `eks-fargate` |
+| Baseline account guardrails | `baseline` |
+
+Each stack lives at `environments/<env>/<stack-name>/` and maps to a reusable Terraform module at `modules/<stack-name>/`. A repository can contain multiple stacks — each gets its own live path and its own isolated Terraform state file in S3.
+
 ## Directory structure
 
 ```
@@ -53,11 +69,13 @@ Each file in a module has a fixed responsibility. IaC Smith enforces these with 
 
 ## Terragrunt hierarchy
 
-The three-level hierarchy keeps remote state config DRY:
+The three-level hierarchy keeps remote state config DRY while giving each stack isolated state:
 
-1. **`environments/terragrunt.hcl`** — defines `remote_state` once for all environments. The state key uses `path_relative_to_include()` so each stack gets an isolated key automatically.
+1. **`environments/terragrunt.hcl`** — defines `remote_state` once for all environments. The state key uses `path_relative_to_include()`, which resolves to the directory path of the calling stack relative to this file (e.g. `non-prod/ecs-fargate-stack/terraform.tfstate`). Every stack therefore gets its own isolated state file in S3 automatically — no manual key management and no risk of one stack's plan touching another's state.
 2. **`environments/<env>/terragrunt.hcl`** — includes the root config and sets environment locals (`env`, `region`, `account_id`).
 3. **`environments/<env>/<stack>/terragrunt.hcl`** — declares the module source (relative path into `modules/`), dependency blocks, and input variable bindings.
+
+Because state is isolated per stack, a `terragrunt plan` or `apply` in `environments/non-prod/ecs-fargate-stack/` only reads and writes state for that stack. The foundation stack and any future stacks each have their own state files and can be planned or applied independently.
 
 ## Backend resource naming
 
