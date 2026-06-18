@@ -104,7 +104,7 @@ class TestUndeclaredVariableReferences:
         assert len(errors) == 1
         assert "name_prefix" in errors[0]
         assert "var.name_prefix" in errors[0]
-        assert "but no variable" in errors[0]
+        assert "is not declared" in errors[0]
         assert "Add variable" in errors[0]
         assert "variables.tf" in errors[0]
 
