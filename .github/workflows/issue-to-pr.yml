@@ -55,7 +55,7 @@ jobs:
       - name: Run IaC Smith
         env:
           IAC_SMITH_TARGET_REPO_TOKEN: ${{ secrets.IAC_SMITH_TARGET_REPO_PAT }}
-          IAC_SMITH_GITHUB_TOKEN: ${{ github.token }}
+          IAC_SMITH_GITHUB_TOKEN: ${{ github.event_name == 'workflow_dispatch' && secrets.IAC_SMITH_TARGET_REPO_PAT || github.token }}
           IAC_SMITH_SOURCE_REPO: ${{ inputs.source_repo || github.repository }}
           IAC_SMITH_ISSUE_NUMBER: ${{ inputs.issue_number || github.event.issue.number }}
           BEDROCK_MODEL_ID: ${{ secrets.BEDROCK_MODEL_ID }}
