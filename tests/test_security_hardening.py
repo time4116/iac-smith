@@ -30,7 +30,10 @@ def test_issue_workflow_has_privilege_boundary_before_secrets_and_oidc():
         "id-token": "write",
         "issues": "read",
     }
-    assert workflow["concurrency"]["group"] == "iac-smith-issue-${{ github.event.issue.number }}"
+    assert (
+        workflow["concurrency"]["group"]
+        == "iac-smith-issue-${{ inputs.issue_number || github.event.issue.number }}"
+    )
     assert workflow["concurrency"]["cancel-in-progress"] is False
     assert "github.actor == 'time4116'" in job["if"]
     assert "IAC_SMITH_ALLOWED_TARGET_REPO" in workflow_text
@@ -38,8 +41,21 @@ def test_issue_workflow_has_privilege_boundary_before_secrets_and_oidc():
     assert "IAC_SMITH_GITHUB_TOKEN" in workflow_text
     assert "IAC_SMITH_TARGET_REPO_TOKEN" in workflow_text
     assert "GITHUB_TOKEN: ${{ secrets.IAC_SMITH_TARGET_REPO_PAT }}" not in workflow_text
+    assert "Authorization: Bearer ${GH_TOKEN}" in workflow_text
+    assert "Bearer ***" not in workflow_text
     assert "uv sync --locked" in workflow_text
     assert any(step.get("with", {}).get("python-version") == "3.12" for step in steps)
+
+
+def test_source_does_not_commit_redacted_secret_placeholders():
+    source_paths = [
+        ROOT / ".github/workflows/issue-to-pr.yml",
+        ROOT / "src/iac_smith/cli.py",
+        ROOT / "src/iac_smith/dynamic_terraform.py",
+    ]
+
+    for path in source_paths:
+        assert "***" not in path.read_text(encoding="utf-8"), path
 
 
 def test_issue_workflow_pins_third_party_actions_to_commit_shas():
