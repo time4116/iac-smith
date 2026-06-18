@@ -614,7 +614,7 @@ class BedrockTerraformGenerator:
         *,
         read_timeout_seconds: int = 240,
         max_attempts: int = 3,
-        max_repair_attempts: int = 1,
+        max_repair_attempts: int = 2,
         concurrency: int | None = None,
         logger: Callable[[str], None] | None = None,
     ) -> None:
