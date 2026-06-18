@@ -26,6 +26,7 @@ def test_issue_workflow_has_privilege_boundary_before_secrets_and_oidc():
     steps = job["steps"]
 
     assert workflow["permissions"] == {
+        "actions": "read",
         "contents": "read",
         "id-token": "write",
         "issues": "read",
@@ -56,6 +57,16 @@ def test_source_does_not_commit_redacted_secret_placeholders():
 
     for path in source_paths:
         assert "***" not in path.read_text(encoding="utf-8"), path
+
+
+def test_monthly_run_limit_config_exists_and_workflow_enforces_it():
+    config = yaml.safe_load((ROOT / ".github/iac-smith.yml").read_text(encoding="utf-8"))
+    assert isinstance(config.get("monthly_run_limit"), int)
+    assert config["monthly_run_limit"] > 0
+
+    workflow_text = (ROOT / ".github/workflows/issue-to-pr.yml").read_text(encoding="utf-8")
+    assert "monthly_run_limit" in workflow_text
+    assert ".github/iac-smith.yml" in workflow_text
 
 
 def test_issue_workflow_pins_third_party_actions_to_commit_shas():
