@@ -282,6 +282,8 @@ def static_review_generated_files(generated_files: dict[str, str]) -> Validation
         status = ValidationStatus.PARTIAL
     else:
         status = ValidationStatus.PASSED
+
+    if not errors:
         checks.append("Static security review passed.")
 
     return ValidationResult(status=status, checks=checks, warnings=warnings, errors=errors)

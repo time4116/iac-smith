@@ -196,4 +196,15 @@ class TestStaticReviewIntegration:
             ),
         }
         result = static_review_generated_files(files)
-        assert result.status != ValidationStatus.FAILED
+        assert result.status == ValidationStatus.PASSED
+        assert any("Static security review passed" in c for c in result.checks)
+
+    def test_warnings_produce_partial_status_with_check_entry(self) -> None:
+        files = {
+            "modules/ecs-fargate/main.tf": 'resource "aws_vpc" "this" { cidr_block = "10.0.0.0/16" }',
+            "modules/ecs-fargate/README.md": "No terraform-docs markers here.",
+        }
+        result = static_review_generated_files(files)
+        assert result.status == ValidationStatus.PARTIAL
+        assert result.warnings
+        assert any("Static security review passed" in c for c in result.checks)
