@@ -8,7 +8,6 @@ from iac_smith.nodes.static_review import (
     _find_redacted_placeholders,
     _find_singleton_resource_duplication,
     _find_terragrunt_dependency_output_mismatches,
-    _find_terragrunt_input_variable_mismatches,
     _find_terragrunt_missing_required_inputs,
     _find_terragrunt_orphaned_locals,
     _find_undeclared_variable_references,
@@ -179,17 +178,22 @@ class TestUndeclaredVariableReferences:
 
 
 class TestStaticReviewIntegration:
-    def test_duplicate_variable_triggers_failed(self) -> None:
-        """Cross-file duplicates bubble up to static_review_generated_files."""
+    def test_duplicate_variable_is_structural_not_blocking(self) -> None:
+        """Cross-file duplicates are structural: surfaced and autofixed, not blocking.
+
+        Real `terraform validate` catches a duplicate variable declaration, so it
+        belongs in the structural tier (PARTIAL) rather than blocking PR creation.
+        """
         main_tf = 'variable "vpc_id" { type = string }\nresource "null_resource" "x" {}'
         files = {
             "modules/ecs-fargate/main.tf": main_tf,
             "modules/ecs-fargate/variables.tf": 'variable "vpc_id" { type = string }',
         }
         result = static_review_generated_files(files)
-        assert result.status == ValidationStatus.FAILED
-        assert any("vpc_id" in e for e in result.errors)
-        assert any("Variable" in e for e in result.errors)
+        assert result.status == ValidationStatus.PARTIAL
+        assert not result.errors
+        assert any("vpc_id" in s for s in result.structural)
+        assert any("Variable" in s for s in result.structural)
 
     def test_clean_module_passes(self) -> None:
         main_tf = 'resource "aws_vpc" "this" { cidr_block = "10.0.0.0/16" }'
@@ -318,47 +322,10 @@ class TestTerragruntOrphanedLocals:
         assert any("local.environment" in e for e in errors)
 
 
-class TestTerragruntInputVariableMismatches:
-    def test_input_not_declared_in_module_variables(self) -> None:
-        files = {
-            "environments/dev/rds-postgres/terragrunt.hcl": (
-                'terraform {\n  source = "../../../modules//rds-postgres"\n}\n'
-                "inputs = {\n  vpc_id = dependency.network.outputs.vpc_id\n}\n"
-            ),
-            "modules/rds-postgres/variables.tf": 'variable "db_name" { type = string }',
-        }
-        errors = _find_terragrunt_input_variable_mismatches(files)
-        assert any("vpc_id" in e for e in errors)
-        assert any("rds-postgres/terragrunt.hcl" in e for e in errors)
-
-    def test_inputs_match_module_variables_ok(self) -> None:
-        files = {
-            "environments/dev/rds-postgres/terragrunt.hcl": (
-                'terraform {\n  source = "../../../modules//rds-postgres"\n}\n'
-                "inputs = {\n  vpc_id = dependency.network.outputs.vpc_id\n}\n"
-            ),
-            "modules/rds-postgres/variables.tf": 'variable "vpc_id" { type = string }',
-        }
-        assert _find_terragrunt_input_variable_mismatches(files) == []
-
-    def test_nested_map_keys_are_not_treated_as_inputs(self) -> None:
-        files = {
-            "environments/non-prod/ecs-fargate-stack/terragrunt.hcl": (
-                'terraform {\n  source = "../../../modules//ecs-fargate-stack"\n}\n'
-                "inputs = {\n"
-                "  tags = {\n"
-                "    Environment = local.environment\n"
-                '    ManagedBy   = "iac-smith"\n'
-                '    Stack       = "ecs-fargate-stack"\n'
-                "  }\n"
-                "}\n"
-            ),
-            "modules/ecs-fargate-stack/variables.tf": 'variable "tags" { type = map(string) }',
-        }
-
-        assert _find_terragrunt_input_variable_mismatches(files) == []
-
+class TestTerragruntNestedLocalReferences:
     def test_nested_local_references_do_not_require_nested_local_names(self) -> None:
+        # A local referenced inside a nested input map (tags) is satisfied by the
+        # top-level locals block; it must not be flagged as an orphaned local.
         files = {
             "environments/non-prod/ecs-fargate-stack/terragrunt.hcl": (
                 'include "root" {\n  path = find_in_parent_folders()\n}\n'
@@ -372,39 +339,6 @@ class TestTerragruntInputVariableMismatches:
         }
 
         assert _find_terragrunt_orphaned_locals(files) == []
-
-    def test_no_module_variables_tf_skipped(self) -> None:
-        """If the module's variables.tf is not in generated files, skip the check."""
-        files = {
-            "environments/dev/rds-postgres/terragrunt.hcl": (
-                'terraform {\n  source = "../../../modules//rds-postgres"\n}\n'
-                "inputs = {\n  vpc_id = dependency.network.outputs.vpc_id\n}\n"
-            ),
-        }
-        assert _find_terragrunt_input_variable_mismatches(files) == []
-
-    def test_git_source_skipped(self) -> None:
-        files = {
-            "environments/dev/rds-postgres/terragrunt.hcl": (
-                "terraform {\n"
-                '  source = "git::https://github.com/org/modules.git//rds"\n'
-                "}\n"
-                "inputs = { vpc_id = dependency.network.outputs.vpc_id }\n"
-            ),
-        }
-        assert _find_terragrunt_input_variable_mismatches(files) == []
-
-    def test_deeper_environment_path_checked(self) -> None:
-        """Stack configs nested deeper than env/<stack>/ are also checked."""
-        files = {
-            "environments/prod/us-east-1/worker/terragrunt.hcl": (
-                'terraform {\n  source = "../../../../modules//worker"\n}\n'
-                "inputs = {\n  queue_url = dependency.sqs.outputs.queue_url\n}\n"
-            ),
-            "modules/worker/variables.tf": 'variable "timeout" { type = number }',
-        }
-        errors = _find_terragrunt_input_variable_mismatches(files)
-        assert any("queue_url" in e for e in errors)
 
 
 class TestTerragruntMissingRequiredInputs:
@@ -493,7 +427,10 @@ class TestSingletonResourceDuplication:
         assert any("`modules/network`" in e for e in errors)
         assert any("`modules/rds-postgres`" in e for e in errors)
 
-    def test_static_review_blocks_vpc_in_foundation_and_workload(self) -> None:
+    def test_static_review_warns_on_vpc_in_foundation_and_workload(self) -> None:
+        # Two modules each declaring aws_vpc is a broken foundation boundary, but
+        # both validate fine in isolation — Terraform won't catch it. It is an
+        # advisory warning for the reviewer, not a blocking error.
         files = {
             "modules/foundation/main.tf": (
                 'resource "aws_vpc" "this" { cidr_block = "10.0.0.0/16" }'
@@ -505,8 +442,9 @@ class TestSingletonResourceDuplication:
 
         result = static_review_generated_files(files)
 
-        assert result.status == ValidationStatus.FAILED
-        assert any("aws_vpc" in e for e in result.errors)
+        assert result.status == ValidationStatus.PARTIAL
+        assert not result.errors
+        assert any("aws_vpc" in w for w in result.warnings)
 
     def test_vpc_in_one_module_ok(self) -> None:
         files = {

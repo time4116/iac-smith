@@ -45,9 +45,10 @@ It supports both greenfield repos, where the first issue creates the backend boo
 
 Before opening a PR, IaC Smith runs:
 
-- **Static review**: pattern-based checks across all generated files, including unsafe paths, secret patterns, public ingress, duplicate declarations, undeclared references, and workflow safety checks
-- **Runtime validation**: Terraform formatting, Terragrunt HCL formatting, and backend-free module-level `terraform init` / `terraform validate` where possible
-- **Bounded self-repair**: when validation fails, IaC Smith feeds the exact errors back into the generator, rewrites the affected files, and retries before blocking
+- **Static review (security tier)**: blocking checks for things real Terraform cannot catch — secret patterns, unsafe paths, hardcoded Terragrunt state keys, workflow privilege/trigger safety, and redaction artifacts that would break a workflow
+- **Static review (structural tier)**: advisory checks for semantic issues (duplicate declarations, undeclared references, missing required Terragrunt inputs, dependency-output mismatches). These are surfaced for review and fed to the bounded autofix loop, but do not block — the real validator is the gate
+- **Runtime validation (correctness gate)**: Terraform formatting, Terragrunt HCL formatting, and backend-free module-level `terraform init` / `terraform validate` — the authoritative check that generated IaC is valid
+- **Bounded self-repair**: when validation surfaces issues, IaC Smith feeds the exact errors back into the generator, rewrites the affected files, and retries; an oscillation guard returns best-effort output rather than crashing when repairs stop converging
 
 Runtime validation is intentionally conservative. IaC Smith never runs `terraform apply`. For new infrastructure where remote state or dependency outputs may not exist yet, validation focuses on formatting, backend-free initialization, and module-level Terraform validation rather than pretending every generated stack can be fully planned.
 
@@ -69,11 +70,11 @@ IaC Smith is designed to repair generated IaC before it reaches reviewers, not t
 
 The controller uses bounded repair loops at multiple stages:
 
-1. **Generation repair**: malformed or unsafe generated files are rejected by static review and regenerated with the exact validation errors.
-2. **Graph-level repair**: the LangGraph controller can route failed validation back through generation with accumulated context.
-3. **Runtime repair**: formatting and backend-free Terraform validation errors can be sent back to the generator for targeted file repair.
+1. **Generation repair**: security/safety violations and structural issues found by static review are regenerated with the exact errors. A module and its Terragrunt stack are repaired together so their variable contract converges instead of oscillating, and an oscillation guard returns best-effort output rather than crashing when repairs stop converging.
+2. **Graph-level repair**: the LangGraph controller can route security-blocking validation back through generation with accumulated context.
+3. **Runtime repair**: formatting and backend-free Terraform/Terragrunt validation errors — the authoritative correctness gate — are sent back to the generator for targeted file repair.
 
-Each repair loop has a retry limit. If IaC Smith cannot produce a safe, valid change, it blocks instead of opening a misleading PR.
+Each repair loop has a retry limit. If a security/safety check or the real Terraform/Terragrunt validation cannot be satisfied, IaC Smith blocks instead of opening a misleading PR. Advisory structural findings that remain are surfaced in the PR body for human review rather than blocking.
 
 ## Security checks
 
@@ -83,8 +84,8 @@ IaC Smith runs deterministic checks around the model-generated output before it 
 2. **Target boundary checks**: the repository allowlist in `IAC_SMITH_ALLOWED_TARGET_REPO` fails closed so the agent cannot be redirected to an arbitrary repository.
 3. **Generated file path checks**: generated paths are resolved under the target repository root before writing, blocking path traversal outside the checkout.
 4. **Secret-pattern scan**: generated non-Markdown files are scanned for AWS access keys, private key headers, `aws_access_key_id`, `aws_secret_access_key`, and quoted password/token/secret assignments.
-5. **Terraform safety checks**: static review blocks hardcoded Terragrunt state keys, duplicate variable/output/provider declarations, undeclared module and variable references, and unsafe apply workflow triggers. It also flags dangerous public ingress on sensitive ports for reviewer attention.
-6. **Terraform/Terragrunt validation**: before committing changes, IaC Smith runs Terraform formatting, Terragrunt HCL formatting, and backend-free module-level Terraform validation where possible; failures trigger a bounded repair loop and otherwise block PR creation.
+5. **Terraform safety checks**: static review *blocks* on security/safety issues that real Terraform cannot catch — hardcoded Terragrunt state keys, unsafe apply workflow triggers, and workflow privilege problems. Structural issues (duplicate declarations, undeclared references, missing required Terragrunt inputs) are surfaced and autofixed but do not block, since the real validator catches them authoritatively. It also flags dangerous public ingress on sensitive ports for reviewer attention. Note: Terragrunt passes inputs as `TF_VAR_*` environment variables and Terraform ignores undeclared ones, so passing an extra input is not treated as an error — only a *required* module variable the stack fails to pass is.
+6. **Terraform/Terragrunt validation**: before committing changes, IaC Smith runs Terraform formatting, Terragrunt HCL formatting, and backend-free module-level Terraform validation. This is the authoritative correctness gate: failures trigger a bounded repair loop and otherwise block PR creation.
 7. **PR disclosure**: generated PR bodies include assumptions, warnings, validation results, backend resources, and an explicit no-apply confirmation.
 
 ## Why this exists

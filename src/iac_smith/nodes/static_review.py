@@ -1,6 +1,7 @@
 import re
 
 from iac_smith.models.validation import ValidationResult, ValidationStatus
+from iac_smith.nodes.contract import parse_module_variables
 
 SECRET_PATTERNS = [
     re.compile(r"AKIA[0-9A-Z]{16}"),
@@ -350,17 +351,6 @@ def _extract_named_hcl_blocks(content: str, header_re: re.Pattern) -> dict[str, 
     return blocks
 
 
-def _has_top_level_assignment(block_body: str, key: str) -> bool:
-    nested_depth = 0
-    for line in block_body.splitlines():
-        if nested_depth == 0 and re.match(rf"^\s*{re.escape(key)}\s*=", line):
-            return True
-        nested_depth += line.count("{") - line.count("}")
-        if nested_depth < 0:
-            nested_depth = 0
-    return False
-
-
 def _module_name_from_tg_source(source: str) -> str | None:
     if any(prefix in source for prefix in ("git::", "github.com", "registry.")):
         return None
@@ -426,44 +416,19 @@ def _find_terragrunt_orphaned_locals(generated_files: dict[str, str]) -> list[st
     return errors
 
 
-def _find_terragrunt_input_variable_mismatches(generated_files: dict[str, str]) -> list[str]:
-    """Flag Terragrunt stack inputs that have no matching variable declaration in the module.
-
-    A Terragrunt stack config passes named inputs to its Terraform module. If the module's
-    variables.tf does not declare those names, Terraform will fail with
-    `An argument named X is not expected here` during init/validate.
-    """
-    errors = []
-    for path, content in generated_files.items():
-        if not _is_stack_terragrunt(path):
-            continue
-        source_m = _TG_SOURCE_RE.search(content)
-        if not source_m:
-            continue
-        module_name = _module_name_from_tg_source(source_m.group(1))
-        if not module_name:
-            continue
-        vars_tf_path = f"modules/{module_name}/variables.tf"
-        vars_content = generated_files.get(vars_tf_path)
-        if vars_content is None:
-            continue
-        declared_vars = {m.group(1) for m in _VAR_DECL_RE.finditer(vars_content)}
-        input_keys = _extract_hcl_block_keys(content, _TG_INPUTS_HEADER_RE)
-        for key in sorted(input_keys - declared_vars):
-            errors.append(
-                f"Terragrunt stack `{path}` passes input `{key}` "
-                f'but `{vars_tf_path}` has no `variable "{key}"` declaration. '
-                f'Add `variable "{key}" {{}}` to `{vars_tf_path}`.'
-            )
-    return errors
-
-
 def _find_terragrunt_missing_required_inputs(generated_files: dict[str, str]) -> list[str]:
     """Flag required module variables that the Terragrunt stack does not pass.
 
-    `terraform validate` can pass on standalone modules even when the live
-    Terragrunt stack omits required variables. Variables with a `default =` are
-    optional; all other declared variables must be provided by the stack inputs.
+    This is the one input/variable rule that is a *real* error: a variable with
+    no `default =` that the live Terragrunt stack never provides will fail
+    `terragrunt plan/apply` in non-interactive mode. The reverse — a stack
+    passing an input the module does not declare — is NOT an error: Terragrunt
+    passes inputs as `TF_VAR_*` environment variables and Terraform silently
+    ignores undeclared ones, so it is not checked here.
+
+    The module's `variables.tf`, parsed authoritatively via
+    `parse_module_variables`, is the single source of truth for which variables
+    are required.
     """
     errors = []
     for path, content in generated_files.items():
@@ -480,11 +445,10 @@ def _find_terragrunt_missing_required_inputs(generated_files: dict[str, str]) ->
         if vars_content is None:
             continue
 
-        variable_blocks = _extract_named_hcl_blocks(vars_content, _VAR_DECL_RE)
         required_vars = {
             name
-            for name, block in variable_blocks.items()
-            if not _has_top_level_assignment(block, "default")
+            for name, has_default in parse_module_variables(vars_content).items()
+            if not has_default
         }
         input_keys = _extract_hcl_block_keys(content, _TG_INPUTS_HEADER_RE)
         for name in sorted(required_vars - input_keys):
@@ -590,7 +554,19 @@ def _contains_dangerous_public_ingress(content: str) -> bool:
 
 
 def static_review_generated_files(generated_files: dict[str, str]) -> ValidationResult:
+    # Three tiers:
+    #   errors      — security/safety. These BLOCK PR creation; real Terraform
+    #                 will not catch them (secrets, workflow privilege, hardcoded
+    #                 state keys, redaction artifacts that break workflows).
+    #   structural  — semantic correctness (undeclared refs, duplicate decls,
+    #                 missing required inputs, dependency output mismatches).
+    #                 These do NOT block: they feed the bounded autofix loop and
+    #                 are surfaced for review, while the real terraform/terragrunt
+    #                 validation in cli.py is the authoritative correctness gate.
+    #   warnings    — advisory only (public ingress, missing docs markers,
+    #                 singleton-resource duplication). Surfaced, never block.
     errors: list[str] = []
+    structural: list[str] = []
     warnings: list[str] = []
     checks: list[str] = []
 
@@ -620,19 +596,23 @@ def static_review_generated_files(generated_files: dict[str, str]) -> Validation
         ):
             warnings.append(f"Module README `{path}` is missing terraform-docs markers.")
 
+    # Security/safety — blocking.
     errors.extend(_find_redacted_placeholders(generated_files))
-    errors.extend(_find_undeclared_module_references(generated_files))
-    errors.extend(_find_cross_file_duplicates(generated_files))
-    errors.extend(_find_undeclared_variable_references(generated_files))
-    errors.extend(_find_terragrunt_orphaned_locals(generated_files))
-    errors.extend(_find_terragrunt_input_variable_mismatches(generated_files))
-    errors.extend(_find_terragrunt_missing_required_inputs(generated_files))
-    errors.extend(_find_terragrunt_dependency_output_mismatches(generated_files))
-    errors.extend(_find_singleton_resource_duplication(generated_files))
+
+    # Structural/semantic — advisory + autofix, never blocking.
+    structural.extend(_find_undeclared_module_references(generated_files))
+    structural.extend(_find_cross_file_duplicates(generated_files))
+    structural.extend(_find_undeclared_variable_references(generated_files))
+    structural.extend(_find_terragrunt_orphaned_locals(generated_files))
+    structural.extend(_find_terragrunt_missing_required_inputs(generated_files))
+    structural.extend(_find_terragrunt_dependency_output_mismatches(generated_files))
+
+    # Advisory only.
+    warnings.extend(_find_singleton_resource_duplication(generated_files))
 
     if errors:
         status = ValidationStatus.FAILED
-    elif warnings:
+    elif warnings or structural:
         status = ValidationStatus.PARTIAL
     else:
         status = ValidationStatus.PASSED
@@ -640,4 +620,10 @@ def static_review_generated_files(generated_files: dict[str, str]) -> Validation
     if not errors:
         checks.append("Static security review passed.")
 
-    return ValidationResult(status=status, checks=checks, warnings=warnings, errors=errors)
+    return ValidationResult(
+        status=status,
+        checks=checks,
+        warnings=warnings,
+        errors=errors,
+        structural=structural,
+    )

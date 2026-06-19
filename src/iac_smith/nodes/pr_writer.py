@@ -59,7 +59,7 @@ Status: `{validation.status.value}`
 
 ## Warnings and risks
 
-{_bullets([*intent.warnings, *validation.warnings])}
+{_bullets([*intent.warnings, *validation.warnings, *validation.structural])}
 
 ## Iterating on this infrastructure
 
