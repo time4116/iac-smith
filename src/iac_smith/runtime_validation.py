@@ -6,18 +6,6 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-_LOCAL_REMOTE_STATE = """remote_state {
-  backend = "local"
-  generate = {
-    path      = "backend.tf"
-    if_exists = "overwrite_terragrunt"
-  }
-  config = {
-    path = "terraform.tfstate"
-  }
-}
-"""
-
 
 @dataclass(frozen=True)
 class RuntimeValidationResult:
@@ -80,15 +68,11 @@ def _detect_terragrunt(env: dict[str, str]) -> tuple[list[str], str]:
     return hclfmt_cmd, non_interactive
 
 
-def _replace_hcl_block(content: str, keyword: str, replacement: str) -> str:
-    """Replace a top-level ``keyword { ... }`` block, brace-matched, with replacement.
-
-    Returns content unchanged if the block is absent.  Brace counting is naive but
-    safe here because HCL ``${...}`` interpolations are themselves brace-balanced.
-    """
-    m = re.search(rf"\b{re.escape(keyword)}\s*\{{", content)
+def _strip_first_block(content: str, pattern: str) -> tuple[str, bool]:
+    """Remove the first ``... { }`` block whose header matches pattern (brace-matched)."""
+    m = re.search(pattern, content)
     if not m:
-        return content
+        return content, False
     brace_start = content.index("{", m.start())
     depth = 0
     for i in range(brace_start, len(content)):
@@ -97,21 +81,52 @@ def _replace_hcl_block(content: str, keyword: str, replacement: str) -> str:
         elif content[i] == "}":
             depth -= 1
             if depth == 0:
-                return content[: m.start()] + replacement + content[i + 1 :]
+                return content[: m.start()] + content[i + 1 :], True
+    return content, False
+
+
+def _strip_backend_config(content: str) -> str:
+    """Remove every backend-defining block so terragrunt falls back to local state.
+
+    Handles both ``remote_state { ... }`` and ``generate "<name>" { ... }`` blocks
+    that emit a Terraform backend. A generate block is only stripped when its body
+    declares a backend, so generated provider blocks are preserved.
+    """
+    while True:
+        content, changed = _strip_first_block(content, r"\bremote_state\s*\{")
+        if not changed:
+            break
+
+    searched_from = 0
+    while True:
+        m = re.search(r'\bgenerate\s+"[^"]*"\s*\{', content[searched_from:])
+        if not m:
+            break
+        abs_start = searched_from + m.start()
+        block_text, _ = _strip_first_block(content[abs_start:], r'\bgenerate\s+"[^"]*"\s*\{')
+        removed_len = len(content) - abs_start - len(block_text)
+        block_body = content[abs_start : abs_start + removed_len]
+        if re.search(r'backend\s*[="]', block_body):
+            content = content[:abs_start] + content[abs_start + removed_len :]
+        else:
+            searched_from = abs_start + 1
     return content
 
 
-def _force_local_remote_state(scratch_root: Path) -> None:
-    """Swap the root terragrunt remote_state to a local backend in the scratch copy.
+def _force_local_state(scratch_root: Path) -> None:
+    """Strip S3/remote backend config from every terragrunt config in the scratch copy.
 
     The committed PR keeps its real S3 backend; this only mutates a throwaway copy
-    so ``terragrunt plan`` can init without the S3 state bucket having to exist yet.
+    so ``terragrunt plan`` can init against local state without the state bucket
+    existing yet. remote_state can be declared at any level of the hierarchy
+    (root, environment, or stack), so every ``terragrunt.hcl`` / ``root.hcl`` is
+    rewritten — not just the top-level one.
     """
-    root_cfg = scratch_root / "environments" / "terragrunt.hcl"
-    if not root_cfg.exists():
-        return
-    content = root_cfg.read_text()
-    root_cfg.write_text(_replace_hcl_block(content, "remote_state", _LOCAL_REMOTE_STATE))
+    for cfg in [*scratch_root.rglob("terragrunt.hcl"), *scratch_root.rglob("root.hcl")]:
+        content = cfg.read_text()
+        stripped = _strip_backend_config(content)
+        if stripped != content:
+            cfg.write_text(stripped)
 
 
 def _run_local_state_plans(root: Path, env: dict[str, str], non_interactive: str) -> list[str]:
@@ -137,7 +152,7 @@ def _run_local_state_plans(root: Path, env: dict[str, str], non_interactive: str
                 ".git", ".terraform", ".terragrunt-cache", "*.tfstate", "*.tfstate.*"
             ),
         )
-        _force_local_remote_state(scratch)
+        _force_local_state(scratch)
         for stack in terragrunt_stacks:
             stack_dir = scratch / stack.relative_to(root)
             label = f"terragrunt plan {stack.relative_to(root)}"
