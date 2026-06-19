@@ -567,6 +567,75 @@ def test_bedrock_terraform_generator_returns_best_effort_after_unrepaired_static
     assert len(runtime.calls) == len(files) + 1
 
 
+def test_bedrock_terraform_generator_keeps_previous_content_when_repair_returns_wrong_path():
+    """A single file failing to repair (model returns an unplanned path) must not
+    crash the whole run — the file keeps its previous content and downstream
+    validation gates."""
+    bad_terragrunt = 'remote_state { config = { key = "fixed.tfstate" } }\n'
+    files = {
+        "environments/non-prod/ecs-fargate/terragrunt.hcl": bad_terragrunt,
+        "modules/ecs-fargate/main.tf": (
+            'resource "aws_ecs_cluster" "this" { name = var.name_prefix }\n'
+        ),
+        "modules/ecs-fargate/variables.tf": 'variable "name_prefix" { type = string }\n',
+        "modules/ecs-fargate/outputs.tf": (
+            'output "cluster_name" { value = aws_ecs_cluster.this.name }\n'
+        ),
+    }
+
+    class WrongPathOnRepairRuntime(FakeBedrockRuntime):
+        def invoke_model(self, **kwargs):
+            self.calls.append(kwargs)
+            prompt = json.loads(kwargs["body"])["messages"][0]["content"]
+            requested = json.loads(prompt.split("Generation context JSON:\n", 1)[1])
+            path = requested["files_to_generate"][0]
+            # During repair, return a payload for a different planned file so
+            # parse_single_file_generation_payload rejects it as unplanned.
+            returned = path
+            if "Static review failures:" in prompt:
+                returned = next(p for p in files if p != path)
+            return {
+                "body": FakeBody(
+                    json.dumps(
+                        {
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": json.dumps(
+                                        {
+                                            "path": returned,
+                                            "content": files[returned],
+                                            "assumptions": [],
+                                            "warnings": [],
+                                        }
+                                    ),
+                                }
+                            ]
+                        }
+                    ).encode()
+                )
+            }
+
+    runtime = WrongPathOnRepairRuntime(files)
+    generator = BedrockTerraformGenerator(
+        model_id="anthropic.test-model",
+        bedrock_runtime=runtime,
+        max_repair_attempts=1,
+    )
+
+    result = generator.generate_files(
+        intent=_intent(),
+        change_plan=_plan(),
+        repo_patterns=RepoPatterns(),
+        ruleset=_ruleset(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+
+    assert set(result) == set(files)
+    # The unrepairable file kept its previous (best-effort) content.
+    assert result["environments/non-prod/ecs-fargate/terragrunt.hcl"] == bad_terragrunt
+
+
 def test_bedrock_terraform_generator_uses_extended_bedrock_timeout(monkeypatch):
     created_clients = []
 
@@ -716,6 +785,29 @@ class TestPathNeedsRepair:
             "Remove from modules/foundation/main.tf, keep in modules/foundation/versions.tf."
         ]
         assert _path_needs_repair("modules/foundation/versions.tf", errors) is False
+
+    def test_undeclared_variable_repairs_variables_tf_not_main_tf(self):
+        # The fix for an undeclared variable is to add the declaration to
+        # variables.tf — main.tf, which only references it, must be left alone.
+        errors = [
+            "var.alb_name is referenced in modules/ecs-fargate/main.tf "
+            'but "alb_name" is not declared in modules/ecs-fargate/variables.tf. '
+            'Add variable "alb_name" to modules/ecs-fargate/variables.tf.'
+        ]
+        assert _path_needs_repair("modules/ecs-fargate/variables.tf", errors) is True
+        assert _path_needs_repair("modules/ecs-fargate/main.tf", errors) is False
+
+    def test_main_tf_still_repaired_when_it_has_an_independent_error(self):
+        # The undeclared-variable exclusion must not mask an unrelated error that
+        # genuinely requires regenerating main.tf.
+        errors = [
+            "var.alb_name is referenced in modules/ecs-fargate/main.tf "
+            'but "alb_name" is not declared in modules/ecs-fargate/variables.tf. '
+            'Add variable "alb_name" to modules/ecs-fargate/variables.tf.',
+            "Terragrunt state key in `modules/ecs-fargate/main.tf` "
+            "must use path_relative_to_include().",
+        ]
+        assert _path_needs_repair("modules/ecs-fargate/main.tf", errors) is True
 
 
 def test_variables_tf_not_repaired_when_only_main_tf_has_duplicate_declarations():
