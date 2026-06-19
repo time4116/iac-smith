@@ -291,6 +291,30 @@ class TestTerragruntOrphanedLocals:
         assert len(env_errors) == 1
         assert any("local.aws_region" in e for e in errors)
 
+    def test_local_placeholders_in_comments_are_ignored(self) -> None:
+        files = {
+            "environments/non-prod/ecs-fargate-stack/terragrunt.hcl": (
+                'include "root" {\n  path = find_in_parent_folders()\n}\n'
+                "# parent locals are not available as local.xxx here\n"
+                "// repair hint: do not use local.aws_region unless declared\n"
+                "/* block comment mentioning local.environment */\n"
+                'inputs = { name = "ecs" }\n'
+            ),
+        }
+
+        assert _find_terragrunt_orphaned_locals(files) == []
+
+    def test_local_refs_inside_strings_still_checked(self) -> None:
+        files = {
+            "environments/non-prod/ecs-fargate-stack/terragrunt.hcl": (
+                'include "root" {\n  path = find_in_parent_folders()\n}\n'
+                'inputs = { name = "${local.environment}-ecs" }\n'
+            ),
+        }
+
+        errors = _find_terragrunt_orphaned_locals(files)
+        assert any("local.environment" in e for e in errors)
+
 
 class TestTerragruntInputVariableMismatches:
     def test_input_not_declared_in_module_variables(self) -> None:

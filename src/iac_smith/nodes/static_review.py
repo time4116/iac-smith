@@ -242,6 +242,57 @@ _SINGLETON_RESOURCE_TYPES = frozenset({"aws_vpc"})
 _RESOURCE_TYPE_RE = re.compile(r'\bresource\s+"([^"]+)"')
 
 
+def _strip_hcl_comments(content: str) -> str:
+    """Remove HCL comments while preserving quoted strings and line numbers."""
+    result: list[str] = []
+    in_block_comment = False
+    in_string = False
+    escape = False
+    i = 0
+    while i < len(content):
+        ch = content[i]
+        nxt = content[i + 1] if i + 1 < len(content) else ""
+
+        if in_block_comment:
+            if ch == "\n":
+                result.append("\n")
+            elif ch == "*" and nxt == "/":
+                in_block_comment = False
+                i += 1
+            else:
+                result.append(" ")
+            i += 1
+            continue
+
+        if in_string:
+            result.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+
+        if ch == '"':
+            in_string = True
+            result.append(ch)
+        elif ch == "#" or ch == "/" and nxt == "/":
+            while i < len(content) and content[i] != "\n":
+                result.append(" ")
+                i += 1
+            continue
+        elif ch == "/" and nxt == "*":
+            in_block_comment = True
+            result.extend("  ")
+            i += 1
+        else:
+            result.append(ch)
+        i += 1
+    return "".join(result)
+
+
 def _extract_hcl_block_keys(content: str, header_re: re.Pattern) -> set[str]:
     """Return top-level assignment keys inside the first matching HCL block.
 
@@ -329,8 +380,9 @@ def _find_terragrunt_orphaned_locals(generated_files: dict[str, str]) -> list[st
         if not _TG_INCLUDE_BLOCK_RE.search(content):
             continue
         local_keys = _extract_hcl_block_keys(content, _TG_LOCALS_HEADER_RE)
+        content_without_comments = _strip_hcl_comments(content)
         seen: set[str] = set()
-        for m in _TG_LOCAL_REF_RE.finditer(content):
+        for m in _TG_LOCAL_REF_RE.finditer(content_without_comments):
             name = m.group(1)
             if name in local_keys or name in seen:
                 continue
