@@ -15,6 +15,8 @@ from iac_smith.models.repo_patterns import RepoPatterns
 from iac_smith.models.rules import Ruleset
 from iac_smith.nodes.static_review import static_review_generated_files
 
+_ADD_VARIABLE_TO_RE = re.compile(r'Add variable "[^"]+" to (\S+)\.')
+
 
 def _path_needs_repair(path: str, errors: list[str]) -> bool:
     """Return True if `path` appears in any error as a file that needs to be changed.
@@ -25,6 +27,13 @@ def _path_needs_repair(path: str, errors: list[str]) -> bool:
     target so that variables.tf / outputs.tf / versions.tf are not unnecessarily
     regenerated (which can drop declarations that main.tf still references).
 
+    For undeclared-variable errors ("var.x is referenced in main.tf but ... not
+    declared in variables.tf. Add variable "x" to variables.tf.") the fix is to
+    add the declaration to variables.tf, never to rewrite the main.tf that merely
+    references it.  Regenerating main.tf here both drops its var references and
+    confuses the model into returning variables.tf for a main.tf request — only
+    the named variables.tf is repaired.
+
     Also matches via the parent directory of `path`: runtime validation errors
     label failures with the module or stack directory (e.g. "terraform validate
     modules/ecs-fargate failed"), not with individual file paths, so file-level
@@ -33,6 +42,13 @@ def _path_needs_repair(path: str, errors: list[str]) -> bool:
     explicitly_excluded = False
     for error in errors:
         if path not in error:
+            continue
+        add_target = _ADD_VARIABLE_TO_RE.search(error)
+        if add_target is not None:
+            if path == add_target.group(1):
+                return True
+            # path is the referencing file (main.tf) — leave it untouched.
+            explicitly_excluded = True
             continue
         if f"keep in {path}." in error and f"Remove from {path}," not in error:
             explicitly_excluded = True
@@ -1208,17 +1224,27 @@ class BedrockTerraformGenerator:
                     self._log(
                         f"IaC Smith: repairing file {path_positions[path]}/{total_files}: {path}"
                     )
-                    content = self._generate_planned_file(
-                        path=path,
-                        intent=intent,
-                        change_plan=change_plan,
-                        repo_patterns=repo_patterns,
-                        ruleset=ruleset,
-                        target_repo=target_repo,
-                        repair_errors=repair_errors,
-                        previous_content=previous_files[path],
-                        sibling_content=_unit_sibling_content(path, accumulated) or None,
-                    )
+                    try:
+                        content = self._generate_planned_file(
+                            path=path,
+                            intent=intent,
+                            change_plan=change_plan,
+                            repo_patterns=repo_patterns,
+                            ruleset=ruleset,
+                            target_repo=target_repo,
+                            repair_errors=repair_errors,
+                            previous_content=previous_files[path],
+                            sibling_content=_unit_sibling_content(path, accumulated) or None,
+                        )
+                    except (ValueError, json.JSONDecodeError) as exc:
+                        # A single file failing to repair must not crash the run.
+                        # Keep the previous content and let the oscillation guard
+                        # and the real terraform/terragrunt validation gate.
+                        self._log(
+                            f"IaC Smith: could not repair {path} ({exc}); keeping previous "
+                            "content for downstream validation to gate."
+                        )
+                        content = previous_files[path]
                     accumulated[path] = content
                     results.append((path, content))
                 return results
