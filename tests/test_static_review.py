@@ -5,6 +5,7 @@ from __future__ import annotations
 from iac_smith.models.validation import ValidationStatus
 from iac_smith.nodes.static_review import (
     _find_cross_file_duplicates,
+    _find_duplicate_named_resources,
     _find_redacted_placeholders,
     _find_singleton_resource_duplication,
     _find_terragrunt_dependency_output_mismatches,
@@ -411,6 +412,74 @@ class TestTerragruntDependencyOutputMismatches:
         }
 
         assert _find_terragrunt_dependency_output_mismatches(files) == []
+
+
+class TestDuplicateNamedResources:
+    def test_duplicate_provider_names_across_arbitrary_modules(self) -> None:
+        examples = [
+            ("aws_security_group", "api", "${var.environment}-shared-api"),
+            ("aws_iam_role", "processor", "${var.environment}-worker-role"),
+            ("aws_cloudwatch_log_group", "logs", "/aws/app/shared"),
+            ("aws_lb_target_group", "http", "${var.environment}-http-tg"),
+        ]
+
+        for resource_type, resource_name, provider_name in examples:
+            files = {
+                "modules/service-a/main.tf": (
+                    f'resource "{resource_type}" "{resource_name}" {{\n'
+                    f'  name = "{provider_name}"\n'
+                    "}\n"
+                ),
+                "modules/service-b/main.tf": (
+                    f'resource "{resource_type}" "{resource_name}" {{\n'
+                    f'  name = "{provider_name}"\n'
+                    "}\n"
+                ),
+            }
+
+            errors = _find_duplicate_named_resources(files)
+
+            assert len(errors) == 1
+            assert resource_type in errors[0]
+            assert provider_name in errors[0]
+            assert "modules/service-a/main.tf" in errors[0]
+            assert "modules/service-b/main.tf" in errors[0]
+
+    def test_distinct_provider_names_allowed_across_arbitrary_modules(self) -> None:
+        files = {
+            "modules/service-a/main.tf": (
+                'resource "aws_security_group" "api" {\n  name = "${var.environment}-api-sg"\n}\n'
+            ),
+            "modules/service-b/main.tf": (
+                'resource "aws_security_group" "worker" {\n'
+                '  name = "${var.environment}-worker-sg"\n'
+                "}\n"
+            ),
+        }
+
+        assert _find_duplicate_named_resources(files) == []
+
+    def test_duplicate_named_resources_block_review_for_any_stack_shape(self) -> None:
+        files = {
+            "modules/api/main.tf": (
+                'resource "aws_iam_role" "runtime" {\n'
+                '  name = "${var.environment}-runtime-role"\n'
+                "}\n"
+            ),
+            "modules/batch/main.tf": (
+                'resource "aws_iam_role" "runtime" {\n'
+                '  name = "${var.environment}-runtime-role"\n'
+                "}\n"
+            ),
+            "modules/api/variables.tf": 'variable "environment" { type = string }',
+            "modules/batch/variables.tf": 'variable "environment" { type = string }',
+        }
+
+        result = static_review_generated_files(files)
+
+        assert result.status == ValidationStatus.FAILED
+        assert any("duplicate provider name" in e for e in result.errors)
+        assert not result.structural
 
 
 class TestSingletonResourceDuplication:

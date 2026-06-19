@@ -241,6 +241,18 @@ _TG_SOURCE_RE = re.compile(r'source\s*=\s*"([^"]+)"')
 _REDACTED_PLACEHOLDER_RE = re.compile(r"\*{3}")
 _SINGLETON_RESOURCE_TYPES = frozenset({"aws_vpc"})
 _RESOURCE_TYPE_RE = re.compile(r'\bresource\s+"([^"]+)"')
+_RESOURCE_BLOCK_RE = re.compile(r'\bresource\s+"([^"]+)"\s+"([^"]+)"\s*\{')
+_NAME_ATTR_RE = re.compile(r'^\s*name\s*=\s*"([^"]+)"', re.MULTILINE)
+_NAMED_RESOURCE_TYPES = frozenset(
+    {
+        "aws_cloudwatch_log_group",
+        "aws_ecs_cluster",
+        "aws_iam_role",
+        "aws_lb",
+        "aws_lb_target_group",
+        "aws_security_group",
+    }
+)
 _DEPENDENCY_HEADER_RE = re.compile(r'\bdependency\s+"([^"]+)"\s*\{')
 _CONFIG_PATH_RE = re.compile(r'\bconfig_path\s*=\s*"([^"]+)"')
 _TG_DEPENDENCY_OUTPUT_REF_RE = re.compile(
@@ -545,6 +557,51 @@ def _find_singleton_resource_duplication(generated_files: dict[str, str]) -> lis
     return warnings
 
 
+def _find_duplicate_named_resources(generated_files: dict[str, str]) -> list[str]:
+    """Flag same-type AWS resources that use the same provider-level name.
+
+    Terraform validates each module in isolation, so it will not catch a generated
+    foundation module and workload module both declaring an AWS object with the
+    same name. Several AWS resource names are unique within a VPC, account, or
+    region. In generated multi-module PRs, matching names across module roots are
+    strong evidence that a shared primitive was emitted twice instead of being
+    passed through dependency outputs.
+    """
+    resources_by_identity: dict[tuple[str, str], list[str]] = {}
+    for path, content in generated_files.items():
+        root = _module_root(path)
+        if not root or not path.endswith(".tf"):
+            continue
+        for match in _RESOURCE_BLOCK_RE.finditer(content):
+            resource_type, resource_name = match.groups()
+            if resource_type not in _NAMED_RESOURCE_TYPES:
+                continue
+            body = _extract_hcl_block_body(content, match.start())
+            if body is None:
+                continue
+            name_match = _NAME_ATTR_RE.search(body)
+            if not name_match:
+                continue
+            provider_name = name_match.group(1)
+            resources_by_identity.setdefault((resource_type, provider_name), []).append(
+                f"{path}::{resource_type}.{resource_name}"
+            )
+
+    errors = []
+    for (resource_type, provider_name), locations in sorted(resources_by_identity.items()):
+        roots = {location.split("/", 2)[1] for location in locations}
+        if len(roots) <= 1:
+            continue
+        errors.append(
+            f"Resource `{resource_type}` uses duplicate provider name "
+            f"`{provider_name}` across modules: {', '.join(locations)}. "
+            "Move the shared resource to one owner module and pass its ID through "
+            "Terragrunt dependency outputs, or give genuinely separate resources "
+            "distinct names."
+        )
+    return errors
+
+
 def _contains_dangerous_public_ingress(content: str) -> bool:
     has_public_cidr = _CIDR_BLOCK_V4.search(content) or _CIDR_BLOCK_V6.search(content)
     if not has_public_cidr:
@@ -606,6 +663,11 @@ def static_review_generated_files(generated_files: dict[str, str]) -> Validation
     structural.extend(_find_terragrunt_orphaned_locals(generated_files))
     structural.extend(_find_terragrunt_missing_required_inputs(generated_files))
     structural.extend(_find_terragrunt_dependency_output_mismatches(generated_files))
+
+    # Cross-module provider name collisions are not caught by module-level
+    # terraform validate and can fail only at apply time, so they block PR
+    # creation if the repair loops cannot remove them.
+    errors.extend(_find_duplicate_named_resources(generated_files))
 
     # Advisory only.
     warnings.extend(_find_singleton_resource_duplication(generated_files))

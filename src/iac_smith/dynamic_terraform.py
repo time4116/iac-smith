@@ -417,10 +417,16 @@ jobs:
 ```
 
 IMPORTANT for terraform-apply.yml:
-- Replace `<stack-name>` with actual stack names from files_to_generate. Add one job per stack
-  beyond foundation. Each non-foundation stack job must declare `needs: apply-foundation`.
+- Replace `<stack-name>` with actual stack names from files_to_generate. Use a matrix job
+  for workload stacks instead of copy/pasting one nearly identical job per stack.
+  Each non-foundation workload apply must declare `needs: apply-foundation` when
+  foundation exists, otherwise `needs: bootstrap`.
+- Every apply path must run an explicit saved plan first (`terraform plan -out=tfplan`
+  or `terragrunt plan --non-interactive -lock-timeout=20m -out=tfplan`) and apply
+  that exact plan file. Do not run blind `terragrunt apply --auto-approve` without
+  a preceding plan step.
 - The `bootstrap` job runs first and is idempotent — it imports existing S3/DynamoDB resources
-  before applying so the workflow is safe to run on ephemeral CI runners without persisted state.
+  before planning/applying so the workflow is safe to run on ephemeral CI runners without persisted state.
 - Always use `secrets.AWS_ROLE_ARN_NON_PROD` — never `AWS_ROLE_TO_ASSUME` or `AWS_ROLE_ARN`.
 - Only trigger on branch `main`, not `master`.
 """
@@ -534,11 +540,15 @@ Non-negotiable rules:
   no dangerous public ingress.
 * If a request needs both networking/foundation and a workload, split ownership
   cleanly. `modules/foundation` may create only shared network primitives such
-  as VPC, subnets, route tables, NAT/IGW, and common security groups. It must
-  NOT create ALBs, target groups/listeners, CloudWatch log groups, ECS clusters,
-  task definitions, ECS services, or workload IAM. Those belong in the workload
-  module, which consumes `modules/foundation` outputs through Terragrunt
-  dependency inputs.
+  as VPC, subnets, route tables, NAT/IGW, and explicitly shared network-boundary
+  security groups that downstream stacks consume. It must NOT create workload
+  security groups, ALBs, target groups/listeners, CloudWatch log groups, ECS
+  clusters, task definitions, ECS services, or workload IAM. Those belong in the
+  workload module, which consumes `modules/foundation` outputs through
+  Terragrunt dependency inputs. Never generate the same AWS provider-level
+  resource `name` for the same resource type in both foundation and workload
+  modules; that creates apply-time name collisions Terraform module validation
+  cannot catch.
 * If a workload stack depends on foundation outputs for VPC/subnets/security
   groups, do not reference module.vpc unless that same module declares
   module "vpc". In Terragrunt, every `dependency.foundation.outputs.<name>`
@@ -698,9 +708,9 @@ _TG_INSTALL_STEP = (
     "        env:\n"
     "          GH_TOKEN: ${{ github.token }}\n"
     "        run: |\n"
-    '          TG_VERSION=$(curl -sL -H "Authorization: Bearer ${GH_TOKEN}"'
-    ' "https://api.github.com/repos/gruntwork-io/terragrunt/releases/latest"'
-    " | python3 -c \"import sys,json; print(json.load(sys.stdin)['tag_name'])\")\n"
+    '          TG_VERSION=$(curl -sL -H "Authorization: Bearer ${GH_TOKEN}" '
+    '"https://api.github.com/repos/gruntwork-io/terragrunt/releases/latest" '
+    "| python3 -c \"import sys,json; print(json.load(sys.stdin)['tag_name'])\")\n"
     '          curl -sL "https://github.com/gruntwork-io/terragrunt/releases/download/'
     '${TG_VERSION}/terragrunt_linux_amd64" -o /usr/local/bin/terragrunt\n'
     "          chmod +x /usr/local/bin/terragrunt"
@@ -728,8 +738,20 @@ _BOOTSTRAP_BACKEND_RUN = (
     " txt, re.DOTALL); print(m.group(1) if m else '')\")\n"
     '          terraform import aws_s3_bucket.terraform_state "$BUCKET" 2>/dev/null || true\n'
     '          terraform import aws_dynamodb_table.terraform_locks "$TABLE" 2>/dev/null || true\n'
-    "          terraform apply -auto-approve"
+    "          terraform plan -out=tfplan\n"
+    "          terraform apply -auto-approve tfplan"
 )
+
+
+def _terragrunt_plan_apply_steps(stack_label: str, working_directory: str) -> list[str]:
+    return [
+        f"      - name: Plan {stack_label}",
+        f"        working-directory: {working_directory}",
+        "        run: terragrunt plan --non-interactive -lock-timeout=20m -out=tfplan",
+        f"      - name: Apply {stack_label}",
+        f"        working-directory: {working_directory}",
+        "        run: terragrunt apply --non-interactive tfplan",
+    ]
 
 
 def _build_pr_check_workflow(change_plan: ChangePlan) -> str:
@@ -844,28 +866,30 @@ def _build_apply_workflow(change_plan: ChangePlan) -> str:
             "      - uses: hashicorp/setup-terraform@v3",
             _TG_INSTALL_STEP,
             _AWS_CREDS_STEP,
-            "      - name: Apply foundation",
-            f"        working-directory: environments/{env}/foundation",
-            "        run: terragrunt apply --non-interactive --auto-approve",
+            *_terragrunt_plan_apply_steps("foundation", f"environments/{env}/foundation"),
         ]
 
-    for stack in workload_modules:
+    if workload_modules:
         needs = "apply-foundation" if has_foundation else "bootstrap"
-        job_id = f"apply-{stack}"
+        matrix_stacks = ", ".join(workload_modules)
         lines += [
             "",
-            f"  {job_id}:",
-            f"    name: Apply — {env}/{stack}",
+            "  apply-workloads:",
+            f"    name: Apply — {env}/${{{{ matrix.stack }}}}",
             f"    needs: {needs}",
             "    runs-on: ubuntu-latest",
+            "    strategy:",
+            "      fail-fast: false",
+            "      matrix:",
+            f"        stack: [{matrix_stacks}]",
             "    steps:",
             "      - uses: actions/checkout@v4",
             "      - uses: hashicorp/setup-terraform@v3",
             _TG_INSTALL_STEP,
             _AWS_CREDS_STEP,
-            f"      - name: Apply {stack}",
-            f"        working-directory: environments/{env}/{stack}",
-            "        run: terragrunt apply --non-interactive --auto-approve",
+            *_terragrunt_plan_apply_steps(
+                "${{ matrix.stack }}", f"environments/{env}/${{{{ matrix.stack }}}}"
+            ),
         ]
 
     return "\n".join(lines) + "\n"
