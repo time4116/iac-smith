@@ -654,6 +654,235 @@ def parse_single_file_generation_payload(
     return generated
 
 
+_WORKFLOW_PATHS = frozenset(
+    {
+        ".github/workflows/terraform-pr-check.yml",
+        ".github/workflows/terraform-apply.yml",
+    }
+)
+
+
+def _extract_module_names(files_to_generate: list[str]) -> list[str]:
+    """Return unique module directory names in plan order."""
+    seen: set[str] = set()
+    names: list[str] = []
+    for path in files_to_generate:
+        parts = path.split("/")
+        if len(parts) >= 2 and parts[0] == "modules":
+            name = parts[1]
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
+    return names
+
+
+def _extract_bootstrap_envs(files_to_generate: list[str]) -> list[str]:
+    """Return unique environments from bootstrap/backend/<env> paths in plan order."""
+    seen: set[str] = set()
+    envs: list[str] = []
+    for path in files_to_generate:
+        parts = path.split("/")
+        if len(parts) >= 3 and parts[0] == "bootstrap" and parts[1] == "backend":
+            env = parts[2]
+            if env not in seen:
+                seen.add(env)
+                envs.append(env)
+    return envs
+
+
+# Module-level constants for repeated YAML snippets so the workflow builders
+# don't have to deal with nested string escaping inline.
+
+_TG_INSTALL_STEP = (
+    "      - name: Install terragrunt\n"
+    "        env:\n"
+    "          GH_TOKEN: ${{ github.token }}\n"
+    "        run: |\n"
+    '          TG_VERSION=$(curl -sL -H "Authorization: Bearer ${GH_TOKEN}"'
+    ' "https://api.github.com/repos/gruntwork-io/terragrunt/releases/latest"'
+    " | python3 -c \"import sys,json; print(json.load(sys.stdin)['tag_name'])\")\n"
+    '          curl -sL "https://github.com/gruntwork-io/terragrunt/releases/download/'
+    '${TG_VERSION}/terragrunt_linux_amd64" -o /usr/local/bin/terragrunt\n'
+    "          chmod +x /usr/local/bin/terragrunt"
+)
+
+_AWS_CREDS_STEP = (
+    "      - name: Configure AWS credentials\n"
+    "        uses: aws-actions/configure-aws-credentials@v4\n"
+    "        with:\n"
+    "          role-to-assume: ${{ secrets.AWS_ROLE_ARN_NON_PROD }}\n"
+    "          aws-region: us-west-2"
+)
+
+# YAML block scalar for the bootstrap backend job's run step.
+# `\\s` in this Python source becomes `\s` in the output file (literal regex escape).
+# `\\"` in this Python source becomes `\"` in the output file (escaped quote inside
+# the shell's `"..."` argument to python3 -c).
+_BOOTSTRAP_BACKEND_RUN = (
+    "          terraform init\n"
+    "          BUCKET=$(python3 -c \"import re; txt=open('variables.tf').read();"
+    ' m=re.search(r\'variable\\s+\\"state_bucket_name\\".*?default\\s*=\\s*\\"([^\\"]+)\\"\','
+    " txt, re.DOTALL); print(m.group(1) if m else '')\")\n"
+    "          TABLE=$(python3 -c \"import re; txt=open('variables.tf').read();"
+    ' m=re.search(r\'variable\\s+\\"state_lock_table_name\\".*?default\\s*=\\s*\\"([^\\"]+)\\"\','
+    " txt, re.DOTALL); print(m.group(1) if m else '')\")\n"
+    '          terraform import aws_s3_bucket.terraform_state "$BUCKET" 2>/dev/null || true\n'
+    '          terraform import aws_dynamodb_table.terraform_locks "$TABLE" 2>/dev/null || true\n'
+    "          terraform apply -auto-approve"
+)
+
+
+def _build_pr_check_workflow(change_plan: ChangePlan) -> str:
+    """Build terraform-pr-check.yml deterministically from the actual module paths."""
+    module_names = _extract_module_names(change_plan.files_to_generate)
+    bootstrap_envs = (
+        _extract_bootstrap_envs(change_plan.files_to_generate)
+        or change_plan.environments
+        or ["non-prod"]
+    )
+
+    lines: list[str] = [
+        "on:",
+        "  pull_request:",
+        "    paths:",
+        '      - "environments/**"',
+        '      - "modules/**"',
+        '      - "bootstrap/**"',
+        "",
+        "permissions:",
+        "  contents: read",
+        "  pull-requests: write",
+        "",
+        "jobs:",
+        "  validate:",
+        "    name: Validate Terraform modules and HCL",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - uses: hashicorp/setup-terraform@v3",
+        _TG_INSTALL_STEP,
+        "      - name: HCL format check",
+        "        working-directory: environments",
+        "        run: terragrunt hcl format --check",
+        "      - name: Terraform format check",
+        "        run: terraform fmt -check -recursive -diff modules bootstrap",
+    ]
+
+    for name in module_names:
+        lines += [
+            f"      - name: Terraform init and validate — {name}",
+            f"        working-directory: modules/{name}",
+            "        run: |",
+            "          terraform init -backend=false -input=false",
+            "          terraform validate",
+        ]
+
+    for env in bootstrap_envs:
+        label = f" ({env})" if len(bootstrap_envs) > 1 else ""
+        lines += [
+            f"      - name: Terraform init and validate — bootstrap backend{label}",
+            f"        working-directory: bootstrap/backend/{env}",
+            "        run: |",
+            "          terraform init -backend=false -input=false",
+            "          terraform validate",
+        ]
+
+    return "\n".join(lines) + "\n"
+
+
+def _build_apply_workflow(change_plan: ChangePlan) -> str:
+    """Build terraform-apply.yml deterministically from the actual module paths."""
+    module_names = _extract_module_names(change_plan.files_to_generate)
+    bootstrap_envs = (
+        _extract_bootstrap_envs(change_plan.files_to_generate)
+        or change_plan.environments
+        or ["non-prod"]
+    )
+    env = bootstrap_envs[0]
+    has_foundation = "foundation" in module_names
+    workload_modules = [n for n in module_names if n != "foundation"]
+
+    lines: list[str] = [
+        "on:",
+        "  push:",
+        "    branches:",
+        "      - main",
+        "    paths:",
+        '      - "environments/**"',
+        '      - "modules/**"',
+        '      - "bootstrap/**"',
+        "",
+        "permissions:",
+        "  contents: read",
+        "  id-token: write",
+        "",
+        "jobs:",
+        "  bootstrap:",
+        "    name: Bootstrap state backend",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - uses: hashicorp/setup-terraform@v3",
+        "        with:",
+        "          terraform_wrapper: false",
+        _AWS_CREDS_STEP,
+        "      - name: Bootstrap state backend (idempotent)",
+        f"        working-directory: bootstrap/backend/{env}",
+        "        run: |",
+        _BOOTSTRAP_BACKEND_RUN,
+    ]
+
+    if has_foundation:
+        lines += [
+            "",
+            "  apply-foundation:",
+            f"    name: Apply — {env}/foundation",
+            "    needs: bootstrap",
+            "    runs-on: ubuntu-latest",
+            "    steps:",
+            "      - uses: actions/checkout@v4",
+            "      - uses: hashicorp/setup-terraform@v3",
+            _TG_INSTALL_STEP,
+            _AWS_CREDS_STEP,
+            "      - name: Apply foundation",
+            f"        working-directory: environments/{env}/foundation",
+            "        run: terragrunt apply --non-interactive --auto-approve",
+        ]
+
+    for stack in workload_modules:
+        needs = "apply-foundation" if has_foundation else "bootstrap"
+        job_id = f"apply-{stack}"
+        lines += [
+            "",
+            f"  {job_id}:",
+            f"    name: Apply — {env}/{stack}",
+            f"    needs: {needs}",
+            "    runs-on: ubuntu-latest",
+            "    steps:",
+            "      - uses: actions/checkout@v4",
+            "      - uses: hashicorp/setup-terraform@v3",
+            _TG_INSTALL_STEP,
+            _AWS_CREDS_STEP,
+            f"      - name: Apply {stack}",
+            f"        working-directory: environments/{env}/{stack}",
+            "        run: terragrunt apply --non-interactive --auto-approve",
+        ]
+
+    return "\n".join(lines) + "\n"
+
+
+def _apply_workflow_overrides(generated_files: dict[str, str], change_plan: ChangePlan) -> None:
+    """Replace model-generated workflow files with deterministically correct content."""
+    if ".github/workflows/terraform-pr-check.yml" in generated_files:
+        generated_files[".github/workflows/terraform-pr-check.yml"] = _build_pr_check_workflow(
+            change_plan
+        )
+    if ".github/workflows/terraform-apply.yml" in generated_files:
+        generated_files[".github/workflows/terraform-apply.yml"] = _build_apply_workflow(
+            change_plan
+        )
+
+
 TERRAFORM_FILE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -880,6 +1109,11 @@ class BedrockTerraformGenerator:
 
         generated_files = {path: generated_files[path] for path in change_plan.files_to_generate}
 
+        # Overwrite model-generated workflow files with deterministically correct content.
+        # The model occasionally halluccinates the stack name in working-directory references;
+        # generating from files_to_generate directly is always correct.
+        _apply_workflow_overrides(generated_files, change_plan)
+
         seen_issue_sets: list[frozenset[str]] = []
         for repair_attempt in range(self.max_repair_attempts + 1):
             validation = static_review_generated_files(generated_files)
@@ -918,9 +1152,12 @@ class BedrockTerraformGenerator:
                 )
                 return generated_files
 
+            # Workflow files are generated deterministically — exclude them from repair
+            # so the model cannot overwrite the correct working-directory references.
+            repairable = [p for p in change_plan.files_to_generate if p not in _WORKFLOW_PATHS]
             paths_to_repair = [
-                path for path in change_plan.files_to_generate if _path_needs_repair(path, issues)
-            ] or list(change_plan.files_to_generate)
+                path for path in repairable if _path_needs_repair(path, issues)
+            ] or repairable
             self._log(
                 f"IaC Smith: repairing {len(paths_to_repair)} file(s) after static review issues."
             )

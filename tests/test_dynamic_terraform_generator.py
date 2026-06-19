@@ -7,6 +7,9 @@ import pytest
 
 from iac_smith.dynamic_terraform import (
     BedrockTerraformGenerator,
+    _build_apply_workflow,
+    _build_pr_check_workflow,
+    _extract_module_names,
     _path_needs_repair,
     _repair_unit_key,
     build_generation_prompt,
@@ -797,3 +800,160 @@ def test_variables_tf_not_repaired_when_only_main_tf_has_duplicate_declarations(
     assert result["modules/foundation/variables.tf"] == variables_tf
     assert call_count_by_path.get("modules/foundation/main.tf", 0) == 2
     assert call_count_by_path.get("modules/foundation/variables.tf", 0) == 1
+
+
+class TestExtractModuleNames:
+    def test_returns_module_names_in_plan_order(self):
+        files = [
+            "modules/foundation/main.tf",
+            "modules/foundation/variables.tf",
+            "modules/ecs-fargate/main.tf",
+            "modules/ecs-fargate/outputs.tf",
+            "environments/non-prod/ecs-fargate/terragrunt.hcl",
+        ]
+        assert _extract_module_names(files) == ["foundation", "ecs-fargate"]
+
+    def test_deduplicates_same_module(self):
+        files = ["modules/foo/main.tf", "modules/foo/variables.tf", "modules/foo/outputs.tf"]
+        assert _extract_module_names(files) == ["foo"]
+
+    def test_ignores_non_module_paths(self):
+        files = [
+            ".github/workflows/terraform-pr-check.yml",
+            "environments/non-prod/ecs-fargate/terragrunt.hcl",
+            "bootstrap/backend/non-prod/main.tf",
+        ]
+        assert _extract_module_names(files) == []
+
+
+class TestBuildPrCheckWorkflow:
+    def _plan_with_modules(self, *module_names: str) -> ChangePlan:
+        files: list[str] = [".github/workflows/terraform-pr-check.yml"]
+        for name in module_names:
+            files += [f"modules/{name}/main.tf", f"modules/{name}/variables.tf"]
+        files += ["bootstrap/backend/non-prod/main.tf"]
+        return ChangePlan(
+            stack_name=module_names[-1] if module_names else "test",
+            environments=["non-prod"],
+            files_to_generate=files,
+            backend_resources={},
+            summary=[],
+        )
+
+    def test_references_correct_module_working_directories(self):
+        plan = self._plan_with_modules("foundation", "ecs-fargate")
+        content = _build_pr_check_workflow(plan)
+
+        assert "working-directory: modules/foundation" in content
+        assert "working-directory: modules/ecs-fargate" in content
+        # Must not reference any name not in the plan
+        assert "ecs-fargate-stack" not in content
+
+    def test_bootstrap_step_uses_correct_env(self):
+        plan = self._plan_with_modules("ecs-fargate")
+        content = _build_pr_check_workflow(plan)
+
+        assert "working-directory: bootstrap/backend/non-prod" in content
+
+    def test_single_validate_job(self):
+        plan = self._plan_with_modules("ecs-fargate")
+        content = _build_pr_check_workflow(plan)
+
+        assert "jobs:" in content
+        assert "  validate:" in content
+        # Should not have multiple top-level jobs
+        import yaml
+
+        parsed = yaml.safe_load(content)
+        assert list(parsed["jobs"].keys()) == ["validate"]
+
+    def test_no_aws_credentials_in_pr_check(self):
+        plan = self._plan_with_modules("ecs-fargate")
+        content = _build_pr_check_workflow(plan)
+
+        assert "AWS_ROLE_ARN" not in content
+        assert "id-token" not in content
+
+
+class TestBuildApplyWorkflow:
+    def _plan_with_foundation_and_stack(self, stack: str) -> ChangePlan:
+        return ChangePlan(
+            stack_name=stack,
+            environments=["non-prod"],
+            files_to_generate=[
+                ".github/workflows/terraform-apply.yml",
+                "bootstrap/backend/non-prod/main.tf",
+                "environments/non-prod/foundation/terragrunt.hcl",
+                "environments/non-prod/ecs-fargate/terragrunt.hcl",
+                "modules/foundation/main.tf",
+                f"modules/{stack}/main.tf",
+            ],
+            backend_resources={},
+            summary=[],
+        )
+
+    def test_apply_workflow_references_correct_stack_directory(self):
+        plan = self._plan_with_foundation_and_stack("ecs-fargate")
+        content = _build_apply_workflow(plan)
+
+        assert "working-directory: environments/non-prod/ecs-fargate" in content
+        assert "ecs-fargate-stack" not in content
+
+    def test_apply_workflow_has_foundation_job_when_foundation_in_plan(self):
+        plan = self._plan_with_foundation_and_stack("ecs-fargate")
+        content = _build_apply_workflow(plan)
+
+        assert "apply-foundation:" in content
+        assert "working-directory: environments/non-prod/foundation" in content
+
+    def test_apply_workflow_uses_oidc_not_static_keys(self):
+        plan = self._plan_with_foundation_and_stack("ecs-fargate")
+        content = _build_apply_workflow(plan)
+
+        assert "role-to-assume: ${{ secrets.AWS_ROLE_ARN_NON_PROD }}" in content
+        assert "AWS_ACCESS_KEY_ID" not in content
+        assert "AWS_SECRET_ACCESS_KEY" not in content
+
+    def test_workflow_overrides_model_generated_content(self):
+        """generate_files must replace model workflow content with deterministic version."""
+        files = {
+            ".github/workflows/terraform-pr-check.yml": (
+                # Model hallucinated 'ecs-fargate' instead of 'ecs-fargate-stack'
+                "jobs:\n  validate:\n    steps:\n      - working-directory: modules/ecs-fargate\n"
+            ),
+            "modules/ecs-fargate-stack/main.tf": (
+                'resource "aws_ecs_cluster" "this" { name = var.cluster_name }\n'
+            ),
+            "modules/ecs-fargate-stack/variables.tf": (
+                'variable "cluster_name" { type = string }\n'
+            ),
+        }
+        plan = ChangePlan(
+            stack_name="ecs-fargate-stack",
+            environments=["non-prod"],
+            files_to_generate=list(files.keys()) + ["bootstrap/backend/non-prod/main.tf"],
+            backend_resources={},
+            summary=[],
+        )
+        # Add the bootstrap file with minimal content
+        files["bootstrap/backend/non-prod/main.tf"] = 'resource "aws_s3_bucket" "b" {}\n'
+
+        runtime = FakeBedrockRuntime(files)
+        generator = BedrockTerraformGenerator(
+            model_id="anthropic.test-model",
+            bedrock_runtime=runtime,
+        )
+
+        result = generator.generate_files(
+            intent=_intent(),
+            change_plan=plan,
+            repo_patterns=RepoPatterns(),
+            ruleset=None,
+            target_repo="time4116/iac-smith-demo-infra",
+        )
+
+        # The deterministic override uses actual module names from files_to_generate
+        wf = result[".github/workflows/terraform-pr-check.yml"]
+        assert "working-directory: modules/ecs-fargate-stack" in wf
+        # Model's wrong name must not appear
+        assert "working-directory: modules/ecs-fargate\n" not in wf
