@@ -896,7 +896,8 @@ class TestBuildApplyWorkflow:
         plan = self._plan_with_foundation_and_stack("ecs-fargate")
         content = _build_apply_workflow(plan)
 
-        assert "working-directory: environments/non-prod/ecs-fargate" in content
+        assert "working-directory: environments/non-prod/${{ matrix.stack }}" in content
+        assert "stack: [ecs-fargate]" in content
         assert "ecs-fargate-stack" not in content
 
     def test_apply_workflow_has_foundation_job_when_foundation_in_plan(self):
@@ -905,6 +906,44 @@ class TestBuildApplyWorkflow:
 
         assert "apply-foundation:" in content
         assert "working-directory: environments/non-prod/foundation" in content
+
+    def test_apply_workflow_plans_before_apply(self):
+        plan = self._plan_with_foundation_and_stack("ecs-fargate")
+        content = _build_apply_workflow(plan)
+
+        assert "terraform plan -out=tfplan" in content
+        assert "terraform apply -auto-approve tfplan" in content
+        assert "- name: Plan foundation" in content
+        assert "terragrunt plan --non-interactive -lock-timeout=20m -out=tfplan" in content
+        assert "terragrunt apply --non-interactive tfplan" in content
+        assert "terragrunt apply --non-interactive --auto-approve" not in content
+        assert content.index("- name: Plan foundation") < content.index("- name: Apply foundation")
+
+    def test_apply_workflow_uses_matrix_for_workloads(self):
+        plan = ChangePlan(
+            stack_name="api",
+            environments=["non-prod"],
+            files_to_generate=[
+                ".github/workflows/terraform-apply.yml",
+                "bootstrap/backend/non-prod/main.tf",
+                "environments/non-prod/foundation/terragrunt.hcl",
+                "environments/non-prod/api/terragrunt.hcl",
+                "environments/non-prod/batch/terragrunt.hcl",
+                "modules/foundation/main.tf",
+                "modules/api/main.tf",
+                "modules/batch/main.tf",
+            ],
+            backend_resources={},
+            summary=[],
+        )
+        content = _build_apply_workflow(plan)
+
+        assert "apply-workloads:" in content
+        assert "strategy:" in content
+        assert "stack: [api, batch]" in content
+        assert "working-directory: environments/non-prod/${{ matrix.stack }}" in content
+        assert "apply-api:" not in content
+        assert "apply-batch:" not in content
 
     def test_apply_workflow_uses_oidc_not_static_keys(self):
         plan = self._plan_with_foundation_and_stack("ecs-fargate")
