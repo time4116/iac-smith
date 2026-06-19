@@ -1,8 +1,22 @@
 import os
+import re
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+
+_LOCAL_REMOTE_STATE = """remote_state {
+  backend = "local"
+  generate = {
+    path      = "backend.tf"
+    if_exists = "overwrite_terragrunt"
+  }
+  config = {
+    path = "terraform.tfstate"
+  }
+}
+"""
 
 
 @dataclass(frozen=True)
@@ -66,14 +80,88 @@ def _detect_terragrunt(env: dict[str, str]) -> tuple[list[str], str]:
     return hclfmt_cmd, non_interactive
 
 
+def _replace_hcl_block(content: str, keyword: str, replacement: str) -> str:
+    """Replace a top-level ``keyword { ... }`` block, brace-matched, with replacement.
+
+    Returns content unchanged if the block is absent.  Brace counting is naive but
+    safe here because HCL ``${...}`` interpolations are themselves brace-balanced.
+    """
+    m = re.search(rf"\b{re.escape(keyword)}\s*\{{", content)
+    if not m:
+        return content
+    brace_start = content.index("{", m.start())
+    depth = 0
+    for i in range(brace_start, len(content)):
+        if content[i] == "{":
+            depth += 1
+        elif content[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return content[: m.start()] + replacement + content[i + 1 :]
+    return content
+
+
+def _force_local_remote_state(scratch_root: Path) -> None:
+    """Swap the root terragrunt remote_state to a local backend in the scratch copy.
+
+    The committed PR keeps its real S3 backend; this only mutates a throwaway copy
+    so ``terragrunt plan`` can init without the S3 state bucket having to exist yet.
+    """
+    root_cfg = scratch_root / "environments" / "terragrunt.hcl"
+    if not root_cfg.exists():
+        return
+    content = root_cfg.read_text()
+    root_cfg.write_text(_replace_hcl_block(content, "remote_state", _LOCAL_REMOTE_STATE))
+
+
+def _run_local_state_plans(root: Path, env: dict[str, str], non_interactive: str) -> list[str]:
+    """Run ``terragrunt plan`` per stack against local state, returning any errors.
+
+    Plan-only — never apply — so no infrastructure is created.  Stacks are copied
+    into a temp tree whose root remote_state is rewritten to a local backend, so
+    plan can auto-init without the S3 backend.  Dependent stacks resolve their
+    inputs through ``mock_outputs`` (which terragrunt allows for ``plan``), so the
+    foundation stack does not need to be applied first.
+    """
+    _, terragrunt_stacks = _changed_roots(root)
+    if not terragrunt_stacks:
+        return []
+
+    errors: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="iac-smith-plan-") as tmp:
+        scratch = Path(tmp) / "repo"
+        shutil.copytree(
+            root,
+            scratch,
+            ignore=shutil.ignore_patterns(
+                ".git", ".terraform", ".terragrunt-cache", "*.tfstate", "*.tfstate.*"
+            ),
+        )
+        _force_local_remote_state(scratch)
+        for stack in terragrunt_stacks:
+            stack_dir = scratch / stack.relative_to(root)
+            label = f"terragrunt plan {stack.relative_to(root)}"
+            ok, output = _run_check(
+                ["terragrunt", "plan", non_interactive, "-input=false"], stack_dir, env
+            )
+            if ok:
+                continue
+            errors.append(f"{label} failed in `{stack.relative_to(root)}`:\n{output}")
+            break
+    return errors
+
+
 def validate_generated_iac(
     repo_path: str | Path, env_override: dict[str, str] | None = None
 ) -> RuntimeValidationResult:
     """Run local IaC validation before IaC Smith commits and opens a PR.
 
-    This intentionally never applies infrastructure. Terragrunt plan is included so
-    generated Terraform/Terragrunt is forced through the same provider/schema path
-    as the PR checks while the controller can still fail before publishing a PR.
+    This intentionally never applies infrastructure. When ``IAC_SMITH_RUNTIME_PLAN``
+    is set, a real ``terragrunt plan`` runs per stack against a local-state copy of
+    the tree (dependencies resolved through ``mock_outputs``), so generated
+    Terraform/Terragrunt is forced through the actual provider/plan path before a
+    PR is opened — failures feed the self-healing repair loop. Without the flag,
+    validation stops at module-level ``terraform validate`` (schema-only).
     """
 
     root = Path(repo_path)
@@ -116,7 +204,7 @@ def validate_generated_iac(
             )
         )
 
-    module_roots, terragrunt_stacks = _changed_roots(root)
+    module_roots, _ = _changed_roots(root)
     for module_root in module_roots:
         command_specs.append(
             (
@@ -133,12 +221,6 @@ def validate_generated_iac(
             )
         )
 
-    # terragrunt init/validate/plan require all dependency stacks to be deployed,
-    # which is never the case for brand-new infrastructure. hclfmt is sufficient
-    # to catch HCL syntax errors; terraform validate on the underlying modules
-    # catches provider/schema issues.
-    _ = terragrunt_stacks
-
     for label, command, cwd in command_specs:
         ok, output = _run_check(command, cwd, env)
         if ok:
@@ -146,5 +228,16 @@ def validate_generated_iac(
             continue
         errors.append(f"{label} failed in `{cwd.relative_to(root)}`:\n{output}")
         break
+
+    # Schema-valid modules then go through a real terragrunt plan (local state,
+    # mock_outputs for dependencies) so apply-path errors are caught and fed to
+    # the repair loop before a PR is opened. Opt-in: the controller's AWS role
+    # must have read/describe permissions for the providers being planned.
+    if not errors and env.get("IAC_SMITH_RUNTIME_PLAN") == "1":
+        plan_errors = _run_local_state_plans(root, env, non_interactive)
+        if plan_errors:
+            errors.extend(plan_errors)
+        else:
+            checks.append("terragrunt plan (local state) passed.")
 
     return RuntimeValidationResult(passed=not errors, checks=checks, errors=errors)

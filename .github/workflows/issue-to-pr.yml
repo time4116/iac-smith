@@ -81,4 +81,9 @@ jobs:
           IAC_SMITH_ISSUE_NUMBER: ${{ inputs.issue_number || github.event.issue.number }}
           BEDROCK_MODEL_ID: ${{ secrets.BEDROCK_MODEL_ID }}
           IAC_SMITH_TARGET_REPO: time4116/iac-smith-demo-infra
+          # Gate PR creation on a real terragrunt plan (local state, mock_outputs
+          # for dependencies). Requires the assumed AWS role to have read/describe
+          # permissions for the providers being planned.
+          IAC_SMITH_RUNTIME_PLAN: "1"
+          AWS_REGION: ${{ vars.AWS_REGION || 'us-west-2' }}
         run: uv run python -m iac_smith.cli
