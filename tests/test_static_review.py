@@ -227,7 +227,7 @@ class TestRedactedPlaceholders:
     def test_redacted_placeholder_in_workflow(self) -> None:
         files = {
             ".github/workflows/terraform-apply.yml": (
-                'run: curl -H "Authorization: Bearer *** https://api.github.com/repos/example'
+                'run: curl -H "Authorization: Bearer ***" https://api.github.com/repos/example'
             ),
         }
         errors = _find_redacted_placeholders(files)
@@ -238,7 +238,7 @@ class TestRedactedPlaceholders:
     def test_clean_workflow_no_false_positive(self) -> None:
         files = {
             ".github/workflows/terraform-apply.yml": (
-                'run: curl -H "Authorization: Bearer *** github.token }}"'
+                'run: curl -H "Authorization: Bearer ${{ github.token }}"'
                 " https://api.github.com/repos/example"
             ),
         }
@@ -533,4 +533,3 @@ class TestSingletonResourceDuplication:
             ),
         }
         assert _find_singleton_resource_duplication(files) == []
-
