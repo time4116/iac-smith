@@ -326,6 +326,7 @@ def test_bedrock_terraform_generator_returns_model_generated_files_without_rende
         ),
         "environments/non-prod/ecs-fargate/terragrunt.hcl": (
             'terraform { source = "../../../modules/ecs-fargate" }\n'
+            'inputs = { name_prefix = "test" }\n'
         ),
     }
     runtime = FakeBedrockRuntime(files)
@@ -374,6 +375,7 @@ def test_bedrock_terraform_generator_generates_files_with_bounded_parallelism():
         ),
         "environments/non-prod/ecs-fargate/terragrunt.hcl": (
             'terraform { source = "../../../modules/ecs-fargate" }\n'
+            'inputs = { name_prefix = "test" }\n'
         ),
     }
     runtime = BlockingBedrockRuntime(files)
@@ -406,6 +408,7 @@ def test_bedrock_terraform_generator_retries_transient_read_timeouts():
         ),
         "environments/non-prod/ecs-fargate/terragrunt.hcl": (
             'terraform { source = "../../../modules/ecs-fargate" }\n'
+            'inputs = { name_prefix = "test" }\n'
         ),
     }
     runtime = FakeBedrockRuntime(files, failures_before_success=1)

@@ -240,6 +240,11 @@ _TG_SOURCE_RE = re.compile(r'source\s*=\s*"([^"]+)"')
 _REDACTED_PLACEHOLDER_RE = re.compile(r"\*{3}")
 _SINGLETON_RESOURCE_TYPES = frozenset({"aws_vpc"})
 _RESOURCE_TYPE_RE = re.compile(r'\bresource\s+"([^"]+)"')
+_DEPENDENCY_HEADER_RE = re.compile(r'\bdependency\s+"([^"]+)"\s*\{')
+_CONFIG_PATH_RE = re.compile(r'\bconfig_path\s*=\s*"([^"]+)"')
+_TG_DEPENDENCY_OUTPUT_REF_RE = re.compile(
+    r"\bdependency\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)\b"
+)
 
 
 def _strip_hcl_comments(content: str) -> str:
@@ -303,25 +308,13 @@ def _extract_hcl_block_keys(content: str, header_re: re.Pattern) -> set[str]:
     m = header_re.search(content)
     if not m:
         return set()
-    brace_pos = content.find("{", m.start())
-    if brace_pos == -1:
+    block_body = _extract_hcl_block_body(content, m.start())
+    if block_body is None:
         return set()
 
-    depth = 0
-    end = brace_pos
-    for i in range(brace_pos, len(content)):
-        if content[i] == "{":
-            depth += 1
-        elif content[i] == "}":
-            depth -= 1
-            if depth == 0:
-                end = i
-                break
-
-    body = content[brace_pos + 1 : end]
     keys: set[str] = set()
     nested_depth = 0
-    for line in body.splitlines():
+    for line in block_body.splitlines():
         if nested_depth == 0:
             km = re.match(r"^\s*([A-Za-z0-9_]+)\s*=", line)
             if km:
@@ -330,6 +323,42 @@ def _extract_hcl_block_keys(content: str, header_re: re.Pattern) -> set[str]:
         if nested_depth < 0:
             nested_depth = 0
     return keys
+
+
+def _extract_hcl_block_body(content: str, start_pos: int) -> str | None:
+    brace_pos = content.find("{", start_pos)
+    if brace_pos == -1:
+        return None
+
+    depth = 0
+    for i in range(brace_pos, len(content)):
+        if content[i] == "{":
+            depth += 1
+        elif content[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return content[brace_pos + 1 : i]
+    return None
+
+
+def _extract_named_hcl_blocks(content: str, header_re: re.Pattern) -> dict[str, str]:
+    blocks: dict[str, str] = {}
+    for match in header_re.finditer(content):
+        body = _extract_hcl_block_body(content, match.start())
+        if body is not None:
+            blocks[match.group(1)] = body
+    return blocks
+
+
+def _has_top_level_assignment(block_body: str, key: str) -> bool:
+    nested_depth = 0
+    for line in block_body.splitlines():
+        if nested_depth == 0 and re.match(rf"^\s*{re.escape(key)}\s*=", line):
+            return True
+        nested_depth += line.count("{") - line.count("}")
+        if nested_depth < 0:
+            nested_depth = 0
+    return False
 
 
 def _module_name_from_tg_source(source: str) -> str | None:
@@ -429,6 +458,98 @@ def _find_terragrunt_input_variable_mismatches(generated_files: dict[str, str]) 
     return errors
 
 
+def _find_terragrunt_missing_required_inputs(generated_files: dict[str, str]) -> list[str]:
+    """Flag required module variables that the Terragrunt stack does not pass.
+
+    `terraform validate` can pass on standalone modules even when the live
+    Terragrunt stack omits required variables. Variables with a `default =` are
+    optional; all other declared variables must be provided by the stack inputs.
+    """
+    errors = []
+    for path, content in generated_files.items():
+        if not _is_stack_terragrunt(path):
+            continue
+        source_m = _TG_SOURCE_RE.search(content)
+        if not source_m:
+            continue
+        module_name = _module_name_from_tg_source(source_m.group(1))
+        if not module_name:
+            continue
+        vars_tf_path = f"modules/{module_name}/variables.tf"
+        vars_content = generated_files.get(vars_tf_path)
+        if vars_content is None:
+            continue
+
+        variable_blocks = _extract_named_hcl_blocks(vars_content, _VAR_DECL_RE)
+        required_vars = {
+            name
+            for name, block in variable_blocks.items()
+            if not _has_top_level_assignment(block, "default")
+        }
+        input_keys = _extract_hcl_block_keys(content, _TG_INPUTS_HEADER_RE)
+        for name in sorted(required_vars - input_keys):
+            errors.append(
+                f"Terragrunt stack `{path}` does not pass required input `{name}` "
+                f'declared in `{vars_tf_path}` as `variable "{name}"` without a default. '
+                f"Add `{name}` to the stack `inputs = {{}}` block or add a safe default."
+            )
+    return errors
+
+
+def _dependency_module_outputs_path(config_path: str) -> str | None:
+    # Most generated Terragrunt stacks use `config_path = "../foundation"`; map the
+    # referenced stack directory to the matching generated `modules/<stack>/outputs.tf`.
+    clean = config_path.rstrip("/")
+    if not clean or clean.startswith(("git::", "http://", "https://")):
+        return None
+    stack_name = clean.split("/")[-1]
+    if not stack_name or stack_name in {".", ".."}:
+        return None
+    return f"modules/{stack_name}/outputs.tf"
+
+
+def _find_terragrunt_dependency_output_mismatches(
+    generated_files: dict[str, str],
+) -> list[str]:
+    """Flag `dependency.<name>.outputs.foo` refs missing from dependency outputs.tf."""
+    errors = []
+    for path, content in generated_files.items():
+        if not _is_stack_terragrunt(path):
+            continue
+
+        dependency_outputs_paths: dict[str, str] = {}
+        for label, block in _extract_named_hcl_blocks(content, _DEPENDENCY_HEADER_RE).items():
+            config_m = _CONFIG_PATH_RE.search(block)
+            if not config_m:
+                continue
+            outputs_path = _dependency_module_outputs_path(config_m.group(1))
+            if outputs_path is not None:
+                dependency_outputs_paths[label] = outputs_path
+
+        refs_by_label: dict[str, set[str]] = {}
+        for match in _TG_DEPENDENCY_OUTPUT_REF_RE.finditer(content):
+            label, output_name = match.groups()
+            refs_by_label.setdefault(label, set()).add(output_name)
+
+        for label, output_names in sorted(refs_by_label.items()):
+            outputs_path = dependency_outputs_paths.get(label)
+            if outputs_path is None:
+                continue
+            outputs_content = generated_files.get(outputs_path)
+            if outputs_content is None:
+                continue
+            declared_outputs = {m.group(1) for m in _OUTPUT_DECL_RE.finditer(outputs_content)}
+            for output_name in sorted(output_names - declared_outputs):
+                errors.append(
+                    f"Terragrunt stack `{path}` references "
+                    f"`dependency.{label}.outputs.{output_name}` but "
+                    f'`{outputs_path}` has no `output "{output_name}"` declaration. '
+                    f"Add the output to `{outputs_path}` or update `{path}` "
+                    f"to use an existing output name."
+                )
+    return errors
+
+
 def _find_singleton_resource_duplication(generated_files: dict[str, str]) -> list[str]:
     """Flag foundational resource types (e.g. aws_vpc) declared in multiple modules.
 
@@ -505,6 +626,8 @@ def static_review_generated_files(generated_files: dict[str, str]) -> Validation
     errors.extend(_find_undeclared_variable_references(generated_files))
     errors.extend(_find_terragrunt_orphaned_locals(generated_files))
     errors.extend(_find_terragrunt_input_variable_mismatches(generated_files))
+    errors.extend(_find_terragrunt_missing_required_inputs(generated_files))
+    errors.extend(_find_terragrunt_dependency_output_mismatches(generated_files))
     errors.extend(_find_singleton_resource_duplication(generated_files))
 
     if errors:
