@@ -7,7 +7,9 @@ from iac_smith.nodes.static_review import (
     _find_cross_file_duplicates,
     _find_redacted_placeholders,
     _find_singleton_resource_duplication,
+    _find_terragrunt_dependency_output_mismatches,
     _find_terragrunt_input_variable_mismatches,
+    _find_terragrunt_missing_required_inputs,
     _find_terragrunt_orphaned_locals,
     _find_undeclared_variable_references,
     static_review_generated_files,
@@ -403,6 +405,78 @@ class TestTerragruntInputVariableMismatches:
         }
         errors = _find_terragrunt_input_variable_mismatches(files)
         assert any("queue_url" in e for e in errors)
+
+
+class TestTerragruntMissingRequiredInputs:
+    def test_required_module_variable_not_passed_by_stack(self) -> None:
+        files = {
+            "environments/non-prod/ecs-fargate-stack/terragrunt.hcl": (
+                'terraform {\n  source = "../../../modules//ecs-fargate-stack"\n}\n'
+                "inputs = {\n  environment = local.environment\n}\n"
+            ),
+            "modules/ecs-fargate-stack/variables.tf": (
+                'variable "environment" { type = string }\n'
+                'variable "aws_region" { type = string }\n'
+                'variable "container_image" { type = string }\n'
+            ),
+        }
+
+        errors = _find_terragrunt_missing_required_inputs(files)
+
+        assert any("required input `aws_region`" in e for e in errors)
+        assert any("required input `container_image`" in e for e in errors)
+        assert all("required input `environment`" not in e for e in errors)
+
+    def test_variable_with_default_not_required_from_stack(self) -> None:
+        files = {
+            "environments/non-prod/ecs-fargate-stack/terragrunt.hcl": (
+                'terraform {\n  source = "../../../modules//ecs-fargate-stack"\n}\n'
+                "inputs = { environment = local.environment }\n"
+            ),
+            "modules/ecs-fargate-stack/variables.tf": (
+                'variable "environment" { type = string }\n'
+                'variable "container_image" {\n'
+                "  type    = string\n"
+                '  default = "nginx:latest"\n'
+                "}\n"
+            ),
+        }
+
+        assert _find_terragrunt_missing_required_inputs(files) == []
+
+
+class TestTerragruntDependencyOutputMismatches:
+    def test_dependency_output_reference_missing_from_module_outputs(self) -> None:
+        files = {
+            "environments/non-prod/rds-postgres/terragrunt.hcl": (
+                'dependency "foundation" {\n  config_path = "../foundation"\n}\n'
+                "inputs = {\n"
+                "  vpc_id = dependency.foundation.outputs.vpc_id\n"
+                "  database_subnet_ids = dependency.foundation.outputs.database_subnet_ids\n"
+                "}\n"
+            ),
+            "modules/foundation/outputs.tf": (
+                'output "vpc_id" { value = aws_vpc.main.id }\n'
+                'output "private_subnet_ids" { value = aws_subnet.private[*].id }\n'
+            ),
+        }
+
+        errors = _find_terragrunt_dependency_output_mismatches(files)
+
+        assert any("database_subnet_ids" in e for e in errors)
+        assert any("modules/foundation/outputs.tf" in e for e in errors)
+        assert all("vpc_id" not in e for e in errors)
+
+    def test_dependency_output_reference_declared_ok(self) -> None:
+        files = {
+            "environments/non-prod/ecs-fargate-stack/terragrunt.hcl": (
+                'dependency "foundation" {\n  config_path = "../foundation"\n}\n'
+                "inputs = { vpc_id = dependency.foundation.outputs.vpc_id }\n"
+            ),
+            "modules/foundation/outputs.tf": 'output "vpc_id" { value = aws_vpc.main.id }',
+        }
+
+        assert _find_terragrunt_dependency_output_mismatches(files) == []
 
 
 class TestSingletonResourceDuplication:

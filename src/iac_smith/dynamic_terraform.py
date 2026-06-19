@@ -498,8 +498,19 @@ Non-negotiable rules:
   the apply workflow's idempotent import step and must match exactly.
 * Prefer secure AWS defaults: private networking, encryption, least privilege,
   no dangerous public ingress.
-* If a workload stack depends on foundation outputs for VPC/subnets, do not
-  reference module.vpc unless that same module declares module "vpc".
+* If a request needs both networking/foundation and a workload, split ownership
+  cleanly. `modules/foundation` may create only shared network primitives such
+  as VPC, subnets, route tables, NAT/IGW, and common security groups. It must
+  NOT create ALBs, target groups/listeners, CloudWatch log groups, ECS clusters,
+  task definitions, ECS services, or workload IAM. Those belong in the workload
+  module, which consumes `modules/foundation` outputs through Terragrunt
+  dependency inputs.
+* If a workload stack depends on foundation outputs for VPC/subnets/security
+  groups, do not reference module.vpc unless that same module declares
+  module "vpc". In Terragrunt, every `dependency.foundation.outputs.<name>`
+  reference must exactly match an `output "<name>"` in
+  `modules/foundation/outputs.tf`; do not invent aliases such as `alb_sg_id`
+  unless that exact output is declared.
 * Generate complete, syntactically valid file bodies for each requested path.
   Do not use placeholder comments instead of Terraform resources when the issue
   asks for concrete infrastructure.
@@ -566,10 +577,14 @@ Non-negotiable rules:
   `tags = {{ Environment = local.environment }}`, only `tags` is a module input,
   not `Environment`. Before writing variables.tf, enumerate all var.xxx
   references in main.tf and all top-level keys in the stack's inputs = {{}} to
-  build the complete variable set. When repairing variables.tf, preserve existing
-  valid variable declarations and append missing ones; do not replace the file
-  with only the newly mentioned variables. Missing any one variable will fail
-  `terraform validate`.
+  build the complete variable set. Every required variable in variables.tf
+  (any variable without a `default =`) must be passed by the corresponding
+  Terragrunt stack's `inputs = {{}}` block; otherwise non-interactive plan/apply
+  will fail. If a variable should not be passed by Terragrunt, give it an
+  explicit safe default. When repairing variables.tf, preserve existing valid
+  variable declarations and append missing ones; do not replace the file with
+  only the newly mentioned variables. Missing any one variable will fail
+  `terraform validate` or live Terragrunt plan/apply.
 {_CANONICAL_FILE_SHAPES}{sibling_section}{existing_section}{repair_section}
 Generation context JSON:
 {json.dumps(context, indent=2)}
