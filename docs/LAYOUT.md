@@ -12,7 +12,7 @@ Examples:
 
 | Issue request | Stack name |
 |---|---|
-| ECS Fargate cluster with ALB | `ecs-fargate-stack` |
+| ECS Fargate cluster with ALB | `ecs-fargate` |
 | RDS PostgreSQL database | `rds-postgres` |
 | S3 bucket with CloudFront | `s3-cloudfront` |
 | EKS cluster | `eks-fargate` |

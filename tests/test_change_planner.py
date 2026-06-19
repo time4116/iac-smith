@@ -120,6 +120,24 @@ def test_plan_ecs_fargate_adds_foundation_stack_and_module():
     assert plan.backend_resources["non-prod"].lock_table == "iac-smith-lock-non-prod"
 
 
+def test_plan_strips_stack_suffix_from_resource_type():
+    plan = plan_changes(
+        InfrastructureIntent(
+            raw_request="Create ECS Fargate cluster",
+            resource_type="ecs_fargate_stack",
+            environment_scope=EnvironmentScope.NON_PROD_ONLY,
+            environments=["non-prod"],
+            region="us-west-2",
+            requires_new_vpc=False,
+            features=[],
+        ),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+    assert plan.stack_name == "ecs-fargate"
+    assert "modules/ecs-fargate/main.tf" in plan.files_to_generate
+    assert not any("ecs-fargate-stack" in p for p in plan.files_to_generate)
+
+
 def test_plan_existing_foundation_applies_to_arbitrary_workload_stack():
     patterns = RepoPatterns(
         existing_stack_paths=["modules/foundation", "environments/non-prod/foundation"]

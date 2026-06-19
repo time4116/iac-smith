@@ -67,7 +67,12 @@ def _planned_environments(
 
 def _stack_name(intent: InfrastructureIntent) -> str:
     """Derive a stable filesystem-safe stack name from the resource_type."""
-    return re.sub(r"[^a-z0-9-]", "-", intent.resource_type.lower().replace("_", "-")).strip("-")
+    name = re.sub(r"[^a-z0-9-]", "-", intent.resource_type.lower().replace("_", "-")).strip("-")
+    # Strip redundant -stack suffix — all stacks are stacks; the model sometimes
+    # appends it (e.g. resource_type="ecs_fargate_stack" → "ecs-fargate-stack").
+    if name.endswith("-stack"):
+        name = name[: -len("-stack")]
+    return name
 
 
 def _module_already_exists(stack: str, repo_patterns: RepoPatterns | None) -> bool:
