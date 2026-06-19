@@ -8,6 +8,7 @@ import pytest
 from iac_smith.dynamic_terraform import (
     BedrockTerraformGenerator,
     _path_needs_repair,
+    _repair_unit_key,
     build_generation_prompt,
     parse_generation_payload,
     parse_single_file_generation_payload,
@@ -514,7 +515,7 @@ def test_bedrock_terraform_generator_logs_generation_and_repair_progress():
         "IaC Smith: generating file 1/4: environments/non-prod/ecs-fargate/terragrunt.hcl"
         in messages
     )
-    assert any("static review failed" in message for message in messages)
+    assert any("static review found issues" in message for message in messages)
     assert (
         "IaC Smith: repairing file 1/4: environments/non-prod/ecs-fargate/terragrunt.hcl"
         in messages
@@ -526,7 +527,7 @@ def test_bedrock_terraform_generator_logs_generation_and_repair_progress():
     assert messages[-1] == "IaC Smith: generated 4 file(s)."
 
 
-def test_bedrock_terraform_generator_stops_after_unrepaired_static_review_failure():
+def test_bedrock_terraform_generator_returns_best_effort_after_unrepaired_static_review_failure():
     files = {
         "environments/non-prod/ecs-fargate/terragrunt.hcl": (
             'remote_state { config = { key = "fixed.tfstate" } }\n'
@@ -546,15 +547,20 @@ def test_bedrock_terraform_generator_stops_after_unrepaired_static_review_failur
         max_repair_attempts=1,
     )
 
-    with pytest.raises(ValueError, match="failed static review"):
-        generator.generate_files(
-            intent=_intent(),
-            change_plan=_plan(),
-            repo_patterns=RepoPatterns(),
-            ruleset=_ruleset(),
-            target_repo="time4116/iac-smith-demo-infra",
-        )
+    # Non-convergence must not crash the run: best-effort files are returned so
+    # the graph's validation_runner and the real terraform/terragrunt validation
+    # in cli.py become the gate, rather than a static-review check killing the run.
+    result = generator.generate_files(
+        intent=_intent(),
+        change_plan=_plan(),
+        repo_patterns=RepoPatterns(),
+        ruleset=_ruleset(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
 
+    assert set(result) == set(files)
+    # Initial generation of every file, then one repair round before the
+    # oscillation guard halts (the unrepaired error recurs identically).
     assert len(runtime.calls) == len(files) + 1
 
 
@@ -583,6 +589,39 @@ def test_bedrock_terraform_generator_uses_extended_bedrock_timeout(monkeypatch):
     assert kwargs["region_name"] == "us-west-2"
     assert kwargs["config"].read_timeout >= 180
     assert kwargs["config"].retries["max_attempts"] >= 3
+
+
+class TestRepairUnitKey:
+    def test_module_and_its_stack_share_a_unit(self):
+        # A module and its Terragrunt stack must repair together so variables.tf
+        # and the stack's inputs converge instead of oscillating.
+        assert _repair_unit_key("modules/ecs-fargate/variables.tf") == "stack:ecs-fargate"
+        assert (
+            _repair_unit_key("environments/non-prod/ecs-fargate/terragrunt.hcl")
+            == "stack:ecs-fargate"
+        )
+
+    def test_deeper_environment_path_keys_on_stack_dir(self):
+        assert (
+            _repair_unit_key("environments/non-prod/group/ecs-fargate/terragrunt.hcl")
+            == "stack:ecs-fargate"
+        )
+
+    def test_distinct_stacks_do_not_share_a_unit(self):
+        assert _repair_unit_key("modules/foundation/main.tf") != _repair_unit_key(
+            "modules/ecs-fargate/main.tf"
+        )
+
+    def test_non_stack_paths_key_on_directory(self):
+        assert _repair_unit_key("environments/terragrunt.hcl") == "dir:environments"
+        assert (
+            _repair_unit_key("bootstrap/backend/non-prod/main.tf")
+            == "dir:bootstrap/backend/non-prod"
+        )
+        # Environment-level config is not a stack and must not pair with a module.
+        assert (
+            _repair_unit_key("environments/non-prod/terragrunt.hcl") == "dir:environments/non-prod"
+        )
 
 
 class TestPathNeedsRepair:

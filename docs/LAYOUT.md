@@ -60,7 +60,7 @@ Generated CI workflows are placed at `.github/workflows/terraform-pr-check.yml` 
 
 ## File responsibilities
 
-Each file in a module has a fixed responsibility. IaC Smith enforces these with static review checks.
+Each file in a module has a fixed responsibility. IaC Smith checks these in static review's structural tier (advisory + autofix); the authoritative enforcement is the backend-free `terraform validate` run before PR creation.
 
 | File | Contains |
 |---|---|

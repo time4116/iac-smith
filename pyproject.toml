@@ -10,6 +10,7 @@ dependencies = [
     "pyyaml>=6.0.2",
     "httpx>=0.28.0",
     "boto3>=1.43.29",
+    "python-hcl2>=4.3.0",
 ]
 
 [dependency-groups]

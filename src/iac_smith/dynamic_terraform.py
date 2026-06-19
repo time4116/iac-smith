@@ -13,7 +13,6 @@ from iac_smith.models.change_plan import ChangePlan
 from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
 from iac_smith.models.rules import Ruleset
-from iac_smith.models.validation import ValidationStatus
 from iac_smith.nodes.static_review import static_review_generated_files
 
 
@@ -58,6 +57,41 @@ def _path_needs_repair(path: str, errors: list[str]) -> bool:
 
 
 _GEN_ORDER = {"main.tf": 0, "variables.tf": 1, "outputs.tf": 2, "versions.tf": 3}
+
+
+def _repair_unit_key(path: str) -> str:
+    """Group a Terraform module and its Terragrunt stack into one repair unit.
+
+    A module's ``variables.tf`` and its stack's ``terragrunt.hcl`` must agree on
+    the variable contract, but they live in different directories
+    (``modules/<stack>/`` vs ``environments/<env>/<stack>/``).  Repairing them in
+    separate parallel groups means each regenerates from a stale snapshot of the
+    other, so the input/variable sets oscillate instead of converging.  Mapping
+    both to the same unit key — keyed on the shared stack name, which
+    ``modules/<stack>/`` and ``environments/<env>/<stack>/`` share by convention
+    (see docs/LAYOUT.md) — lets them be repaired sequentially with shared context.
+    """
+    parts = path.split("/")
+    if len(parts) >= 2 and parts[0] == "modules":
+        return f"stack:{parts[1]}"
+    if len(parts) >= 4 and parts[0] == "environments" and parts[-1] == "terragrunt.hcl":
+        return f"stack:{parts[-2]}"
+    return f"dir:{path.rpartition('/')[0]}"
+
+
+def _unit_sibling_content(path: str, all_files: dict[str, str]) -> dict[str, str]:
+    """Return current content of other non-Markdown files in the same repair unit.
+
+    Unlike :func:`_sibling_content` (same directory only), this surfaces files
+    across the module/stack boundary so a stack ``terragrunt.hcl`` repair can see
+    the module's freshly repaired ``variables.tf`` and vice versa.
+    """
+    unit = _repair_unit_key(path)
+    return {
+        p: c
+        for p, c in all_files.items()
+        if p != path and not p.endswith(".md") and _repair_unit_key(p) == unit
+    }
 
 
 class BedrockRuntime(Protocol):
@@ -846,34 +880,59 @@ class BedrockTerraformGenerator:
 
         generated_files = {path: generated_files[path] for path in change_plan.files_to_generate}
 
+        seen_issue_sets: list[frozenset[str]] = []
         for repair_attempt in range(self.max_repair_attempts + 1):
             validation = static_review_generated_files(generated_files)
-            if validation.status != ValidationStatus.FAILED:
+            # Autofix both security errors and structural issues; advisory
+            # warnings (public ingress, docs markers) are surfaced for review,
+            # not repaired.
+            issues = [*validation.errors, *validation.structural]
+            if not issues:
                 for path in change_plan.files_to_generate:
                     suffix = " after repair" if repair_attempt else ""
                     self._log(f"IaC Smith: static review passed for {path}{suffix}.")
                 self._log(f"IaC Smith: generated {len(generated_files)} file(s).")
                 return generated_files
 
-            self._log("IaC Smith: static review failed: " + "; ".join(validation.errors))
+            self._log("IaC Smith: static review found issues: " + "; ".join(issues))
+
+            # Oscillation guard: if this exact issue set already recurred from an
+            # earlier round, repairs are cycling rather than converging.  Stop and
+            # return the best-effort files — the graph's validation_runner gates on
+            # security errors and the real terraform/terragrunt validation in
+            # cli.py is the authoritative correctness gate.  A structural check
+            # that real Terraform would accept must never crash the run.
+            issue_set = frozenset(issues)
+            if issue_set in seen_issue_sets:
+                self._log(
+                    "IaC Smith: static review issues are oscillating; returning "
+                    "best-effort files for downstream validation to gate."
+                )
+                return generated_files
+            seen_issue_sets.append(issue_set)
+
             if repair_attempt >= self.max_repair_attempts:
-                joined_errors = "; ".join(validation.errors)
-                raise ValueError(f"Generated files failed static review: {joined_errors}")
+                self._log(
+                    "IaC Smith: static review did not converge within the repair budget; "
+                    "returning best-effort files for downstream validation to gate."
+                )
+                return generated_files
 
             paths_to_repair = [
-                path
-                for path in change_plan.files_to_generate
-                if _path_needs_repair(path, validation.errors)
+                path for path in change_plan.files_to_generate if _path_needs_repair(path, issues)
             ] or list(change_plan.files_to_generate)
             self._log(
-                f"IaC Smith: repairing {len(paths_to_repair)} file(s) after static review failure."
+                f"IaC Smith: repairing {len(paths_to_repair)} file(s) after static review issues."
             )
-            repair_errors = list(validation.errors)
+            repair_errors = list(issues)
             previous_files = dict(generated_files)
 
+            # Group by repair unit (module + its Terragrunt stack) so co-dependent
+            # files are repaired sequentially with shared context instead of in
+            # parallel from stale snapshots.
             repair_groups: dict[str, list[str]] = {}
             for path in paths_to_repair:
-                repair_groups.setdefault(path.rpartition("/")[0], []).append(path)
+                repair_groups.setdefault(_repair_unit_key(path), []).append(path)
             for paths in repair_groups.values():
                 paths.sort(key=lambda p: _GEN_ORDER.get(p.rpartition("/")[2], 4))
 
@@ -897,7 +956,7 @@ class BedrockTerraformGenerator:
                         target_repo=target_repo,
                         repair_errors=repair_errors,
                         previous_content=previous_files[path],
-                        sibling_content=_sibling_content(path, accumulated) or None,
+                        sibling_content=_unit_sibling_content(path, accumulated) or None,
                     )
                     accumulated[path] = content
                     results.append((path, content))
@@ -954,7 +1013,7 @@ class BedrockTerraformGenerator:
 
         repair_groups: dict[str, list[str]] = {}
         for path in paths_to_repair:
-            repair_groups.setdefault(path.rpartition("/")[0], []).append(path)
+            repair_groups.setdefault(_repair_unit_key(path), []).append(path)
         for paths in repair_groups.values():
             paths.sort(key=lambda p: _GEN_ORDER.get(p.rpartition("/")[2], 4))
 
@@ -972,7 +1031,7 @@ class BedrockTerraformGenerator:
                     target_repo=target_repo,
                     repair_errors=repair_errors,
                     previous_content=generated_files[path],
-                    sibling_content=_sibling_content(path, accumulated) or None,
+                    sibling_content=_unit_sibling_content(path, accumulated) or None,
                 )
                 accumulated[path] = content
                 results.append((path, content))

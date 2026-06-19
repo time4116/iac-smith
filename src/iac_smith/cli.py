@@ -13,7 +13,6 @@ from iac_smith.models.change_plan import ChangePlan
 from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
 from iac_smith.models.rules import Ruleset
-from iac_smith.models.validation import ValidationStatus
 from iac_smith.nodes.pr_writer import branch_name_for_issue
 from iac_smith.nodes.static_review import static_review_generated_files
 from iac_smith.runtime_validation import validate_generated_iac
@@ -315,16 +314,17 @@ def run_iac_smith(
                     repair_errors=repair_errors,
                 )
                 static_check = static_review_generated_files(repaired_files)
-                if static_check.status == ValidationStatus.FAILED:
+                static_issues = [*static_check.errors, *static_check.structural]
+                if static_issues:
                     _log(
-                        "IaC Smith: static review failed after runtime repair: "
-                        + "; ".join(static_check.errors)
+                        "IaC Smith: static review found issues after runtime repair: "
+                        + "; ".join(static_issues)
                     )
                     result["generated_files"] = repaired_files
                     repaired_files = _repair_generated_files(
                         repairer=runtime_repairer,
                         result=result,
-                        repair_errors=[*repair_errors, *static_check.errors],
+                        repair_errors=[*repair_errors, *static_issues],
                     )
             except Exception as exc:
                 if _is_bedrock_throttle(exc):
