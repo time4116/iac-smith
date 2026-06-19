@@ -1,7 +1,11 @@
 import subprocess
 from pathlib import Path
 
-from iac_smith.runtime_validation import _replace_hcl_block, validate_generated_iac
+from iac_smith.runtime_validation import (
+    _force_local_state,
+    _strip_backend_config,
+    validate_generated_iac,
+)
 
 
 def _scaffold_stack(tmp_path: Path) -> None:
@@ -99,18 +103,57 @@ def test_validate_generated_iac_fails_before_pr_when_terraform_validate_fails(
     assert "bad validate" in result.errors[0]
 
 
-def test_replace_hcl_block_swaps_remote_state_and_preserves_rest():
+def test_strip_backend_config_removes_remote_state_block():
     content = (
         "locals { x = 1 }\n"
         'remote_state {\n  backend = "s3"\n'
         '  config = { key = "${path_relative_to_include()}/t" }\n}\n'
         "inputs = {}\n"
     )
-    out = _replace_hcl_block(content, "remote_state", 'remote_state {\n  backend = "local"\n}\n')
-    assert 'backend = "local"' in out
+    out = _strip_backend_config(content)
+    assert "remote_state" not in out
     assert 'backend = "s3"' not in out
     assert "locals { x = 1 }" in out
     assert "inputs = {}" in out
+
+
+def test_strip_backend_config_removes_generate_backend_block_but_keeps_provider():
+    content = (
+        'generate "backend" {\n'
+        '  path     = "backend.tf"\n'
+        "  contents = <<EOF\n"
+        'terraform { backend "s3" {} }\n'
+        "EOF\n"
+        "}\n"
+        'generate "provider" {\n'
+        '  path     = "provider.tf"\n'
+        "  contents = <<EOF\n"
+        'provider "aws" { region = "us-west-2" }\n'
+        "EOF\n"
+        "}\n"
+    )
+    out = _strip_backend_config(content)
+    assert 'generate "backend"' not in out
+    assert 'backend "s3"' not in out
+    assert 'generate "provider"' in out
+    assert 'provider "aws"' in out
+
+
+def test_force_local_state_strips_backend_at_every_hierarchy_level(tmp_path: Path):
+    # remote_state can live at the env level, not only the top root.
+    envdir = tmp_path / "environments"
+    (envdir / "non-prod").mkdir(parents=True)
+    (envdir / "terragrunt.hcl").write_text('locals { region = "us-west-2" }\n')
+    (envdir / "non-prod" / "terragrunt.hcl").write_text(
+        'remote_state {\n  backend = "s3"\n  config = { bucket = "b" }\n}\n'
+        "include { path = find_in_parent_folders() }\n"
+    )
+
+    _force_local_state(tmp_path)
+
+    assert 'backend = "s3"' not in (envdir / "non-prod" / "terragrunt.hcl").read_text()
+    assert "remote_state" not in (envdir / "non-prod" / "terragrunt.hcl").read_text()
+    assert "include" in (envdir / "non-prod" / "terragrunt.hcl").read_text()
 
 
 def test_runtime_plan_runs_terragrunt_plan_against_local_state_when_enabled(
