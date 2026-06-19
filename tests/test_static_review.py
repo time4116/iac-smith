@@ -315,6 +315,38 @@ class TestTerragruntInputVariableMismatches:
         }
         assert _find_terragrunt_input_variable_mismatches(files) == []
 
+    def test_nested_map_keys_are_not_treated_as_inputs(self) -> None:
+        files = {
+            "environments/non-prod/ecs-fargate-stack/terragrunt.hcl": (
+                'terraform {\n  source = "../../../modules//ecs-fargate-stack"\n}\n'
+                "inputs = {\n"
+                "  tags = {\n"
+                "    Environment = local.environment\n"
+                '    ManagedBy   = "iac-smith"\n'
+                '    Stack       = "ecs-fargate-stack"\n'
+                "  }\n"
+                "}\n"
+            ),
+            "modules/ecs-fargate-stack/variables.tf": 'variable "tags" { type = map(string) }',
+        }
+
+        assert _find_terragrunt_input_variable_mismatches(files) == []
+
+    def test_nested_local_references_do_not_require_nested_local_names(self) -> None:
+        files = {
+            "environments/non-prod/ecs-fargate-stack/terragrunt.hcl": (
+                'include "root" {\n  path = find_in_parent_folders()\n}\n'
+                'locals {\n  environment = "non-prod"\n}\n'
+                "inputs = {\n"
+                "  tags = {\n"
+                "    Environment = local.environment\n"
+                "  }\n"
+                "}\n"
+            ),
+        }
+
+        assert _find_terragrunt_orphaned_locals(files) == []
+
     def test_no_module_variables_tf_skipped(self) -> None:
         """If the module's variables.tf is not in generated files, skip the check."""
         files = {
@@ -350,7 +382,7 @@ class TestTerragruntInputVariableMismatches:
 
 
 class TestSingletonResourceDuplication:
-    def test_vpc_in_multiple_modules_warns(self) -> None:
+    def test_vpc_in_multiple_modules_fails_review(self) -> None:
         """aws_vpc in two unrelated modules signals a broken foundation boundary."""
         files = {
             "modules/network/main.tf": ('resource "aws_vpc" "this" { cidr_block = "10.0.0.0/16" }'),
@@ -358,10 +390,25 @@ class TestSingletonResourceDuplication:
                 'resource "aws_vpc" "this" { cidr_block = "10.1.0.0/16" }'
             ),
         }
-        warnings = _find_singleton_resource_duplication(files)
-        assert any("aws_vpc" in w for w in warnings)
-        assert any("`modules/network`" in w for w in warnings)
-        assert any("`modules/rds-postgres`" in w for w in warnings)
+        errors = _find_singleton_resource_duplication(files)
+        assert any("aws_vpc" in e for e in errors)
+        assert any("`modules/network`" in e for e in errors)
+        assert any("`modules/rds-postgres`" in e for e in errors)
+
+    def test_static_review_blocks_vpc_in_foundation_and_workload(self) -> None:
+        files = {
+            "modules/foundation/main.tf": (
+                'resource "aws_vpc" "this" { cidr_block = "10.0.0.0/16" }'
+            ),
+            "modules/ecs-fargate-stack/main.tf": (
+                'resource "aws_vpc" "this" { cidr_block = "10.1.0.0/16" }'
+            ),
+        }
+
+        result = static_review_generated_files(files)
+
+        assert result.status == ValidationStatus.FAILED
+        assert any("aws_vpc" in e for e in result.errors)
 
     def test_vpc_in_one_module_ok(self) -> None:
         files = {

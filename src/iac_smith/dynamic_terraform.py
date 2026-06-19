@@ -561,10 +561,15 @@ Non-negotiable rules:
   declaration in the same file will cause `Error: Unsupported attribute` at init.
 * **variables.tf completeness — CRITICAL:** variables.tf MUST declare every
   variable referenced as var.xxx anywhere in the module (main.tf, outputs.tf,
-  etc.) AND every key listed in the corresponding Terragrunt stack's
-  `inputs = {{}}` block. Before writing variables.tf, enumerate all var.xxx
-  references in main.tf and all keys in the stack's inputs = {{}} to build the
-  complete variable set. Missing any one variable will fail `terraform validate`.
+  etc.) AND every top-level key listed in the corresponding Terragrunt stack's
+  `inputs = {{}}` block. Nested object keys are not inputs: in
+  `tags = {{ Environment = local.environment }}`, only `tags` is a module input,
+  not `Environment`. Before writing variables.tf, enumerate all var.xxx
+  references in main.tf and all top-level keys in the stack's inputs = {{}} to
+  build the complete variable set. When repairing variables.tf, preserve existing
+  valid variable declarations and append missing ones; do not replace the file
+  with only the newly mentioned variables. Missing any one variable will fail
+  `terraform validate`.
 {_CANONICAL_FILE_SHAPES}{sibling_section}{existing_section}{repair_section}
 Generation context JSON:
 {json.dumps(context, indent=2)}
