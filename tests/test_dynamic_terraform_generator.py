@@ -163,6 +163,9 @@ def test_generation_prompt_contains_rules_repo_patterns_and_requested_paths():
     assert "environments/non-prod/ecs-fargate/terragrunt.hcl" in prompt
     assert "Return only JSON" in prompt
     assert "Do not generate files outside files_to_generate" in prompt
+    assert "top-level key listed" in prompt
+    assert "Nested object keys are not inputs" in prompt
+    assert "preserve existing" in prompt
 
 
 def test_generation_prompt_includes_existing_file_content_when_provided():

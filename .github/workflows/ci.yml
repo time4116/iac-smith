@@ -21,6 +21,8 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest -m 'not integration and not bedrock'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
   integration:
     if: false

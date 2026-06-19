@@ -48,13 +48,14 @@ def _os_name() -> str:
 def _github_api(url: str, retries: int = 3) -> dict:
     for attempt in range(retries):
         try:
-            req = urllib.request.Request(
-                url,
-                headers={
-                    "Accept": "application/vnd.github.v3+json",
-                    "User-Agent": "iac-smith/1.0",
-                },
-            )
+            headers = {
+                "Accept": "application/vnd.github.v3+json",
+                "User-Agent": "iac-smith/1.0",
+            }
+            token = os.environ.get("GITHUB_TOKEN") or os.environ.get("IAC_SMITH_GITHUB_TOKEN")
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=15) as resp:
                 return json.loads(resp.read().decode())
         except (urllib.error.HTTPError, urllib.error.URLError, OSError):

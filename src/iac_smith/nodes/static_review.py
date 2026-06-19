@@ -243,13 +243,19 @@ _RESOURCE_TYPE_RE = re.compile(r'\bresource\s+"([^"]+)"')
 
 
 def _extract_hcl_block_keys(content: str, header_re: re.Pattern) -> set[str]:
-    """Return the top-level assignment key names inside the first matching HCL block."""
+    """Return top-level assignment keys inside the first matching HCL block.
+
+    This intentionally ignores nested object keys. For example, in
+    `inputs = { tags = { Environment = local.environment } }`, only `tags` is a
+    Terragrunt input; `Environment` is just a map key inside that input value.
+    """
     m = header_re.search(content)
     if not m:
         return set()
     brace_pos = content.find("{", m.start())
     if brace_pos == -1:
         return set()
+
     depth = 0
     end = brace_pos
     for i in range(brace_pos, len(content)):
@@ -260,8 +266,19 @@ def _extract_hcl_block_keys(content: str, header_re: re.Pattern) -> set[str]:
             if depth == 0:
                 end = i
                 break
+
     body = content[brace_pos + 1 : end]
-    return {km.group(1) for km in re.finditer(r"^\s*([A-Za-z0-9_]+)\s*=", body, re.MULTILINE)}
+    keys: set[str] = set()
+    nested_depth = 0
+    for line in body.splitlines():
+        if nested_depth == 0:
+            km = re.match(r"^\s*([A-Za-z0-9_]+)\s*=", line)
+            if km:
+                keys.add(km.group(1))
+        nested_depth += line.count("{") - line.count("}")
+        if nested_depth < 0:
+            nested_depth = 0
+    return keys
 
 
 def _module_name_from_tg_source(source: str) -> str | None:
@@ -361,7 +378,7 @@ def _find_terragrunt_input_variable_mismatches(generated_files: dict[str, str]) 
 
 
 def _find_singleton_resource_duplication(generated_files: dict[str, str]) -> list[str]:
-    """Warn when a foundational resource type (e.g. aws_vpc) appears in more than one module.
+    """Flag foundational resource types (e.g. aws_vpc) declared in multiple modules.
 
     Each foundational resource should be owned by exactly one module (typically `foundation`).
     All other modules must consume its outputs via Terragrunt dependency blocks rather than
@@ -436,7 +453,7 @@ def static_review_generated_files(generated_files: dict[str, str]) -> Validation
     errors.extend(_find_undeclared_variable_references(generated_files))
     errors.extend(_find_terragrunt_orphaned_locals(generated_files))
     errors.extend(_find_terragrunt_input_variable_mismatches(generated_files))
-    warnings.extend(_find_singleton_resource_duplication(generated_files))
+    errors.extend(_find_singleton_resource_duplication(generated_files))
 
     if errors:
         status = ValidationStatus.FAILED
