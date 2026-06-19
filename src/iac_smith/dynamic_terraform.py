@@ -534,11 +534,15 @@ Non-negotiable rules:
   no dangerous public ingress.
 * If a request needs both networking/foundation and a workload, split ownership
   cleanly. `modules/foundation` may create only shared network primitives such
-  as VPC, subnets, route tables, NAT/IGW, and common security groups. It must
-  NOT create ALBs, target groups/listeners, CloudWatch log groups, ECS clusters,
-  task definitions, ECS services, or workload IAM. Those belong in the workload
-  module, which consumes `modules/foundation` outputs through Terragrunt
-  dependency inputs.
+  as VPC, subnets, route tables, NAT/IGW, and explicitly shared network-boundary
+  security groups that downstream stacks consume. It must NOT create workload
+  security groups, ALBs, target groups/listeners, CloudWatch log groups, ECS
+  clusters, task definitions, ECS services, or workload IAM. Those belong in the
+  workload module, which consumes `modules/foundation` outputs through
+  Terragrunt dependency inputs. Never generate the same AWS provider-level
+  resource `name` for the same resource type in both foundation and workload
+  modules; that creates apply-time name collisions Terraform module validation
+  cannot catch.
 * If a workload stack depends on foundation outputs for VPC/subnets/security
   groups, do not reference module.vpc unless that same module declares
   module "vpc". In Terragrunt, every `dependency.foundation.outputs.<name>`
