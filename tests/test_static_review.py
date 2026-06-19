@@ -227,7 +227,7 @@ class TestRedactedPlaceholders:
     def test_redacted_placeholder_in_workflow(self) -> None:
         files = {
             ".github/workflows/terraform-apply.yml": (
-                'run: curl -H "Authorization: Bearer ***" https://api.github.com/repos/example'
+                'run: curl -H "Authorization: Bearer *** https://api.github.com/repos/example'
             ),
         }
         errors = _find_redacted_placeholders(files)
@@ -238,7 +238,7 @@ class TestRedactedPlaceholders:
     def test_clean_workflow_no_false_positive(self) -> None:
         files = {
             ".github/workflows/terraform-apply.yml": (
-                'run: curl -H "Authorization: Bearer ${{ github.token }}"'
+                'run: curl -H "Authorization: Bearer *** github.token }}"'
                 " https://api.github.com/repos/example"
             ),
         }
@@ -448,9 +448,7 @@ class TestDuplicateNamedResources:
     def test_distinct_provider_names_allowed_across_arbitrary_modules(self) -> None:
         files = {
             "modules/service-a/main.tf": (
-                'resource "aws_security_group" "api" {\n'
-                '  name = "${var.environment}-api-sg"\n'
-                "}\n"
+                'resource "aws_security_group" "api" {\n  name = "${var.environment}-api-sg"\n}\n'
             ),
             "modules/service-b/main.tf": (
                 'resource "aws_security_group" "worker" {\n'
@@ -535,3 +533,4 @@ class TestSingletonResourceDuplication:
             ),
         }
         assert _find_singleton_resource_duplication(files) == []
+
