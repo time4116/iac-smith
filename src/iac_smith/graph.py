@@ -10,6 +10,7 @@ from iac_smith.blackboard import (
     RunBlackboard,
     build_blackboard,
     normalize_validation_findings,
+    resolve_contracts_for_files,
     validate_generated_contracts,
 )
 from iac_smith.dynamic_terraform import BedrockTerraformGenerator
@@ -128,12 +129,7 @@ def change_planner(state: IaCSmithState) -> IaCSmithState:
 def blackboard_planner(state: IaCSmithState) -> IaCSmithState:
     return {
         **state,
-        "blackboard": build_blackboard(
-            intent=state["intent"],
-            change_plan=state["change_plan"],
-            repo_patterns=state.get("repo_patterns"),
-            resolver=ContractResolver(),
-        ),
+        "blackboard": build_blackboard(repo_patterns=state.get("repo_patterns")),
         "status": "blackboard_ready",
     }
 
@@ -174,12 +170,22 @@ def make_code_generator(file_generator_fn: FileGenerator):
 
 def validation_runner(state: IaCSmithState) -> IaCSmithState:
     generated_files = state.get("generated_files", {})
+    blackboard = state.get("blackboard")
     if generated_files:
         validation = static_review_generated_files(generated_files)
         if validation.status != ValidationStatus.FAILED:
-            contract_validation = validate_generated_contracts(
-                generated_files, state.get("blackboard")
-            )
+            # Resolve contracts for the resource types actually generated (generic;
+            # the resolver is the injection point for a future provider-schema or
+            # registry lookup). Empty until one is wired, so this is a no-op pass.
+            contract_docs = resolve_contracts_for_files(generated_files, ContractResolver())
+            if blackboard and contract_docs:
+                blackboard = blackboard.model_copy(
+                    update={
+                        "contract_docs": contract_docs,
+                        "selected_contracts": sorted(contract_docs),
+                    }
+                )
+            contract_validation = validate_generated_contracts(generated_files, contract_docs)
             if contract_validation.status == ValidationStatus.FAILED:
                 validation = contract_validation
     else:
@@ -197,7 +203,6 @@ def validation_runner(state: IaCSmithState) -> IaCSmithState:
     if validation.status == ValidationStatus.FAILED:
         status = "blocked" if repair_attempts >= 3 else "needs_repair"
 
-    blackboard = state.get("blackboard")
     if validation.status == ValidationStatus.FAILED and blackboard:
         blackboard = blackboard.with_findings(normalize_validation_findings(validation.errors))
 

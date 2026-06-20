@@ -42,7 +42,10 @@ def test_plan_accepts_arbitrary_resource_type():
         assert plan.files_to_generate
 
 
-def test_plan_changes_includes_src_artifacts_for_application_source_requests():
+def test_plan_changes_does_not_inject_language_specific_golden_path_files():
+    # No golden paths: a .NET/web-app request must not produce hardcoded C#
+    # scaffolding (.csproj/Program.cs). Source artifacts, if any, are figured out
+    # dynamically, never templated per language.
     intent = InfrastructureIntent(
         raw_request=(
             "Create a dotnet web app welcome page on Elastic Beanstalk and create "
@@ -57,9 +60,10 @@ def test_plan_changes_includes_src_artifacts_for_application_source_requests():
 
     plan = plan_changes(intent, "time4116/iac-smith-demo-infra")
 
-    assert "src/elastic-beanstalk-dotnet/Program.cs" in plan.files_to_generate
-    assert "src/elastic-beanstalk-dotnet/elastic-beanstalk-dotnet.csproj" in plan.files_to_generate
-    assert any(item == "Generate application source under src/" for item in plan.summary)
+    assert not any(
+        p.endswith(".csproj") or p.endswith("Program.cs") for p in plan.files_to_generate
+    )
+    assert not any("application source under src/" in item for item in plan.summary)
 
 
 def test_plan_uses_existing_environment_names_when_issue_does_not_pin_scope():

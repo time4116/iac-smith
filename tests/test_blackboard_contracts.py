@@ -6,82 +6,99 @@ from iac_smith.blackboard import (
     build_blackboard,
     build_blackboard_prompt_section,
     normalize_validation_findings,
+    resolve_contracts_for_files,
+    validate_generated_contracts,
 )
-from iac_smith.models.change_plan import BackendResource, ChangePlan
-from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
 
 
-def _intent(
-    raw_request: str, resource_type: str = "elastic_beanstalk_dotnet"
-) -> InfrastructureIntent:
-    return InfrastructureIntent(
-        raw_request=raw_request,
-        resource_type=resource_type,
-        environment_scope=EnvironmentScope.NON_PROD_ONLY,
-        environments=["non-prod"],
-        region="us-west-2",
-        features=["dotnet", "web", "https"],
+def _eb_contract() -> TerraformContract:
+    return TerraformContract(
+        kind="provider_resource",
+        name="aws_elastic_beanstalk_environment",
+        version="aws-provider-docs",
+        allowed_arguments=["name", "application", "setting", "solution_stack_name"],
+        source="fixture",
     )
 
 
-def _plan(files: list[str] | None = None) -> ChangePlan:
-    return ChangePlan(
-        stack_name="elastic-beanstalk-dotnet",
-        environments=["non-prod"],
-        files_to_generate=files
-        or [
-            "src/elastic-beanstalk-dotnet/Program.cs",
-            "modules/elastic-beanstalk-dotnet/main.tf",
-        ],
-        backend_resources={"non-prod": BackendResource(bucket="state", lock_table="lock")},
-        summary=["Generate Elastic Beanstalk .NET application"],
-    )
+def test_build_blackboard_is_generic_with_no_keyword_selection():
+    blackboard = build_blackboard(repo_patterns=RepoPatterns(uses_terragrunt=True))
+
+    assert blackboard.repo_patterns.uses_terragrunt is True
+    # No service/language golden paths: nothing is pre-selected from keywords.
+    assert blackboard.selected_contracts == []
+    assert blackboard.contract_docs == {}
+    assert blackboard.required_artifacts == []
 
 
-def test_build_blackboard_records_required_src_artifact_and_selected_contracts():
+def test_resolve_contracts_for_files_uses_generated_resource_types():
     resolver = ContractResolver(
-        provider_contracts={
-            "aws_elastic_beanstalk_environment": TerraformContract(
-                kind="provider_resource",
-                name="aws_elastic_beanstalk_environment",
-                version="aws-provider-docs",
-                allowed_arguments=["name", "application", "setting", "solution_stack_name"],
-                source="fixture",
-            )
-        }
+        provider_contracts={"aws_elastic_beanstalk_environment": _eb_contract()}
     )
+    files = {
+        "modules/app/main.tf": (
+            'resource "aws_elastic_beanstalk_environment" "this" {\n  name = "x"\n}\n'
+            'resource "aws_s3_bucket" "logs" {\n  bucket = "y"\n}\n'
+        )
+    }
 
-    blackboard = build_blackboard(
-        intent=_intent("Create a dotnet web app in Elastic Beanstalk with a src directory"),
-        change_plan=_plan(),
-        repo_patterns=RepoPatterns(uses_terragrunt=True),
-        resolver=resolver,
-    )
+    resolved = resolve_contracts_for_files(files, resolver)
 
-    assert blackboard.required_artifacts == ["src/"]
-    assert "aws_elastic_beanstalk_environment" in blackboard.selected_contracts
-    assert blackboard.contract_docs["aws_elastic_beanstalk_environment"].allowed_arguments == [
-        "name",
-        "application",
-        "setting",
-        "solution_stack_name",
-    ]
+    # Only the generated resource type the resolver knows about is resolved —
+    # the candidate set is the actual output, not a keyword list.
+    assert set(resolved) == {"aws_elastic_beanstalk_environment"}
 
 
-def test_blackboard_prompt_section_makes_contracts_and_negative_patterns_authoritative():
+def test_validate_generated_contracts_rejects_unsupported_top_level_argument():
+    contract_docs = {"aws_elastic_beanstalk_environment": _eb_contract()}
+    files = {
+        "modules/app/main.tf": (
+            'resource "aws_elastic_beanstalk_environment" "this" {\n'
+            '  name = "example"\n'
+            '  instance_type = "t3.micro"\n'
+            "}\n"
+        )
+    }
+
+    result = validate_generated_contracts(files, contract_docs)
+
+    assert result.status.value == "failed"
+    assert "unsupported argument `instance_type`" in result.errors[0]
+
+
+def test_validate_generated_contracts_ignores_nested_block_arguments():
+    # Regression: nested block keys (the namespace/name/value inside a `setting`
+    # block) must NOT be treated as unsupported top-level arguments.
+    contract_docs = {"aws_elastic_beanstalk_environment": _eb_contract()}
+    files = {
+        "modules/app/main.tf": (
+            'resource "aws_elastic_beanstalk_environment" "this" {\n'
+            '  name        = "example"\n'
+            '  application = "app"\n'
+            "  setting {\n"
+            '    namespace = "aws:autoscaling:launchconfiguration"\n'
+            '    name      = "InstanceType"\n'
+            '    value     = "t3.micro"\n'
+            "  }\n"
+            "}\n"
+        )
+    }
+
+    result = validate_generated_contracts(files, contract_docs)
+
+    assert result.status.value == "passed"
+
+
+def test_validate_generated_contracts_no_docs_is_pass():
+    result = validate_generated_contracts({"modules/a/main.tf": 'resource "x" "y" {}'}, {})
+    assert result.status.value == "passed"
+
+
+def test_blackboard_prompt_section_emits_contracts_and_negative_patterns():
     blackboard = RunBlackboard(
-        required_artifacts=["src/"],
         selected_contracts=["aws_elastic_beanstalk_environment"],
-        contract_docs={
-            "aws_elastic_beanstalk_environment": TerraformContract(
-                kind="provider_resource",
-                name="aws_elastic_beanstalk_environment",
-                version="aws-provider-docs",
-                allowed_arguments=["name", "application", "setting"],
-                source="terraform registry docs",
-            )
-        },
+        contract_docs={"aws_elastic_beanstalk_environment": _eb_contract()},
         negative_patterns=[
             "Do not use top-level instance_type on aws_elastic_beanstalk_environment."
         ],
@@ -90,11 +107,16 @@ def test_blackboard_prompt_section_makes_contracts_and_negative_patterns_authori
     section = build_blackboard_prompt_section(blackboard)
 
     assert "Shared run blackboard" in section
-    assert "src/" in section
-    assert "aws_elastic_beanstalk_environment" in section
-    assert "allowed arguments: name, application, setting" in section
-    assert "Do not use top-level instance_type" in section
     assert "authoritative" in section
+    assert "aws_elastic_beanstalk_environment" in section
+    assert "allowed arguments: name, application, setting, solution_stack_name" in section
+    assert "Do not use top-level instance_type" in section
+
+
+def test_blackboard_prompt_section_empty_when_nothing_resolved():
+    # A first-pass blackboard with nothing learned yet injects no boilerplate.
+    assert build_blackboard_prompt_section(RunBlackboard()) == ""
+    assert build_blackboard_prompt_section(None) == ""
 
 
 def test_normalize_validation_findings_extracts_negative_schema_patterns():
@@ -120,33 +142,3 @@ def test_normalize_validation_findings_extracts_negative_schema_patterns():
             ),
         )
     ]
-
-
-def test_validate_generated_contracts_rejects_unsupported_resource_arguments():
-    from iac_smith.blackboard import validate_generated_contracts
-
-    blackboard = RunBlackboard(
-        contract_docs={
-            "aws_elastic_beanstalk_environment": TerraformContract(
-                kind="provider_resource",
-                name="aws_elastic_beanstalk_environment",
-                allowed_arguments=["name", "application", "setting"],
-                source="fixture",
-            )
-        }
-    )
-
-    result = validate_generated_contracts(
-        {
-            "modules/example/main.tf": (
-                'resource "aws_elastic_beanstalk_environment" "this" {\n'
-                '  name = "example"\n'
-                '  instance_type = "t3.micro"\n'
-                "}\n"
-            )
-        },
-        blackboard,
-    )
-
-    assert result.status.value == "failed"
-    assert "unsupported argument `instance_type`" in result.errors[0]

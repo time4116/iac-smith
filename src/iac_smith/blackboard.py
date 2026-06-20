@@ -3,8 +3,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from iac_smith.models.change_plan import ChangePlan
-from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
 from iac_smith.models.validation import ValidationResult, ValidationStatus
 
@@ -90,68 +88,26 @@ class ContractResolver:
         return resolved
 
 
-def _dedupe(values: list[str]) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        if value and value not in seen:
-            result.append(value)
-            seen.add(value)
-    return result
+def build_blackboard(*, repo_patterns: RepoPatterns | None) -> RunBlackboard:
+    """Start a run blackboard.
 
-
-def _requires_source_artifact(intent: InfrastructureIntent, change_plan: ChangePlan) -> bool:
-    haystack = " ".join(
-        [intent.raw_request, intent.resource_type, *intent.features, *change_plan.files_to_generate]
-    ).lower()
-    return "src/" in haystack or any(
-        token in haystack for token in ["dotnet", ".net", "web app", "application source"]
-    )
-
-
-def _contract_candidates(intent: InfrastructureIntent) -> list[str]:
-    haystack = " ".join([intent.raw_request, intent.resource_type, *intent.features]).lower()
-    candidates: list[str] = []
-    if "elastic beanstalk" in haystack or "beanstalk" in haystack:
-        candidates.extend(
-            [
-                "aws_elastic_beanstalk_application",
-                "aws_elastic_beanstalk_application_version",
-                "aws_elastic_beanstalk_environment",
-            ]
-        )
-    if "https" in haystack or "cert" in haystack or "certificate" in haystack:
-        candidates.append("aws_acm_certificate")
-    if "route53" in haystack or "dns" in haystack:
-        candidates.append("aws_route53_record")
-    return _dedupe(candidates)
-
-
-def build_blackboard(
-    *,
-    intent: InfrastructureIntent,
-    change_plan: ChangePlan,
-    repo_patterns: RepoPatterns | None,
-    resolver: ContractResolver | None = None,
-) -> RunBlackboard:
-    selected_contracts = _contract_candidates(intent)
-    required_artifacts = ["src/"] if _requires_source_artifact(intent, change_plan) else []
-    resolver = resolver or ContractResolver()
-    return RunBlackboard(
-        repo_patterns=repo_patterns or RepoPatterns(),
-        required_artifacts=required_artifacts,
-        selected_contracts=selected_contracts,
-        contract_docs=resolver.resolve(selected_contracts),
-        implementation_decisions={
-            "contract_selection": "frozen-before-parallel-generation"
-            if selected_contracts
-            else "no-contracts-selected"
-        },
-    )
+    Deliberately makes no service- or language-specific assumptions: contracts are
+    resolved later from the resource types that actually appear in the generated
+    Terraform (see ``resolve_contracts_for_files``), and negative patterns are
+    learned from real validation failures. Nothing is keyword-matched up front.
+    """
+    return RunBlackboard(repo_patterns=repo_patterns or RepoPatterns())
 
 
 def build_blackboard_prompt_section(blackboard: RunBlackboard | None) -> str:
-    if not blackboard:
+    if not blackboard or not (
+        blackboard.required_artifacts
+        or blackboard.selected_contracts
+        or blackboard.contract_docs
+        or blackboard.negative_patterns
+    ):
+        # Nothing learned/resolved yet (e.g. first generation pass) — inject no
+        # boilerplate.
         return ""
     lines = [
         "",
@@ -179,7 +135,48 @@ _RESOURCE_BLOCK_RE = re.compile(
     r'resource\s+"(?P<type>[^"]+)"\s+"[^"]+"\s*{(?P<body>.*?)^}',
     re.MULTILINE | re.DOTALL,
 )
-_ARGUMENT_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", re.MULTILINE)
+_ARGUMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=")
+
+
+def _top_level_arguments(body: str) -> set[str]:
+    """Return only the depth-0 argument names of a resource block.
+
+    Brace depth is tracked so arguments inside nested blocks (``setting {}``,
+    ``tag {}``, ``ingress {}``, ...) are NOT treated as top-level arguments — that
+    would otherwise flag every nested key as an unsupported argument.
+    """
+    args: set[str] = set()
+    depth = 0
+    for line in body.splitlines():
+        if depth == 0:
+            match = _ARGUMENT_RE.match(line.strip())
+            if match:
+                args.add(match.group(1))
+        depth += line.count("{") - line.count("}")
+        depth = max(depth, 0)
+    return args
+
+
+def resolve_contracts_for_files(
+    generated_files: dict[str, str], resolver: ContractResolver
+) -> dict[str, TerraformContract]:
+    """Resolve contracts for the resource types that actually appear in the output.
+
+    Fully generic: the candidate set is whatever ``resource "<type>"`` blocks the
+    model produced, not a curated keyword list, so any provider resource a real
+    resolver knows about is validated.
+    """
+    resource_types: list[str] = []
+    seen: set[str] = set()
+    for content in generated_files.values():
+        for match in _RESOURCE_BLOCK_RE.finditer(content):
+            rtype = match.group("type")
+            if rtype not in seen:
+                seen.add(rtype)
+                resource_types.append(rtype)
+    return resolver.resolve(resource_types)
+
+
 _UNSUPPORTED_ARG_RE = re.compile(
     r'resource\s+"(?P<scope>[^"]+)"[\s\S]*?'
     r'An argument named "(?P<arg>[^"]+)" is not expected here\.',
@@ -192,9 +189,15 @@ _INVALID_RESOURCE_RE = re.compile(
 
 
 def validate_generated_contracts(
-    generated_files: dict[str, str], blackboard: RunBlackboard | None
+    generated_files: dict[str, str], contract_docs: dict[str, TerraformContract]
 ) -> ValidationResult:
-    if not blackboard or not blackboard.contract_docs:
+    """Check generated resources against resolved contract docs.
+
+    ``contract_docs`` is the dynamically resolved set (see
+    ``resolve_contracts_for_files``). When empty — the default in production until
+    a schema/registry resolver is wired — this is a no-op pass.
+    """
+    if not contract_docs:
         return ValidationResult(
             status=ValidationStatus.PASSED, checks=["No contract docs available."]
         )
@@ -202,7 +205,7 @@ def validate_generated_contracts(
     for path, content in generated_files.items():
         for match in _RESOURCE_BLOCK_RE.finditer(content):
             resource_type = match.group("type")
-            contract = blackboard.contract_docs.get(resource_type)
+            contract = contract_docs.get(resource_type)
             if (
                 not contract
                 or contract.kind != "provider_resource"
@@ -210,7 +213,7 @@ def validate_generated_contracts(
             ):
                 continue
             allowed = set(contract.allowed_arguments)
-            for argument in sorted(set(_ARGUMENT_RE.findall(match.group("body")))):
+            for argument in sorted(_top_level_arguments(match.group("body"))):
                 if argument not in allowed:
                     errors.append(
                         f"`{path}` uses unsupported argument `{argument}` on `{resource_type}`. "
