@@ -248,6 +248,19 @@ _UNSUPPORTED_BLOCK_RE = re.compile(
     r'Blocks of type "(?P<block>[^"]+)" are not expected here\.',
     re.MULTILINE,
 )
+# Plan-time provider value constraints — these only surface at `terraform plan`,
+# not `terraform validate`, so they reach the runtime repair loop as raw text.
+_VALUE_REGEX_RE = re.compile(
+    r"expected (?:value of )?(?P<attr>[A-Za-z0-9_.\[\]-]+) to match regular expression "
+    r'"(?P<regex>[^"]*)", got (?P<got>.+)'
+)
+_VALUE_RANGE_RE = re.compile(
+    r"expected (?P<attr>[A-Za-z0-9_.\[\]-]+) to be in the range "
+    r"\((?P<range>[^)]*)\), got (?P<got>.+)"
+)
+_MISSING_REQUIRED_VAR_RE = re.compile(
+    r'The root module input variable "(?P<var>[^"]+)" is not set, and has no default value'
+)
 
 
 def validate_generated_contracts(
@@ -339,6 +352,60 @@ def normalize_validation_findings(errors: list[str]) -> list[ValidationFinding]:
                     finding="Unsupported resource type",
                     source="terraform validation",
                     negative_pattern=f"Do not use unsupported Terraform resource type `{scope}`.",
+                )
+            )
+        for match in _VALUE_REGEX_RE.finditer(error):
+            attr = match.group("attr")
+            got = match.group("got").strip()
+            key = (attr, f"regex:{got}")
+            if key in seen:
+                continue
+            seen.add(key)
+            findings.append(
+                ValidationFinding(
+                    scope=attr,
+                    finding=f"Value {got} rejected by provider pattern",
+                    source="terraform plan",
+                    negative_pattern=(
+                        f"`{attr}` must match the provider pattern `{match.group('regex')}`; "
+                        f"the value `{got}` is invalid — pick a conforming value (or generate a "
+                        f"resource/input that produces one) rather than reusing it."
+                    ),
+                )
+            )
+        for match in _VALUE_RANGE_RE.finditer(error):
+            attr = match.group("attr")
+            got = match.group("got").strip()
+            key = (attr, f"range:{got}")
+            if key in seen:
+                continue
+            seen.add(key)
+            findings.append(
+                ValidationFinding(
+                    scope=attr,
+                    finding=f"Value {got} out of range",
+                    source="terraform plan",
+                    negative_pattern=(
+                        f"`{attr}` must be within ({match.group('range')}); "
+                        f"the value `{got}` is out of range."
+                    ),
+                )
+            )
+        for match in _MISSING_REQUIRED_VAR_RE.finditer(error):
+            var = match.group("var")
+            key = ("variable", var)
+            if key in seen:
+                continue
+            seen.add(key)
+            findings.append(
+                ValidationFinding(
+                    scope=var,
+                    finding=f"Required variable {var} has no value",
+                    source="terraform plan",
+                    negative_pattern=(
+                        f"Required variable `{var}` has no value and no default; pass it in the "
+                        f"stack `inputs` block or give it a safe default — never leave it unset."
+                    ),
                 )
             )
     return findings
