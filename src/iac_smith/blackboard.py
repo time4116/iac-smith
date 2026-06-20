@@ -302,7 +302,29 @@ def validate_generated_contracts(
     )
 
 
-def normalize_validation_findings(errors: list[str]) -> list[ValidationFinding]:
+def _allowed_arguments_hint(scope: str, contract_docs: dict[str, TerraformContract] | None) -> str:
+    """Couple a schema error to its fix.
+
+    When the authoritative contract for the offending resource was harvested, the
+    negative pattern carries the resource's real allowed arguments/blocks inline,
+    so the repair model replaces the rejected name with a valid one instead of
+    guessing again. Returns an empty string when no contract is available — the
+    negative pattern then degrades to the bare "do not use X" form.
+    """
+    if not contract_docs:
+        return ""
+    contract = contract_docs.get(scope)
+    if not contract or not contract.allowed_arguments:
+        return ""
+    return (
+        f" The valid arguments and blocks for `{scope}` are: "
+        f"{', '.join(contract.allowed_arguments)} — replace it with the matching one."
+    )
+
+
+def normalize_validation_findings(
+    errors: list[str], contract_docs: dict[str, TerraformContract] | None = None
+) -> list[ValidationFinding]:
     findings: list[ValidationFinding] = []
     seen: set[tuple[str, str]] = set()
     for error in errors:
@@ -320,6 +342,7 @@ def normalize_validation_findings(errors: list[str]) -> list[ValidationFinding]:
                     source="terraform validation",
                     negative_pattern=(
                         f"Do not use argument `{arg}` with `{scope}`; it is not in that contract."
+                        + _allowed_arguments_hint(scope, contract_docs)
                     ),
                 )
             )
@@ -337,6 +360,7 @@ def normalize_validation_findings(errors: list[str]) -> list[ValidationFinding]:
                     source="terraform validation",
                     negative_pattern=(
                         f"Do not use a `{block}` block in `{scope}`; it is not in that contract."
+                        + _allowed_arguments_hint(scope, contract_docs)
                     ),
                 )
             )

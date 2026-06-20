@@ -396,7 +396,7 @@ def run_iac_smith(
             # real allowed/required arguments, not just "don't repeat X".
             blackboard = result.get("blackboard")
             if blackboard is not None:
-                updated = blackboard.with_findings(normalize_validation_findings(repair_errors))
+                updated = blackboard
                 if runtime_validation.contract_docs:
                     merged_docs = {**updated.contract_docs, **runtime_validation.contract_docs}
                     updated = updated.model_copy(
@@ -405,6 +405,14 @@ def run_iac_smith(
                             "selected_contracts": sorted(merged_docs),
                         }
                     )
+                # Normalize after merging contracts so an unsupported block/argument
+                # finding carries the offending resource's authoritative allowed list
+                # inline — the repair model gets the fix, not just the rejection.
+                updated = updated.with_findings(
+                    normalize_validation_findings(
+                        repair_errors, contract_docs=updated.contract_docs
+                    )
+                )
                 result["blackboard"] = updated
             try:
                 repaired_files = _repair_generated_files(
