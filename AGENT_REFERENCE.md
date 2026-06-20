@@ -4,6 +4,8 @@
 
 IaC Smith is an agentic workflow that converts a GitHub Issue into a validated Terraform/Terragrunt pull request on a target infrastructure repository. It does not apply infrastructure; it only generates, validates, and opens a PR.
 
+It generates **infrastructure, not application code** — no `Program.cs`, Dockerfile, or build pipeline. This is not a refusal rule but a structural property: the change planner only plans IaC/workflow/doc files, and the generator is constrained to that planned set (`dynamic_terraform.py`: "Do not generate files outside files_to_generate"). A request like "deploy my .NET app" yields the hosting infrastructure; the deployable artifact and its build/deploy belong to a separate application pipeline.
+
 **Input:** GitHub Issue with the `iac-smith` label  
 **Output:** PR on the target repo containing Terraform/Terragrunt files, or a blocked/ignored status
 

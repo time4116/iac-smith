@@ -43,6 +43,8 @@ IaC Smith is designed to support more than a fixed catalog of infrastructure typ
 
 It supports both greenfield repos, where the first issue creates the backend bootstrap and repo structure, and iterative additions to existing repos, such as new modules, new stacks, or changes to existing resources.
 
+**IaC Smith generates infrastructure, not application code.** It produces Terraform/Terragrunt, backend bootstrap, CI/apply workflows, and docs — it does not write application source (e.g. a `Program.cs`, a Dockerfile, or a build pipeline), and it is not designed to. A request like "deploy my .NET web app" yields the *infrastructure* to host it (for Elastic Beanstalk, the application and environment; for ECS, the cluster/service/task definition), but the application artifact itself — and the build/deploy step that ships it — is expected to come from a separate application pipeline. Treat the generated infrastructure as the landing zone your app deploys *into*, not as the app.
+
 Before opening a PR, IaC Smith runs:
 
 - **Static review (security tier)**: blocking checks for issues real Terraform may not catch — secret patterns, unsafe file paths, hardcoded Terragrunt state keys, unsafe workflow triggers, and workflow privilege problems
