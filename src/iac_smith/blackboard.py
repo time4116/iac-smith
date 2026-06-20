@@ -255,7 +255,8 @@ _VALUE_REGEX_RE = re.compile(
     r'"(?P<regex>[^"]*)", got (?P<got>.+)'
 )
 _VALUE_RANGE_RE = re.compile(
-    r"expected (?P<attr>[A-Za-z0-9_.\[\]-]+) to be in the range \((?P<range>[^)]*)\), got (?P<got>.+)"
+    r"expected (?P<attr>[A-Za-z0-9_.\[\]-]+) to be in the range "
+    r"\((?P<range>[^)]*)\), got (?P<got>.+)"
 )
 _MISSING_REQUIRED_VAR_RE = re.compile(
     r'The root module input variable "(?P<var>[^"]+)" is not set, and has no default value'

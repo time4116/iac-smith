@@ -231,8 +231,10 @@ def test_normalize_validation_findings_extracts_negative_schema_patterns():
 def test_normalize_validation_findings_extracts_value_regex_constraint():
     errors = [
         "terragrunt plan environments/non-prod/app-runner failed:\n"
-        "│ Error: expected value of source_configuration.0.image_repository.0.image_identifier "
-        'to match regular expression "(ECR)|(public.ecr.aws)", got ghcr.io/open-webui/open-webui:latest\n'
+        "│ Error: expected value of "
+        "source_configuration.0.image_repository.0.image_identifier "
+        'to match regular expression "(ECR)|(public.ecr.aws)", '
+        "got ghcr.io/open-webui/open-webui:latest\n"
         "│   with aws_apprunner_service.open_webui,"
     ]
 
@@ -247,7 +249,8 @@ def test_normalize_validation_findings_extracts_value_regex_constraint():
 
 def test_normalize_validation_findings_extracts_value_range_constraint():
     errors = [
-        "│ Error: expected health_check_configuration.0.interval to be in the range (1 - 20), got 30\n"
+        "│ Error: expected health_check_configuration.0.interval "
+        "to be in the range (1 - 20), got 30\n"
         "│   with aws_apprunner_service.open_webui,"
     ]
 
