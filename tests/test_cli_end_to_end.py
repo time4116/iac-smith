@@ -2,8 +2,10 @@ import subprocess
 from pathlib import Path
 
 from iac_smith.blackboard import TerraformContract
-from iac_smith.cli import run_iac_smith
+from iac_smith.cli import _repair_runtime_static_issues, run_iac_smith
+from iac_smith.models.change_plan import BackendResource, ChangePlan
 from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent
+from iac_smith.models.repo_patterns import RepoPatterns
 from iac_smith.services.github import GitHubIssue, GitHubPullRequest
 
 
@@ -254,6 +256,70 @@ def test_run_iac_smith_repairs_runtime_validation_failures_before_pr(tmp_path: P
     assert (
         tmp_path / "modules" / "vpc-foundation" / "main.tf"
     ).read_text() == 'resource "aws_vpc" "this" { cidr_block = "10.1.0.0/16" }\n'
+
+
+def test_runtime_static_repair_rechecks_until_module_stack_contract_converges(tmp_path: Path):
+    files = {
+        "environments/non-prod/app-runner-open-webui/terragrunt.hcl": (
+            'terraform {\n  source = "../../../modules//app-runner-open-webui"\n}\n'
+            "inputs = {\n  app_port = 8080\n}\n"
+        ),
+        "modules/app-runner-open-webui/main.tf": (
+            'resource "null_resource" "open_webui" {\n  triggers = { image = var.image_uri }\n}\n'
+        ),
+        "modules/app-runner-open-webui/variables.tf": ('variable "app_port" { type = number }\n'),
+        "modules/app-runner-open-webui/outputs.tf": "",
+        "modules/app-runner-open-webui/versions.tf": "",
+    }
+
+    class ContractRepairer:
+        def __init__(self):
+            self.seen_errors: list[list[str]] = []
+
+        def repair_files(self, **kwargs):
+            self.seen_errors.append(list(kwargs["repair_errors"]))
+            repaired = dict(kwargs["generated_files"])
+            joined_errors = "\n".join(kwargs["repair_errors"])
+            if 'Add variable "image_uri"' in joined_errors:
+                repaired["modules/app-runner-open-webui/variables.tf"] = (
+                    'variable "app_port" { type = number }\n'
+                    'variable "image_uri" { type = string }\n'
+                )
+            if "does not pass required input `image_uri`" in joined_errors:
+                repaired["environments/non-prod/app-runner-open-webui/terragrunt.hcl"] = (
+                    'terraform {\n  source = "../../../modules//app-runner-open-webui"\n}\n'
+                    "inputs = {\n"
+                    "  app_port = 8080\n"
+                    '  image_uri = "public.ecr.aws/example/open-webui:latest"\n'
+                    "}\n"
+                )
+            return repaired
+
+    result = {
+        "intent": _fake_intent_parser("Deploy Open WebUI on App Runner"),
+        "change_plan": ChangePlan(
+            stack_name="app-runner-open-webui",
+            environments=["non-prod"],
+            files_to_generate=list(files),
+            backend_resources={"non-prod": BackendResource(bucket="state", lock_table="lock")},
+            summary=["Generate App Runner stack"],
+        ),
+        "repo_patterns": RepoPatterns(),
+        "ruleset": None,
+        "target_repo": "time4116/iac-smith-demo-infra",
+        "generated_files": files,
+    }
+
+    repaired = _repair_runtime_static_issues(
+        repairer=ContractRepairer(),
+        result=result,
+        repo_path=tmp_path,
+        repaired_files=files,
+        repair_errors=["terraform validate modules/app-runner-open-webui failed"],
+    )
+
+    assert 'variable "image_uri"' in repaired["modules/app-runner-open-webui/variables.tf"]
+    assert "image_uri" in repaired["environments/non-prod/app-runner-open-webui/terragrunt.hcl"]
 
 
 def test_run_iac_smith_blocks_when_runtime_validation_fails(tmp_path: Path, monkeypatch):
