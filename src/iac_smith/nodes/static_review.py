@@ -439,6 +439,33 @@ def _find_terragrunt_orphaned_locals(generated_files: dict[str, str]) -> list[st
     return errors
 
 
+def _find_terragrunt_required_providers(generated_files: dict[str, str]) -> list[str]:
+    """Flag `required_providers` declared inside any terragrunt.hcl.
+
+    `required_providers` belongs ONLY in a module's `versions.tf`. When a
+    Terragrunt `generate` block emits a `provider.tf` that also declares
+    `required_providers`, `terraform init` fails with "Duplicate required
+    providers configuration" against the module's `versions.tf`. That generated
+    `provider.tf` is not a planned file, so module-level duplicate checks never
+    see it and the collision only surfaces deep in the runtime plan. Catch it
+    here: a terragrunt.hcl must never contain `required_providers`.
+    """
+    errors = []
+    for path, content in generated_files.items():
+        if not path.endswith("terragrunt.hcl"):
+            continue
+        if _REQUIRED_PROVIDERS_RE.search(content):
+            errors.append(
+                f"Terragrunt config `{path}` declares `required_providers` (likely inside a "
+                f"`generate` block). required_providers belongs ONLY in a module's "
+                f"`versions.tf`; a generated `provider.tf` that also declares it collides "
+                f'with `versions.tf` at `terraform init` ("Duplicate required providers '
+                f'configuration"). Make the `generate` block emit only a `provider "aws"` '
+                f"block — no `terraform {{}}` / `required_providers`."
+            )
+    return errors
+
+
 def _find_terragrunt_missing_required_inputs(generated_files: dict[str, str]) -> list[str]:
     """Flag required module variables that the Terragrunt stack does not pass.
 
@@ -697,6 +724,11 @@ def static_review_generated_files(generated_files: dict[str, str]) -> Validation
     # terraform validate and can fail only at apply time, so they block PR
     # creation if the repair loops cannot remove them.
     errors.extend(_find_duplicate_named_resources(generated_files))
+
+    # required_providers inside a terragrunt.hcl generate block collides with the
+    # module versions.tf at `terraform init`; block so it is caught at review time
+    # rather than deep in the runtime plan.
+    errors.extend(_find_terragrunt_required_providers(generated_files))
 
     # Advisory only.
     warnings.extend(_find_singleton_resource_duplication(generated_files))

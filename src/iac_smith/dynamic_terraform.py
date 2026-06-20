@@ -13,9 +13,87 @@ from iac_smith.models.change_plan import ChangePlan
 from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
 from iac_smith.models.rules import Ruleset
-from iac_smith.nodes.static_review import static_review_generated_files
+from iac_smith.nodes.static_review import (
+    _extract_hcl_block_body,
+    _extract_hcl_block_keys,
+    _strip_hcl_comments,
+    static_review_generated_files,
+)
 
 _ADD_VARIABLE_TO_RE = re.compile(r'Add variable "[^"]+" to (\S+)\.')
+
+_TG_LOCALS_HEADER_RE = re.compile(r"\blocals\s*\{")
+_TG_INCLUDE_RE = re.compile(r'^\s*include\s*(?:"[^"]+"\s*)?\{', re.MULTILINE)
+_TG_LOCAL_REF_RE = re.compile(r"\blocal\.([A-Za-z0-9_]+)")
+_SIMPLE_LOCAL_ASSIGN_RE = re.compile(r"^([A-Za-z0-9_]+)\s*=\s*(.+?)\s*$")
+
+
+def _is_root_terragrunt(path: str) -> bool:
+    """True for an environment root config (environments[/<env>]/terragrunt.hcl), not a stack."""
+    parts = path.split("/")
+    return parts[0] == "environments" and parts[-1] == "terragrunt.hcl" and len(parts) in (2, 3)
+
+
+def _parse_simple_locals(content: str) -> dict[str, str]:
+    """Return single-line `name = value` assignments from the first `locals {}` block.
+
+    Nested/object values are skipped — only the flat scalars (environment,
+    aws_region, account_id, ...) that child stacks redeclare are needed.
+    """
+    m = _TG_LOCALS_HEADER_RE.search(content)
+    if not m:
+        return {}
+    body = _extract_hcl_block_body(content, m.start())
+    if body is None:
+        return {}
+    result: dict[str, str] = {}
+    depth = 0
+    for line in body.splitlines():
+        if depth == 0:
+            am = _SIMPLE_LOCAL_ASSIGN_RE.match(line.strip())
+            if am and "{" not in am.group(2):
+                result[am.group(1)] = am.group(2)
+        depth += line.count("{") - line.count("}")
+        depth = max(depth, 0)
+    return result
+
+
+def _inject_missing_child_locals(generated_files: dict[str, str]) -> None:
+    """Declare root-derived locals that child Terragrunt stacks reference but drop.
+
+    Terragrunt does not expose a parent config's locals as `local.*` in a child,
+    so a stack that references `local.environment`/`local.aws_region` without its
+    own `locals {}` declaration fails at init with "Unsupported attribute". The
+    model drops this block unreliably and the repair loop oscillates on it, so fix
+    it deterministically: copy each referenced-but-undeclared local from the
+    environment root config into the child's `locals {}` block.
+    """
+    root_locals: dict[str, str] = {}
+    for path in sorted(generated_files, key=lambda p: p.count("/")):
+        if _is_root_terragrunt(path):
+            root_locals.update(_parse_simple_locals(generated_files[path]))
+    if not root_locals:
+        return
+
+    for path, content in list(generated_files.items()):
+        if not path.endswith("terragrunt.hcl") or _is_root_terragrunt(path):
+            continue
+        if not _TG_INCLUDE_RE.search(content):
+            continue
+        declared = _extract_hcl_block_keys(content, _TG_LOCALS_HEADER_RE)
+        referenced = set(_TG_LOCAL_REF_RE.findall(_strip_hcl_comments(content)))
+        missing = [n for n in sorted(referenced - declared) if n in root_locals]
+        if not missing:
+            continue
+        inject = "".join(f"  {n} = {root_locals[n]}\n" for n in missing)
+        header = _TG_LOCALS_HEADER_RE.search(content)
+        if header:
+            brace = content.index("{", header.start())
+            generated_files[path] = (
+                content[: brace + 1] + "\n" + inject.rstrip("\n") + content[brace + 1 :]
+            )
+        else:
+            generated_files[path] = f"locals {{\n{inject}}}\n\n" + content
 
 
 def _path_needs_repair(path: str, errors: list[str]) -> bool:
@@ -250,6 +328,21 @@ remote_state {
     path      = "backend.tf"
     if_exists = "overwrite_terragrunt"
   }
+}
+
+# Generate the AWS provider config so every stack inherits the region.
+# CRITICAL: this block sets ONLY the provider. It must NEVER contain a
+# `terraform { required_providers { } }` block — required_providers lives solely
+# in each module's versions.tf. Declaring it here too makes `terraform init`
+# fail with "Duplicate required providers configuration".
+generate "provider" {
+  path      = "provider.tf"
+  if_exists = "overwrite_terragrunt"
+  contents  = <<EOF
+provider "aws" {
+  region = "${local.aws_region}"
+}
+EOF
 }
 ```
 
@@ -617,6 +710,15 @@ Non-negotiable rules:
 * When files_to_generate includes both a `main.tf` and a `variables.tf`
   for the same module, put variables in `variables.tf` only, not in
   `main.tf`. Same rule applies to outputs.tf and versions.tf.
+* **required_providers placement — CRITICAL:** `required_providers` belongs in
+  exactly ONE place: each module's `versions.tf`. NEVER put a
+  `terraform {{ required_providers {{}} }}` block inside a Terragrunt `generate`
+  block (e.g. a generated `provider.tf`) or in `main.tf`. A Terragrunt provider
+  `generate` block must contain ONLY `provider "aws" {{ region = ... }}` — set
+  the region there, nothing else. Declaring `required_providers` in both a
+  module's `versions.tf` and a generated `provider.tf` makes `terraform init`
+  fail with "Duplicate required providers configuration". Use the AWS provider
+  `generate "provider"` block shown in the canonical root config below.
 * Every generated `modules/<stack>/README.md` MUST contain the terraform-docs
   marker pair `<!-- BEGIN_TF_DOCS -->` and `<!-- END_TF_DOCS -->` (on their own
   lines, in that order) so terraform-docs can populate the inputs/outputs table.
@@ -1316,6 +1418,9 @@ class BedrockTerraformGenerator:
 
         seen_issue_sets: list[frozenset[str]] = []
         for repair_attempt in range(self.max_repair_attempts + 1):
+            # Deterministically declare root-derived locals the model dropped, so
+            # the orphaned-locals check stops the repair loop oscillating on them.
+            _inject_missing_child_locals(generated_files)
             validation = static_review_generated_files(generated_files)
             # Autofix both security errors and structural issues; advisory
             # warnings (public ingress, docs markers) are surfaced for review,
@@ -1493,4 +1598,5 @@ class BedrockTerraformGenerator:
                 for path, content in future.result():
                     repaired_files[path] = content
 
+        _inject_missing_child_locals(repaired_files)
         return {path: repaired_files[path] for path in change_plan.files_to_generate}

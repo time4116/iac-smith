@@ -10,6 +10,7 @@ from iac_smith.dynamic_terraform import (
     _build_apply_workflow,
     _build_pr_check_workflow,
     _extract_module_names,
+    _inject_missing_child_locals,
     _path_needs_repair,
     _repair_unit_key,
     build_generation_prompt,
@@ -173,6 +174,9 @@ def test_generation_prompt_contains_rules_repo_patterns_and_requested_paths():
     # Module READMEs must carry terraform-docs markers (canonical shape + rule).
     assert "<!-- BEGIN_TF_DOCS -->" in prompt
     assert "<!-- END_TF_DOCS -->" in prompt
+    # required_providers must stay out of terragrunt generate blocks (canonical + rule).
+    assert "required_providers placement" in prompt
+    assert 'generate "provider"' in prompt
 
 
 def test_generation_prompt_includes_existing_file_content_when_provided():
@@ -1129,3 +1133,64 @@ class TestBuildApplyWorkflow:
         assert "working-directory: modules/ecs-fargate-stack" in wf
         # Model's wrong name must not appear
         assert "working-directory: modules/ecs-fargate\n" not in wf
+
+
+class TestInjectMissingChildLocals:
+    _ROOT = "environments/non-prod/terragrunt.hcl"
+    _STACK = "environments/non-prod/ecs-fargate/terragrunt.hcl"
+
+    def _root(self) -> str:
+        return 'locals {\n  environment = "non-prod"\n  aws_region  = "us-east-1"\n}\n'
+
+    def test_injects_missing_locals_and_satisfies_orphaned_check(self):
+        from iac_smith.nodes.static_review import _find_terragrunt_orphaned_locals
+
+        files = {
+            self._ROOT: self._root(),
+            self._STACK: (
+                'include "root" { path = find_in_parent_folders() }\n'
+                'terraform { source = "../../../modules/ecs-fargate" }\n'
+                "inputs = {\n  environment = local.environment\n"
+                "  aws_region  = local.aws_region\n}\n"
+            ),
+        }
+        _inject_missing_child_locals(files)
+        child = files[self._STACK]
+        assert "locals {" in child
+        assert 'environment = "non-prod"' in child
+        assert 'aws_region = "us-east-1"' in child
+        # The deterministic fix makes the orphaned-locals check pass.
+        assert _find_terragrunt_orphaned_locals(files) == []
+
+    def test_existing_local_not_duplicated(self):
+        files = {
+            self._ROOT: self._root(),
+            self._STACK: (
+                'include "root" { path = find_in_parent_folders() }\n'
+                'locals {\n  environment = "non-prod"\n}\n'
+                "inputs = {\n  environment = local.environment\n"
+                "  aws_region  = local.aws_region\n}\n"
+            ),
+        }
+        _inject_missing_child_locals(files)
+        child = files[self._STACK]
+        assert child.count('environment = "non-prod"') == 1
+        assert 'aws_region = "us-east-1"' in child
+
+    def test_root_config_is_untouched(self):
+        files = {self._ROOT: self._root()}
+        before = files[self._ROOT]
+        _inject_missing_child_locals(files)
+        assert files[self._ROOT] == before
+
+    def test_local_not_in_root_is_left_for_repair(self):
+        # A local the root config does not define cannot be auto-injected.
+        files = {
+            self._ROOT: 'locals {\n  environment = "non-prod"\n}\n',
+            self._STACK: (
+                'include "root" { path = find_in_parent_folders() }\n'
+                "inputs = { name = local.something_unknown }\n"
+            ),
+        }
+        _inject_missing_child_locals(files)
+        assert "something_unknown" not in files[self._STACK].split("inputs")[0]
