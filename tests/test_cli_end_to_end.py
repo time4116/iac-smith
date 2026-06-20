@@ -1,6 +1,7 @@
 import subprocess
 from pathlib import Path
 
+from iac_smith.blackboard import TerraformContract
 from iac_smith.cli import run_iac_smith
 from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent
 from iac_smith.services.github import GitHubIssue, GitHubPullRequest
@@ -149,10 +150,12 @@ def test_run_iac_smith_repairs_runtime_validation_failures_before_pr(tmp_path: P
             passed: bool,
             errors: list[str] | None = None,
             checks: list[str] | None = None,
+            contract_docs: dict | None = None,
         ):
             self.passed = passed
             self.errors = errors or []
             self.checks = checks or []
+            self.contract_docs = contract_docs or {}
 
     unsupported_arg_error = (
         "terraform validate modules/vpc-foundation failed:\n"
@@ -160,8 +163,16 @@ def test_run_iac_smith_repairs_runtime_validation_failures_before_pr(tmp_path: P
         '│   on main.tf line 5, in resource "aws_vpc" "this":\n'
         '│ An argument named "instance_type" is not expected here.'
     )
+    harvested_contract = TerraformContract(
+        kind="provider_resource",
+        name="aws_vpc",
+        allowed_arguments=["cidr_block", "tags"],
+        source="terraform providers schema -json (hashicorp/aws)",
+    )
     validation_results = [
-        ValidationResult(False, [unsupported_arg_error]),
+        ValidationResult(
+            False, [unsupported_arg_error], contract_docs={"aws_vpc": harvested_contract}
+        ),
         ValidationResult(True, checks=["terraform validate modules/vpc-foundation passed."]),
     ]
 
@@ -231,6 +242,14 @@ def test_run_iac_smith_repairs_runtime_validation_failures_before_pr(tmp_path: P
         "instance_type" in pattern and "aws_vpc" in pattern
         for pattern in generator.blackboard.negative_patterns
     )
+    # The authoritative contract harvested from the initialized provider is also
+    # handed to repair, so the prompt gets the real allowed arguments — not just
+    # "don't repeat this".
+    assert "aws_vpc" in generator.blackboard.contract_docs
+    assert generator.blackboard.contract_docs["aws_vpc"].allowed_arguments == [
+        "cidr_block",
+        "tags",
+    ]
     assert pr_client.calls
     assert (
         tmp_path / "modules" / "vpc-foundation" / "main.tf"

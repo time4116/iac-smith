@@ -1,3 +1,4 @@
+import json
 import subprocess
 from pathlib import Path
 
@@ -73,6 +74,51 @@ def test_validate_generated_iac_runs_terraform_and_terragrunt_plan(monkeypatch, 
         and "plan" in command
         for command in commands
     )
+
+
+def test_validate_generated_iac_harvests_provider_contracts_after_init(monkeypatch, tmp_path: Path):
+    (tmp_path / "modules" / "foundation").mkdir(parents=True)
+    (tmp_path / "modules" / "foundation" / "main.tf").write_text(
+        'resource "aws_security_group" "this" {\n  vpc_id = var.vpc_id\n}\n'
+    )
+
+    monkeypatch.setattr(
+        "iac_smith.runtime_validation.shutil.which", lambda command: f"/bin/{command}"
+    )
+    schema = json.dumps(
+        {
+            "provider_schemas": {
+                "registry.terraform.io/hashicorp/aws": {
+                    "resource_schemas": {
+                        "aws_security_group": {
+                            "block": {
+                                "attributes": {
+                                    "name": {"optional": True},
+                                    "vpc_id": {"required": True},
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    )
+
+    def fake_run(command, **kwargs):
+        if command[:3] == ["terraform", "providers", "schema"]:
+            return subprocess.CompletedProcess(command, 0, stdout=schema, stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("iac_smith.runtime_validation.subprocess.run", fake_run)
+
+    result = validate_generated_iac(tmp_path)
+
+    assert result.passed
+    # Only the resource type the module actually declares is harvested.
+    assert set(result.contract_docs) == {"aws_security_group"}
+    sg = result.contract_docs["aws_security_group"]
+    assert sg.allowed_arguments == ["name", "vpc_id"]
+    assert sg.required_arguments == ["vpc_id"]
 
 
 def test_validate_generated_iac_fails_before_pr_when_terraform_validate_fails(

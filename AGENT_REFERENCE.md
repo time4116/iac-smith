@@ -231,9 +231,19 @@ dynamically:
 
 - **`resolve_contracts_for_files(files, resolver)`** derives candidate contracts
   from the resource types that actually appear in the generated Terraform — not
-  from keywords. `ContractResolver` is the generic injection point for a future
-  provider-schema / Terraform Registry lookup; until one is wired it returns
-  nothing, so contract validation is a no-op pass.
+  from keywords. `ContractResolver` is the generic injection point: tests inject
+  fixture contracts, and in production the authoritative ones are harvested from
+  the real provider schema (see below). Pre-disk (in `validation_runner`) the
+  resolver is still empty, so that early contract check is a no-op until schema is
+  available.
+- **`contracts_from_provider_schema(schema, resource_types=...)`** parses
+  `terraform providers schema -json` into `TerraformContract`s (allowed arguments
+  = top-level attributes + nested block names; required = schema-required
+  attributes). Fully generic across providers — no per-resource knowledge.
+  Runtime validation (`runtime_validation.py`) harvests this after each module's
+  `terraform init` succeeds (providers are installed by then), scoped to the
+  resource types that module actually declares, and returns it on
+  `RuntimeValidationResult.contract_docs`.
 - **`validate_generated_contracts(files, contract_docs)`** checks generated
   resources against resolved docs, tracking brace depth so only top-level
   (depth-0) arguments are validated (nested `setting {}` / `tag {}` keys are not
@@ -241,8 +251,10 @@ dynamically:
   review.
 - **`normalize_validation_findings(errors)`** turns `terraform`/`terragrunt
   validate` failures into negative patterns; `RunBlackboard.with_findings` merges
-  them. The runtime-repair loop (`cli.py`) feeds these back into the blackboard
-  and into `repair_files`, so each repair prompt is told what not to repeat.
+  them. The runtime-repair loop (`cli.py`) feeds these back into the blackboard —
+  together with the harvested provider contracts — and into `repair_files`, so
+  each repair prompt is told both the real allowed/required arguments and what not
+  to repeat.
 
 The blackboard is injected into generation/repair prompts via
 `build_blackboard_prompt_section`, which emits nothing until something has
@@ -347,6 +359,8 @@ class ValidationResult(BaseModel):
 | `modules/` and `bootstrap/` | `terraform fmt -recursive` — auto-fix, silently corrects formatting in place |
 | Each dir in `modules/` with `*.tf` | `terraform init -backend=false -input=false` then `terraform validate` |
 
+After each successful `terraform init`, IaC Smith also runs `terraform providers schema -json` in that module and parses the authoritative resource contracts (scoped to the resource types the module declares) onto `RuntimeValidationResult.contract_docs`. This is best-effort — any failure to read or parse the schema is swallowed and never blocks validation. The contracts feed the run blackboard so repair prompts get real allowed/required arguments (see Runtime Repair Loop).
+
 By default, Terragrunt stacks under `environments/` are **not** plan-validated at runtime: `terragrunt validate/plan` against the real backend require all dependency stacks to be deployed, which is never true for brand-new infrastructure. HCL syntax errors are caught by the formatter; provider and schema errors are caught by `terraform validate` on the underlying modules.
 
 **Optional runtime planning (`IAC_SMITH_RUNTIME_PLAN=1`):** when set, IaC Smith copies the tree to a throwaway scratch dir, rewrites the root `remote_state` to a local backend, and runs `terragrunt plan` per stack (every `environments/<env>/.../<stack>/terragrunt.hcl`, grouped stacks included). It is plan-only and never `apply`s; cross-stack dependencies are resolved through each stack's `mock_outputs` (allowed for `validate`/`plan`), so the foundation stack need not be applied first. This exercises the real provider/plan path before a PR is opened, and failures feed the runtime repair loop. The assumed AWS role must have read/describe permissions for the providers being planned.
@@ -369,6 +383,7 @@ After runtime validation fails:
 ```
 for attempt in range(IAC_SMITH_RUNTIME_REPAIR_ATTEMPTS):
     blackboard += normalize_validation_findings(runtime_errors)   # learn negative patterns
+    blackboard.contract_docs += runtime_validation.contract_docs  # authoritative provider schema
     call repair_files(intent, change_plan, repo_patterns, ruleset, target_repo,
                       generated_files, runtime_errors, blackboard)
     static_review repaired files

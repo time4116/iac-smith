@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import shutil
@@ -6,12 +7,19 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from iac_smith.blackboard import (
+    TerraformContract,
+    contracts_from_provider_schema,
+    extract_resource_types,
+)
+
 
 @dataclass(frozen=True)
 class RuntimeValidationResult:
     passed: bool
     checks: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    contract_docs: dict[str, TerraformContract] = field(default_factory=dict)
 
 
 def _run_check(command: list[str], cwd: Path, env: dict[str, str]) -> tuple[bool, str]:
@@ -46,6 +54,42 @@ def _changed_roots(repo_path: Path) -> tuple[list[Path], list[Path]]:
         and not any(part.startswith(".") for part in rel.parts)
     )
     return module_roots, terragrunt_stacks
+
+
+def _harvest_module_contracts(
+    module_dir: Path, env: dict[str, str]
+) -> dict[str, TerraformContract]:
+    """Read authoritative resource contracts from an initialized module.
+
+    Best-effort and scoped: the module must already be ``terraform init``ed (so the
+    providers are installed) and only the resource types the module actually
+    declares are harvested, so the result feeds the run blackboard without dragging
+    in a provider's entire catalog. Any failure to run or parse the schema is
+    swallowed — contract harvesting must never break a validation run.
+    """
+    used = set(
+        extract_resource_types(
+            tf.read_text() for tf in sorted(module_dir.glob("*.tf")) if tf.is_file()
+        )
+    )
+    if not used:
+        return {}
+    try:
+        completed = subprocess.run(
+            ["terraform", "providers", "schema", "-json"],
+            cwd=module_dir,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+        if completed.returncode != 0 or not completed.stdout.strip():
+            return {}
+        schema = json.loads(completed.stdout)
+    except (json.JSONDecodeError, OSError, subprocess.SubprocessError):
+        return {}
+    return contracts_from_provider_schema(schema, resource_types=used)
 
 
 def _detect_terragrunt(env: dict[str, str]) -> tuple[list[str], str]:
@@ -253,12 +297,18 @@ def validate_generated_iac(
             )
         )
 
+    contract_docs: dict[str, TerraformContract] = {}
     for label, command, cwd in command_specs:
         ok, output = _run_check(command, cwd, env)
         where = cwd.relative_to(root).as_posix()
         location = "repo root" if where == "." else f"`{where}`"
         if ok:
             checks.append(f"`{' '.join(command)}` in {location}")
+            # A successful init means the module's providers are installed, so the
+            # authoritative resource schema is now readable. Harvest it for the run
+            # blackboard so repair prompts get real allowed/required arguments.
+            if label.startswith("terraform init"):
+                contract_docs.update(_harvest_module_contracts(cwd, env))
             continue
         errors.append(f"{label} failed in `{cwd.relative_to(root)}`:\n{output}")
         break
@@ -274,4 +324,6 @@ def validate_generated_iac(
         else:
             checks.extend(plan_checks)
 
-    return RuntimeValidationResult(passed=not errors, checks=checks, errors=errors)
+    return RuntimeValidationResult(
+        passed=not errors, checks=checks, errors=errors, contract_docs=contract_docs
+    )
