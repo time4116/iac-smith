@@ -121,6 +121,37 @@ def test_validate_generated_iac_harvests_provider_contracts_after_init(monkeypat
     assert sg.required_arguments == ["vpc_id"]
 
 
+def test_validate_generated_iac_validates_bootstrap_roots(monkeypatch, tmp_path: Path):
+    # bootstrap/** is a real Terraform root and must be schema-validated too, not
+    # just modules/* — otherwise a bad block there reaches the target repo's CI.
+    (tmp_path / "modules" / "foundation").mkdir(parents=True)
+    (tmp_path / "modules" / "foundation" / "main.tf").write_text(
+        'resource "null_resource" "x" {}\n'
+    )
+    (tmp_path / "bootstrap" / "backend" / "non-prod").mkdir(parents=True)
+    (tmp_path / "bootstrap" / "backend" / "non-prod" / "main.tf").write_text(
+        'resource "aws_dynamodb_table" "locks" {\n  name = "l"\n}\n'
+    )
+
+    monkeypatch.setattr(
+        "iac_smith.runtime_validation.shutil.which", lambda command: f"/bin/{command}"
+    )
+    calls: list[tuple[list[str], object]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs.get("cwd")))
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("iac_smith.runtime_validation.subprocess.run", fake_run)
+
+    result = validate_generated_iac(tmp_path)
+
+    assert result.passed
+    init_cwds = {str(cwd) for command, cwd in calls if command[:2] == ["terraform", "init"] and cwd}
+    assert str(tmp_path / "bootstrap" / "backend" / "non-prod") in init_cwds
+    assert str(tmp_path / "modules" / "foundation") in init_cwds
+
+
 def test_validate_generated_iac_fails_before_pr_when_terraform_validate_fails(
     monkeypatch, tmp_path: Path
 ):

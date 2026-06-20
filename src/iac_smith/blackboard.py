@@ -243,6 +243,11 @@ _INVALID_RESOURCE_RE = re.compile(
     r'resource\s+"(?P<scope>[^"]+)"[\s\S]*?does not support resource type\s+"(?P=scope)"',
     re.MULTILINE,
 )
+_UNSUPPORTED_BLOCK_RE = re.compile(
+    r'resource\s+"(?P<scope>[^"]+)"[\s\S]*?'
+    r'Blocks of type "(?P<block>[^"]+)" are not expected here\.',
+    re.MULTILINE,
+)
 
 
 def validate_generated_contracts(
@@ -302,6 +307,23 @@ def normalize_validation_findings(errors: list[str]) -> list[ValidationFinding]:
                     source="terraform validation",
                     negative_pattern=(
                         f"Do not use argument `{arg}` with `{scope}`; it is not in that contract."
+                    ),
+                )
+            )
+        for match in _UNSUPPORTED_BLOCK_RE.finditer(error):
+            scope = match.group("scope")
+            block = match.group("block")
+            key = (scope, f"block:{block}")
+            if key in seen:
+                continue
+            seen.add(key)
+            findings.append(
+                ValidationFinding(
+                    scope=scope,
+                    finding=f"Unsupported block {block}",
+                    source="terraform validation",
+                    negative_pattern=(
+                        f"Do not use a `{block}` block in `{scope}`; it is not in that contract."
                     ),
                 )
             )
