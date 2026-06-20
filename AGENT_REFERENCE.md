@@ -296,6 +296,8 @@ class ValidationResult(BaseModel):
 - Public ingress (0.0.0.0/0 or ::/0) to any of: SSH (22), RDP (3389), PostgreSQL (5432), MySQL (3306), MSSQL (1433), Redis (6379), MongoDB (27017)
 - Module README missing terraform-docs markers
 
+**Terragrunt input direction is asymmetric:** Terragrunt passes inputs as `TF_VAR_*` environment variables and Terraform silently ignores undeclared ones, so a stack passing an *extra* input the module does not declare is **not** an error. Only the reverse is flagged — a *required* module variable (one declared without a `default`) that the stack fails to pass, which would fail non-interactive `terragrunt plan/apply`.
+
 ---
 
 ## Runtime Validation
@@ -311,7 +313,9 @@ class ValidationResult(BaseModel):
 | `modules/` and `bootstrap/` | `terraform fmt -recursive` — auto-fix, silently corrects formatting in place |
 | Each dir in `modules/` with `*.tf` | `terraform init -backend=false -input=false` then `terraform validate` |
 
-Terragrunt stacks under `environments/` are **not** validated at runtime. `terragrunt init/validate/plan` require all dependency stacks to be deployed, which is never true for brand-new infrastructure. HCL syntax errors are caught by the formatter; provider and schema errors are caught by `terraform validate` on the underlying modules.
+By default, Terragrunt stacks under `environments/` are **not** plan-validated at runtime: `terragrunt validate/plan` against the real backend require all dependency stacks to be deployed, which is never true for brand-new infrastructure. HCL syntax errors are caught by the formatter; provider and schema errors are caught by `terraform validate` on the underlying modules.
+
+**Optional runtime planning (`IAC_SMITH_RUNTIME_PLAN=1`):** when set, IaC Smith copies the tree to a throwaway scratch dir, rewrites the root `remote_state` to a local backend, and runs `terragrunt plan` per stack (every `environments/<env>/.../<stack>/terragrunt.hcl`, grouped stacks included). It is plan-only and never `apply`s; cross-stack dependencies are resolved through each stack's `mock_outputs` (allowed for `validate`/`plan`), so the foundation stack need not be applied first. This exercises the real provider/plan path before a PR is opened, and failures feed the runtime repair loop. The assumed AWS role must have read/describe permissions for the providers being planned.
 
 **Environment set for all commands:**
 ```

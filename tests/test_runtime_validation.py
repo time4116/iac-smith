@@ -178,9 +178,7 @@ def test_runtime_plan_runs_terragrunt_plan_against_local_state_when_enabled(
     commands = [call[0] for call in calls]
     assert any(command[:2] == ["terragrunt", "plan"] for command in commands)
     # The check names the literal command that ran, not just a generic label.
-    assert any(
-        "terragrunt plan" in check and "(local state)" in check for check in result.checks
-    )
+    assert any("terragrunt plan" in check and "(local state)" in check for check in result.checks)
     assert any("`terragrunt plan" in check for check in result.checks)
     # The plan must run in a scratch copy, never the real repo path.
     plan_cwd = next(c[1] for c in calls if c[0][:2] == ["terragrunt", "plan"])

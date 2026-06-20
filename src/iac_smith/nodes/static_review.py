@@ -629,8 +629,7 @@ _SECURITY_CHECKS_PERFORMED = (
     "No hardcoded secrets or AWS credentials (access keys, private keys, "
     "password/token/secret literals) in any generated file.",
     "No `***` redaction artifacts left in generated workflow files.",
-    "Apply workflow runs only on push to `main` — never on pull requests or "
-    "feature branches.",
+    "Apply workflow runs only on push to `main` — never on pull requests or feature branches.",
     "Apply is gated behind a manual-approval `environment:` and scoped to the "
     "components that actually changed, so merging never auto-applies unrelated infra.",
     "Terragrunt remote-state keys are namespaced with `path_relative_to_include()` "
