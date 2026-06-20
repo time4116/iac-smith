@@ -23,7 +23,7 @@ from iac_smith.nodes.change_planner import plan_changes
 from iac_smith.nodes.intent_parser import parse_intent
 from iac_smith.nodes.pr_writer import build_pr_body
 from iac_smith.nodes.ruleset_loader import load_ruleset
-from iac_smith.nodes.static_review import static_review_generated_files
+from iac_smith.nodes.static_review import existing_stack_dirs, static_review_generated_files
 from iac_smith.repo_scanner import scan_repo_patterns
 from iac_smith.state import IaCSmithState
 
@@ -172,7 +172,9 @@ def validation_runner(state: IaCSmithState) -> IaCSmithState:
     generated_files = state.get("generated_files", {})
     blackboard = state.get("blackboard")
     if generated_files:
-        validation = static_review_generated_files(generated_files)
+        validation = static_review_generated_files(
+            generated_files, known_stack_dirs=existing_stack_dirs(state.get("target_repo_path"))
+        )
         if validation.status != ValidationStatus.FAILED:
             # Resolve contracts for the resource types actually generated (generic;
             # the resolver is the injection point for a future provider-schema or

@@ -698,6 +698,18 @@ Non-negotiable rules:
   reference must exactly match an `output "<name>"` in
   `modules/foundation/outputs.tf`; do not invent aliases such as `alb_sg_id`
   unless that exact output is declared.
+* **Never depend on a stack that is not part of this change.** Only declare a
+  Terragrunt `dependency` on a stack whose `terragrunt.hcl` is in the
+  files_to_generate list (or that already exists in the target repo). Every
+  `dependency.<name>.outputs.*` you reference MUST have a matching
+  `dependency "<name>"` block, and that block's `config_path` MUST resolve to a
+  stack that exists. If the issue needs shared infrastructure (a VPC, subnets,
+  etc.) that is NOT among the planned files, do not invent a `dependency` on a
+  foundation that isn't there — instead provision those resources inside this
+  module, or read existing ones with Terraform data sources (e.g.
+  `data "aws_vpc"`, `data "aws_subnets"`, or the account's default VPC). A
+  `dependency` pointing at a directory that does not exist fails `terragrunt
+  plan` with "There is no variable named dependency".
 * Generate complete, syntactically valid file bodies for each requested path.
   Do not use placeholder comments instead of Terraform resources when the issue
   asks for concrete infrastructure.
