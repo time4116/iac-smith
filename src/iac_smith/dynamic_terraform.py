@@ -263,6 +263,7 @@ include "root" {
 # Redeclare any values you need from the parent in this locals {} block.
 locals {
   environment = "non-prod"
+  aws_region  = "us-east-1"
 }
 
 terraform {
@@ -285,6 +286,7 @@ dependency "foundation" {
 
 inputs = {
   environment        = local.environment
+  aws_region         = local.aws_region   # pass EVERY required (no-default) module variable
   vpc_id             = dependency.foundation.outputs.vpc_id
   private_subnet_ids = dependency.foundation.outputs.private_subnet_ids
 }
@@ -580,16 +582,21 @@ Non-negotiable rules:
 * Prefer secure AWS defaults: private networking, encryption, least privilege,
   no dangerous public ingress.
 * If a request needs both networking/foundation and a workload, split ownership
-  cleanly. `modules/foundation` may create only shared network primitives such
-  as VPC, subnets, route tables, NAT/IGW, and explicitly shared network-boundary
-  security groups that downstream stacks consume. It must NOT create workload
-  security groups, ALBs, target groups/listeners, CloudWatch log groups, ECS
-  clusters, task definitions, ECS services, or workload IAM. Those belong in the
-  workload module, which consumes `modules/foundation` outputs through
-  Terragrunt dependency inputs. Never generate the same AWS provider-level
-  resource `name` for the same resource type in both foundation and workload
-  modules; that creates apply-time name collisions Terraform module validation
-  cannot catch.
+  cleanly. `modules/foundation` owns ONLY shared network primitives: VPC,
+  subnets, route tables, NAT/IGW. Every security group is a WORKLOAD resource —
+  ALB security groups, ECS task/service security groups, and database security
+  groups all belong in the workload module, declared exactly ONCE there,
+  referencing `dependency.foundation.outputs.vpc_id` for their `vpc_id`. So an
+  `aws_security_group` named `${{var.environment}}-alb-sg` or
+  `${{var.environment}}-ecs-tasks-sg` MUST appear in `modules/ecs-fargate` only,
+  never also in `modules/foundation`. Foundation must likewise NOT create ALBs,
+  target groups/listeners, CloudWatch log groups, ECS clusters, task
+  definitions, ECS services, or workload IAM. Never declare the same AWS
+  provider-level resource `name` for the same resource type in two modules; that
+  is an apply-time name collision Terraform's per-module validation cannot catch.
+  If foundation genuinely must own a security group that several workloads
+  share, declare it once in foundation, expose its id via an `output`, and have
+  each workload consume that id — do not re-declare the group in any workload.
 * If a workload stack depends on foundation outputs for VPC/subnets/security
   groups, do not reference module.vpc unless that same module declares
   module "vpc". In Terragrunt, every `dependency.foundation.outputs.<name>`
@@ -671,10 +678,14 @@ Non-negotiable rules:
   (any variable without a `default =`) must be passed by the corresponding
   Terragrunt stack's `inputs = {{}}` block; otherwise non-interactive plan/apply
   will fail. If a variable should not be passed by Terragrunt, give it an
-  explicit safe default. When repairing variables.tf, preserve existing valid
-  variable declarations and append missing ones; do not replace the file with
-  only the newly mentioned variables. Missing any one variable will fail
-  `terraform validate` or live Terragrunt plan/apply.
+  explicit safe default. Commonly-forgotten required inputs are `aws_region` and
+  other root values: if the module declares `variable "aws_region"` without a
+  default, the stack MUST pass `aws_region = local.aws_region` (redeclared in the
+  stack's own `locals {{}}` since parent locals are not accessible), exactly as
+  the canonical stack template shows. When repairing variables.tf,
+  preserve existing valid variable declarations and append missing ones; do not
+  replace the file with only the newly mentioned variables. Missing any one
+  variable will fail `terraform validate` or live Terragrunt plan/apply.
 {_CANONICAL_FILE_SHAPES}{sibling_section}{existing_section}{repair_section}
 Generation context JSON:
 {json.dumps(context, indent=2)}

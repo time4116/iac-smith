@@ -112,6 +112,16 @@ IAC_SMITH_ALLOWED_TARGET_REPO=time4116/iac-smith-demo-infra
 
 The CLI should fail closed if `IAC_SMITH_TARGET_REPO` does not exactly match that allowlist value.
 
+## Target repo apply workflow
+
+The controller only generates and opens PRs; the generated `.github/workflows/terraform-apply.yml` runs in the **target** repo after a PR is merged to `main`. For it to work — and to be safe to make public — configure the target repo (`time4116/iac-smith-demo-infra`):
+
+1. **Approval gate (GitHub Environment).** The apply workflow gates every AWS-mutating job behind `environment: <env>` (e.g. `non-prod`). The workflow only *references* the environment by name; the protection is a repo setting. In the target repo, go to **Settings → Environments**, create an environment matching the generated name (e.g. `non-prod`), and add **Required reviewers**. Until you do this, GitHub auto-creates the environment with no protection on first run, so a merge would apply without sign-off. The gate becomes enforceable once the repo can use environment protection rules (public repos, or private repos on a plan that includes them).
+
+2. **OIDC role + secret for applying.** The apply workflow assumes `${{ secrets.AWS_ROLE_ARN_NON_PROD }}` via GitHub Actions OIDC. Add that secret to the target repo and create/extend an IAM role whose trust policy allows the target repo's OIDC subject (`repo:time4116/iac-smith-demo-infra:ref:refs/heads/main`), with the permissions needed to apply the generated infrastructure. This is separate from the controller's Bedrock role.
+
+Making the target repo public exposes the generated Terraform/Terragrunt and the backend resource names it hardcodes (state bucket and lock-table names); confirm those contain nothing sensitive before flipping visibility. Secrets are never in the repo — they are referenced as `${{ secrets.* }}` and stored in repo settings.
+
 ## Local development
 
 Run checks locally with locked dependencies:
