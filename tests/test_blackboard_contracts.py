@@ -299,3 +299,40 @@ def test_normalize_validation_findings_extracts_unsupported_block():
             ),
         )
     ]
+
+
+def test_normalize_validation_findings_couples_unsupported_block_to_allowed_schema():
+    errors = [
+        "terraform validate modules/dynamodb-table failed:\n"
+        "│ Error: Unsupported block type\n"
+        '│   on main.tf line 5, in resource "aws_dynamodb_table" "feature_flags":\n'
+        "│   5:   stream_specification {\n"
+        '│ Blocks of type "stream_specification" are not expected here.'
+    ]
+    contract_docs = {
+        "aws_dynamodb_table": TerraformContract(
+            kind="provider_resource",
+            name="aws_dynamodb_table",
+            allowed_arguments=[
+                "billing_mode",
+                "hash_key",
+                "point_in_time_recovery",
+                "stream_enabled",
+                "stream_view_type",
+                "ttl",
+            ],
+            required_arguments=["name"],
+            source="terraform providers schema -json (hashicorp/aws)",
+        )
+    }
+
+    findings = normalize_validation_findings(errors, contract_docs=contract_docs)
+
+    assert len(findings) == 1
+    pattern = findings[0].negative_pattern
+    assert pattern is not None
+    assert "Do not use a `stream_specification` block in `aws_dynamodb_table`" in pattern
+    assert "The valid arguments and blocks for `aws_dynamodb_table` are:" in pattern
+    assert "stream_enabled" in pattern
+    assert "point_in_time_recovery" in pattern
+    assert "replace it with the matching one" in pattern
