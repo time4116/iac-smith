@@ -312,12 +312,21 @@ def run_iac_smith(
             repair_errors = list(runtime_validation.errors)
             # Learn negative patterns from the real terraform/terragrunt failures
             # and carry them in the blackboard so each repair prompt is told what
-            # not to repeat.
+            # not to repeat. Also fold in the authoritative resource contracts
+            # harvested from the initialized providers so the repair prompt gets the
+            # real allowed/required arguments, not just "don't repeat X".
             blackboard = result.get("blackboard")
             if blackboard is not None:
-                result["blackboard"] = blackboard.with_findings(
-                    normalize_validation_findings(repair_errors)
-                )
+                updated = blackboard.with_findings(normalize_validation_findings(repair_errors))
+                if runtime_validation.contract_docs:
+                    merged_docs = {**updated.contract_docs, **runtime_validation.contract_docs}
+                    updated = updated.model_copy(
+                        update={
+                            "contract_docs": merged_docs,
+                            "selected_contracts": sorted(merged_docs),
+                        }
+                    )
+                result["blackboard"] = updated
             try:
                 repaired_files = _repair_generated_files(
                     repairer=runtime_repairer,

@@ -5,11 +5,43 @@ from iac_smith.blackboard import (
     ValidationFinding,
     build_blackboard,
     build_blackboard_prompt_section,
+    contracts_from_provider_schema,
+    extract_resource_types,
     normalize_validation_findings,
     resolve_contracts_for_files,
     validate_generated_contracts,
 )
 from iac_smith.models.repo_patterns import RepoPatterns
+
+
+def _provider_schema() -> dict:
+    return {
+        "format_version": "1.0",
+        "provider_schemas": {
+            "registry.terraform.io/hashicorp/aws": {
+                "resource_schemas": {
+                    "aws_security_group": {
+                        "block": {
+                            "attributes": {
+                                "name": {"type": "string", "optional": True},
+                                "description": {"type": "string", "optional": True},
+                                "vpc_id": {"type": "string", "required": True},
+                            },
+                            "block_types": {
+                                "ingress": {"nesting_mode": "set"},
+                                "egress": {"nesting_mode": "set"},
+                            },
+                        }
+                    },
+                    "aws_s3_bucket": {
+                        "block": {
+                            "attributes": {"bucket": {"type": "string", "required": True}},
+                        }
+                    },
+                }
+            }
+        },
+    }
 
 
 def _eb_contract() -> TerraformContract:
@@ -117,6 +149,58 @@ def test_blackboard_prompt_section_empty_when_nothing_resolved():
     # A first-pass blackboard with nothing learned yet injects no boilerplate.
     assert build_blackboard_prompt_section(RunBlackboard()) == ""
     assert build_blackboard_prompt_section(None) == ""
+
+
+def test_extract_resource_types_is_ordered_and_deduplicated():
+    contents = [
+        'resource "aws_s3_bucket" "a" {\n  bucket = "a"\n}\n'
+        'resource "aws_security_group" "b" {\n  vpc_id = "v"\n}\n',
+        'resource "aws_s3_bucket" "c" {\n  bucket = "c"\n}\n',
+    ]
+
+    assert extract_resource_types(contents) == ["aws_s3_bucket", "aws_security_group"]
+
+
+def test_contracts_from_provider_schema_builds_allowed_and_required_arguments():
+    contracts = contracts_from_provider_schema(_provider_schema())
+
+    assert set(contracts) == {"aws_security_group", "aws_s3_bucket"}
+    sg = contracts["aws_security_group"]
+    assert sg.kind == "provider_resource"
+    # Allowed = attributes + nested block names, sorted.
+    assert sg.allowed_arguments == ["description", "egress", "ingress", "name", "vpc_id"]
+    # Only schema-required attributes are required.
+    assert sg.required_arguments == ["vpc_id"]
+    assert "hashicorp/aws" in sg.source
+
+
+def test_contracts_from_provider_schema_scopes_to_requested_resource_types():
+    contracts = contracts_from_provider_schema(_provider_schema(), resource_types={"aws_s3_bucket"})
+
+    assert set(contracts) == {"aws_s3_bucket"}
+
+
+def test_contracts_from_provider_schema_handles_empty_schema():
+    assert contracts_from_provider_schema({}) == {}
+    assert contracts_from_provider_schema({"provider_schemas": {}}) == {}
+
+
+def test_harvested_contracts_drive_real_validation():
+    # End-to-end: schema -> contracts -> proactive validation flags a bad argument.
+    contracts = contracts_from_provider_schema(_provider_schema())
+    files = {
+        "modules/net/main.tf": (
+            'resource "aws_security_group" "this" {\n'
+            "  vpc_id = var.vpc_id\n"
+            '  bogus_argument = "x"\n'
+            "}\n"
+        )
+    }
+
+    result = validate_generated_contracts(files, contracts)
+
+    assert result.status.value == "failed"
+    assert "unsupported argument `bogus_argument`" in result.errors[0]
 
 
 def test_normalize_validation_findings_extracts_negative_schema_patterns():

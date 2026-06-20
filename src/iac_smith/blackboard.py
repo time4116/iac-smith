@@ -1,4 +1,5 @@
 import re
+from collections.abc import Iterable
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -157,6 +158,23 @@ def _top_level_arguments(body: str) -> set[str]:
     return args
 
 
+def extract_resource_types(contents: Iterable[str]) -> list[str]:
+    """Return the distinct ``resource "<type>"`` names across the given file bodies.
+
+    Order-preserving and deduplicated. Generic: the candidate set is whatever the
+    model actually produced, never a curated keyword list.
+    """
+    resource_types: list[str] = []
+    seen: set[str] = set()
+    for content in contents:
+        for match in _RESOURCE_BLOCK_RE.finditer(content):
+            rtype = match.group("type")
+            if rtype not in seen:
+                seen.add(rtype)
+                resource_types.append(rtype)
+    return resource_types
+
+
 def resolve_contracts_for_files(
     generated_files: dict[str, str], resolver: ContractResolver
 ) -> dict[str, TerraformContract]:
@@ -166,15 +184,54 @@ def resolve_contracts_for_files(
     model produced, not a curated keyword list, so any provider resource a real
     resolver knows about is validated.
     """
-    resource_types: list[str] = []
-    seen: set[str] = set()
-    for content in generated_files.values():
-        for match in _RESOURCE_BLOCK_RE.finditer(content):
-            rtype = match.group("type")
-            if rtype not in seen:
-                seen.add(rtype)
-                resource_types.append(rtype)
-    return resolver.resolve(resource_types)
+    return resolver.resolve(extract_resource_types(generated_files.values()))
+
+
+def contracts_from_provider_schema(
+    schema: dict,
+    *,
+    resource_types: set[str] | None = None,
+    source: str = "terraform providers schema -json",
+) -> dict[str, TerraformContract]:
+    """Build resource contracts from ``terraform providers schema -json`` output.
+
+    Generic across providers: every resource type the installed providers expose
+    becomes a contract whose allowed arguments are the schema's top-level
+    attribute and nested-block names, and whose required arguments are the
+    attributes the schema marks required. No provider- or resource-specific
+    knowledge is encoded — this is the authoritative resolver behind the otherwise
+    inert ``ContractResolver`` hook.
+
+    When ``resource_types`` is given, only those types are built — callers scope the
+    harvest to the resources actually generated so the resolved set (and any prompt
+    injection) stays small instead of carrying a provider's full catalog.
+    """
+    contracts: dict[str, TerraformContract] = {}
+    provider_schemas = schema.get("provider_schemas") or {}
+    for provider_uri, provider_schema in provider_schemas.items():
+        provider_name = provider_uri.rsplit("/", 2)[-2:]
+        provider_label = "/".join(provider_name) if len(provider_name) == 2 else provider_uri
+        resource_schemas = (provider_schema or {}).get("resource_schemas") or {}
+        for resource_type, resource_schema in resource_schemas.items():
+            if resource_types is not None and resource_type not in resource_types:
+                continue
+            block = (resource_schema or {}).get("block") or {}
+            attributes = block.get("attributes") or {}
+            block_types = block.get("block_types") or {}
+            allowed = sorted({*attributes.keys(), *block_types.keys()})
+            required = sorted(
+                name
+                for name, spec in attributes.items()
+                if isinstance(spec, dict) and spec.get("required")
+            )
+            contracts[resource_type] = TerraformContract(
+                kind="provider_resource",
+                name=resource_type,
+                allowed_arguments=allowed,
+                required_arguments=required,
+                source=f"{source} ({provider_label})",
+            )
+    return contracts
 
 
 _UNSUPPORTED_ARG_RE = re.compile(
