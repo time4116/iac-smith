@@ -177,6 +177,31 @@ def test_generation_prompt_contains_rules_repo_patterns_and_requested_paths():
     # required_providers must stay out of terragrunt generate blocks (canonical + rule).
     assert "required_providers placement" in prompt
     assert 'generate "provider"' in prompt
+    assert "Provider schema errors are authoritative" in prompt
+    assert "Do not special-case one AWS service" in prompt
+    assert "aws_apprunner_service" not in prompt
+
+
+def test_repair_prompt_treats_provider_schema_errors_as_dynamic_constraints():
+    provider_error = (
+        'Error: expected image_identifier to match regex "^public.ecr.aws/.+", '
+        "got ghcr.io/example/app:latest"
+    )
+    prompt = build_generation_prompt(
+        intent=_intent(),
+        change_plan=_plan(),
+        repo_patterns=RepoPatterns(),
+        ruleset=None,
+        target_repo="time4116/iac-smith-demo-infra",
+        repair_errors=[provider_error],
+        previous_content='image_identifier = "ghcr.io/example/app:latest"\n',
+    )
+
+    assert "expected image_identifier to match regex" in prompt
+    assert "ghcr.io/example/app:latest" in prompt
+    assert "schema constraints as the source of truth" in prompt
+    assert "exact regex, enum, type, range" in prompt
+    assert "Do not special-case one AWS service" in prompt
 
 
 def test_generation_prompt_includes_existing_file_content_when_provided():
