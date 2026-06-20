@@ -177,10 +177,92 @@ def test_runtime_plan_runs_terragrunt_plan_against_local_state_when_enabled(
     assert result.passed
     commands = [call[0] for call in calls]
     assert any(command[:2] == ["terragrunt", "plan"] for command in commands)
-    assert any("terragrunt plan (local state) passed" in check for check in result.checks)
+    # The check names the literal command that ran, not just a generic label.
+    assert any(
+        "terragrunt plan" in check and "(local state)" in check for check in result.checks
+    )
+    assert any("`terragrunt plan" in check for check in result.checks)
     # The plan must run in a scratch copy, never the real repo path.
     plan_cwd = next(c[1] for c in calls if c[0][:2] == ["terragrunt", "plan"])
     assert str(tmp_path) not in str(plan_cwd)
+
+
+def _scaffold_two_stacks(tmp_path: Path) -> None:
+    for name in ("foundation", "ecs-fargate"):
+        (tmp_path / "modules" / name).mkdir(parents=True)
+        (tmp_path / "modules" / name / "main.tf").write_text('resource "null_resource" "x" {}\n')
+        (tmp_path / "environments" / "non-prod" / name).mkdir(parents=True)
+        (tmp_path / "environments" / "non-prod" / name / "terragrunt.hcl").write_text(
+            f'terraform {{ source = "../../../modules/{name}" }}\n'
+        )
+    (tmp_path / "environments" / "terragrunt.hcl").write_text(
+        'remote_state {\n  backend = "s3"\n'
+        '  config = { key = "${path_relative_to_include()}/terraform.tfstate" }\n}\n'
+    )
+
+
+def test_runtime_plan_runs_for_every_generated_stack_not_just_foundation(
+    monkeypatch, tmp_path: Path
+):
+    _scaffold_two_stacks(tmp_path)
+    monkeypatch.setenv("IAC_SMITH_RUNTIME_PLAN", "1")
+    monkeypatch.setattr(
+        "iac_smith.runtime_validation.shutil.which", lambda command: f"/bin/{command}"
+    )
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs.get("cwd")))
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("iac_smith.runtime_validation.subprocess.run", fake_run)
+
+    result = validate_generated_iac(tmp_path)
+
+    assert result.passed
+    plan_cwds = [str(cwd) for command, cwd in calls if command[:2] == ["terragrunt", "plan"]]
+    # Both stacks are planned, not just foundation.
+    assert sum(c.endswith("non-prod/foundation") for c in plan_cwds) == 1
+    assert sum(c.endswith("non-prod/ecs-fargate") for c in plan_cwds) == 1
+    # ...and both modules are validated.
+    validate_cwds = [str(cwd) for command, cwd in calls if command == ["terraform", "validate"]]
+    assert any(c.endswith("modules/foundation") for c in validate_cwds)
+    assert any(c.endswith("modules/ecs-fargate") for c in validate_cwds)
+    # The PR-facing checks name every stack that was planned.
+    assert any("environments/non-prod/foundation" in check for check in result.checks)
+    assert any("environments/non-prod/ecs-fargate" in check for check in result.checks)
+
+
+def test_runtime_plan_includes_grouped_stacks(monkeypatch, tmp_path: Path):
+    """Stacks nested under a group dir are discovered too, matching _is_stack_terragrunt."""
+    (tmp_path / "modules" / "api").mkdir(parents=True)
+    (tmp_path / "modules" / "api" / "main.tf").write_text('resource "null_resource" "x" {}\n')
+    grouped = tmp_path / "environments" / "non-prod" / "platform" / "api"
+    grouped.mkdir(parents=True)
+    (grouped / "terragrunt.hcl").write_text('terraform { source = "../../../../modules/api" }\n')
+    (tmp_path / "environments" / "terragrunt.hcl").write_text(
+        'remote_state {\n  backend = "s3"\n'
+        '  config = { key = "${path_relative_to_include()}/terraform.tfstate" }\n}\n'
+    )
+
+    monkeypatch.setenv("IAC_SMITH_RUNTIME_PLAN", "1")
+    monkeypatch.setattr(
+        "iac_smith.runtime_validation.shutil.which", lambda command: f"/bin/{command}"
+    )
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs.get("cwd")))
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("iac_smith.runtime_validation.subprocess.run", fake_run)
+
+    result = validate_generated_iac(tmp_path)
+
+    assert result.passed
+    plan_cwds = [str(cwd) for command, cwd in calls if command[:2] == ["terragrunt", "plan"]]
+    assert any(c.endswith("non-prod/platform/api") for c in plan_cwds)
+    assert any("environments/non-prod/platform/api" in check for check in result.checks)
 
 
 def test_runtime_plan_failure_blocks_pr_and_reports_error(monkeypatch, tmp_path: Path):

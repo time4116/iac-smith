@@ -32,3 +32,6 @@ def test_pr_body_uses_planned_environment_names_when_repo_patterns_override_inte
 
     assert "Target environments: dev, staging, prod" in body
     assert "Target environments: non-prod, prod" not in body
+    # Without runtime checks, only the security review group renders.
+    assert "**Security review**" in body
+    assert "**Terraform / Terragrunt validation**" not in body

@@ -313,13 +313,26 @@ File:
 Runs after merge to `main`.
 
 Responsibilities:
-- apply only the generated/changed live path, not the entire repo,
+- a `detect` job scopes the run to only the components whose files changed
+  (`bootstrap`, `foundation`, and individual workload stacks); a change to a shared
+  root config fans out to foundation and all stacks; a greenfield push (no
+  before-SHA) applies everything in dependency order,
+- a single `gate` job backed by a GitHub Environment holds the run for manual
+  approval before any AWS mutation, and only prompts when something will actually
+  apply,
+- apply only the changed live path(s), not the entire repo,
 - use GitHub Actions OIDC,
 - run formatting/validation checks,
 - run plan,
-- run `terragrunt apply -auto-approve`.
+- run `terragrunt apply` on the saved plan.
 
-The human approval step is PR review and merge. Once approved and merged, the target repo workflow should apply the infrastructure.
+Approval is two-step: PR review and merge, then the in-workflow Environment gate.
+The Environment's required reviewers are configured in the **target repo's
+Settings → Environments** (the workflow only references the environment by name);
+the gate is enforced once the target repo can use environment protection rules.
+
+Note: the run applies what changed, not its dependents — a foundation-only change
+does not automatically re-apply workload stacks that consume its outputs.
 
 IaC Smith itself must never apply infrastructure.
 
