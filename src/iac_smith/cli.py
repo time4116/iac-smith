@@ -13,7 +13,7 @@ from iac_smith.models.change_plan import ChangePlan
 from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
 from iac_smith.models.rules import Ruleset
-from iac_smith.nodes.pr_writer import branch_name_for_issue
+from iac_smith.nodes.pr_writer import branch_name_for_issue, build_pr_body
 from iac_smith.nodes.static_review import static_review_generated_files
 from iac_smith.runtime_validation import validate_generated_iac
 from iac_smith.services.github import (
@@ -336,6 +336,17 @@ def run_iac_smith(
                 raise
             result["generated_files"] = repaired_files
             apply_generated_files(repo_path, repaired_files)
+
+        # Surface the Terraform/Terragrunt checks IaC Smith actually ran (fmt,
+        # init, validate, local-state plan) in the PR body — these run after the
+        # graph built the initial body, so they are merged in here.
+        result["pr_body"] = build_pr_body(
+            issue_url=result["issue_url"],
+            intent=result["intent"],
+            change_plan=result["change_plan"],
+            validation=result["validation"],
+            runtime_checks=runtime_validation.checks,
+        )
 
     commit_message = f"feat: generate IaC for issue #{result['issue_number']}"
     _log("IaC Smith: committing generated files.")

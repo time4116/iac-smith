@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
+import pytest
+
 from iac_smith.models.validation import ValidationStatus
 from iac_smith.nodes.static_review import (
+    _DANGEROUS_PORTS,
+    _NAMED_RESOURCE_TYPES,
+    _SECURITY_CHECKS_PERFORMED,
+    _SINGLETON_RESOURCE_TYPES,
+    _apply_workflow_errors,
+    _contains_dangerous_public_ingress,
     _find_cross_file_duplicates,
     _find_duplicate_named_resources,
     _find_redacted_placeholders,
@@ -208,7 +216,11 @@ class TestStaticReviewIntegration:
         }
         result = static_review_generated_files(files)
         assert result.status == ValidationStatus.PASSED
-        assert any("Static security review passed" in c for c in result.checks)
+        # The check list enumerates the actual security checks performed, not a
+        # single opaque "passed" line.
+        assert result.checks == list(_SECURITY_CHECKS_PERFORMED)
+        assert any("hardcoded secrets" in c for c in result.checks)
+        assert any("manual-approval" in c for c in result.checks)
 
     def test_warnings_produce_partial_status_with_check_entry(self) -> None:
         files = {
@@ -220,7 +232,7 @@ class TestStaticReviewIntegration:
         result = static_review_generated_files(files)
         assert result.status == ValidationStatus.PARTIAL
         assert result.warnings
-        assert any("Static security review passed" in c for c in result.checks)
+        assert result.checks == list(_SECURITY_CHECKS_PERFORMED)
 
 
 class TestRedactedPlaceholders:
@@ -415,35 +427,29 @@ class TestTerragruntDependencyOutputMismatches:
 
 
 class TestDuplicateNamedResources:
-    def test_duplicate_provider_names_across_arbitrary_modules(self) -> None:
-        examples = [
-            ("aws_security_group", "api", "${var.environment}-shared-api"),
-            ("aws_iam_role", "processor", "${var.environment}-worker-role"),
-            ("aws_cloudwatch_log_group", "logs", "/aws/app/shared"),
-            ("aws_lb_target_group", "http", "${var.environment}-http-tg"),
-        ]
+    # Drive the check from the code's own set so every named resource type — and
+    # any type added to it later — is covered, not just a hand-picked subset.
+    @pytest.mark.parametrize("resource_type", sorted(_NAMED_RESOURCE_TYPES))
+    def test_duplicate_provider_names_flagged_for_every_named_type(
+        self, resource_type: str
+    ) -> None:
+        provider_name = "${var.environment}-shared"
+        files = {
+            "modules/service-a/main.tf": (
+                f'resource "{resource_type}" "this" {{\n  name = "{provider_name}"\n}}\n'
+            ),
+            "modules/service-b/main.tf": (
+                f'resource "{resource_type}" "this" {{\n  name = "{provider_name}"\n}}\n'
+            ),
+        }
 
-        for resource_type, resource_name, provider_name in examples:
-            files = {
-                "modules/service-a/main.tf": (
-                    f'resource "{resource_type}" "{resource_name}" {{\n'
-                    f'  name = "{provider_name}"\n'
-                    "}\n"
-                ),
-                "modules/service-b/main.tf": (
-                    f'resource "{resource_type}" "{resource_name}" {{\n'
-                    f'  name = "{provider_name}"\n'
-                    "}\n"
-                ),
-            }
+        errors = _find_duplicate_named_resources(files)
 
-            errors = _find_duplicate_named_resources(files)
-
-            assert len(errors) == 1
-            assert resource_type in errors[0]
-            assert provider_name in errors[0]
-            assert "modules/service-a/main.tf" in errors[0]
-            assert "modules/service-b/main.tf" in errors[0]
+        assert len(errors) == 1
+        assert resource_type in errors[0]
+        assert provider_name in errors[0]
+        assert "modules/service-a/main.tf" in errors[0]
+        assert "modules/service-b/main.tf" in errors[0]
 
     def test_distinct_provider_names_allowed_across_arbitrary_modules(self) -> None:
         files = {
@@ -483,37 +489,37 @@ class TestDuplicateNamedResources:
 
 
 class TestSingletonResourceDuplication:
-    def test_vpc_in_multiple_modules_fails_review(self) -> None:
-        """aws_vpc in two unrelated modules signals a broken foundation boundary."""
+    # Drive from the code's own set: every singleton-owned resource type — and any
+    # added later — must be flagged when declared in more than one module.
+    @pytest.mark.parametrize("resource_type", sorted(_SINGLETON_RESOURCE_TYPES))
+    def test_singleton_in_multiple_modules_flagged(self, resource_type: str) -> None:
+        """A singleton-owned resource in two unrelated modules breaks the foundation boundary."""
         files = {
-            "modules/network/main.tf": ('resource "aws_vpc" "this" { cidr_block = "10.0.0.0/16" }'),
-            "modules/rds-postgres/main.tf": (
-                'resource "aws_vpc" "this" { cidr_block = "10.1.0.0/16" }'
-            ),
+            "modules/network/main.tf": f'resource "{resource_type}" "this" {{}}',
+            "modules/rds-postgres/main.tf": f'resource "{resource_type}" "this" {{}}',
         }
         errors = _find_singleton_resource_duplication(files)
-        assert any("aws_vpc" in e for e in errors)
+        assert any(resource_type in e for e in errors)
         assert any("`modules/network`" in e for e in errors)
         assert any("`modules/rds-postgres`" in e for e in errors)
 
-    def test_static_review_warns_on_vpc_in_foundation_and_workload(self) -> None:
-        # Two modules each declaring aws_vpc is a broken foundation boundary, but
+    @pytest.mark.parametrize("resource_type", sorted(_SINGLETON_RESOURCE_TYPES))
+    def test_static_review_warns_on_singleton_in_foundation_and_workload(
+        self, resource_type: str
+    ) -> None:
+        # A singleton resource in two modules is a broken foundation boundary, but
         # both validate fine in isolation — Terraform won't catch it. It is an
         # advisory warning for the reviewer, not a blocking error.
         files = {
-            "modules/foundation/main.tf": (
-                'resource "aws_vpc" "this" { cidr_block = "10.0.0.0/16" }'
-            ),
-            "modules/ecs-fargate-stack/main.tf": (
-                'resource "aws_vpc" "this" { cidr_block = "10.1.0.0/16" }'
-            ),
+            "modules/foundation/main.tf": f'resource "{resource_type}" "this" {{}}',
+            "modules/ecs-fargate-stack/main.tf": f'resource "{resource_type}" "this" {{}}',
         }
 
         result = static_review_generated_files(files)
 
         assert result.status == ValidationStatus.PARTIAL
         assert not result.errors
-        assert any("aws_vpc" in w for w in result.warnings)
+        assert any(resource_type in w for w in result.warnings)
 
     def test_vpc_in_one_module_ok(self) -> None:
         files = {
@@ -533,3 +539,104 @@ class TestSingletonResourceDuplication:
             ),
         }
         assert _find_singleton_resource_duplication(files) == []
+
+
+_APPLY_PATH = ".github/workflows/terraform-apply.yml"
+
+# A trimmed but structurally complete apply workflow: scoped by a `detect` job,
+# gated behind an `environment:`, triggered only on push to main.
+_GOOD_APPLY_WORKFLOW = (
+    "on:\n"
+    "  push:\n"
+    "    branches:\n"
+    "      - main\n"
+    "jobs:\n"
+    "  detect:\n"
+    "    runs-on: ubuntu-latest\n"
+    "    outputs:\n"
+    "      any: ${{ steps.scan.outputs.any }}\n"
+    "  gate:\n"
+    "    needs: detect\n"
+    "    environment: non-prod\n"
+    "    runs-on: ubuntu-latest\n"
+    "  apply-foundation:\n"
+    "    needs: [detect, gate]\n"
+    "    if: ${{ needs.detect.outputs.foundation == 'true' }}\n"
+    "    runs-on: ubuntu-latest\n"
+)
+
+
+class TestApplyWorkflowGuards:
+    def test_good_workflow_has_no_errors(self) -> None:
+        assert _apply_workflow_errors(_APPLY_PATH, _GOOD_APPLY_WORKFLOW) == []
+
+    def test_pull_request_trigger_flagged(self) -> None:
+        content = _GOOD_APPLY_WORKFLOW + "  pull_request:\n    branches: [main]\n"
+        errors = _apply_workflow_errors(_APPLY_PATH, content)
+        assert any("must not run on pull requests" in e for e in errors)
+
+    def test_missing_main_branch_filter_flagged(self) -> None:
+        content = _GOOD_APPLY_WORKFLOW.replace("      - main\n", "      - release\n")
+        errors = _apply_workflow_errors(_APPLY_PATH, content)
+        assert any("limited to main or master" in e for e in errors)
+
+    def test_missing_environment_gate_flagged(self) -> None:
+        content = _GOOD_APPLY_WORKFLOW.replace("    environment: non-prod\n", "")
+        errors = _apply_workflow_errors(_APPLY_PATH, content)
+        assert any("manual approval" in e and "environment:" in e for e in errors)
+
+    def test_missing_change_scoping_flagged(self) -> None:
+        # Strip the detect-output guard: the run no longer scopes to changed components.
+        content = _GOOD_APPLY_WORKFLOW.replace(
+            "    if: ${{ needs.detect.outputs.foundation == 'true' }}\n", ""
+        ).replace("      any: ${{ steps.scan.outputs.any }}\n", "")
+        errors = _apply_workflow_errors(_APPLY_PATH, content)
+        assert any("scope the run to changed components" in e for e in errors)
+
+    def test_non_apply_workflow_ignored(self) -> None:
+        pr_check = ".github/workflows/terraform-pr-check.yml"
+        assert _apply_workflow_errors(pr_check, "on: pull_request") == []
+
+
+def _ingress_rule(port: int, cidr_attr: str) -> str:
+    return (
+        'resource "aws_security_group" "x" {\n'
+        "  ingress {\n"
+        f"    from_port = {port}\n"
+        f"    to_port   = {port}\n"
+        '    protocol  = "tcp"\n'
+        f"    {cidr_attr}\n"
+        "  }\n"
+        "}\n"
+    )
+
+
+# Every public-internet CIDR form the regexes recognize (both legacy bracket
+# blocks and the newer single-value rule attributes, IPv4 and IPv6).
+_PUBLIC_CIDR_FORMS = [
+    'cidr_blocks = ["0.0.0.0/0"]',
+    'cidr_ipv4 = "0.0.0.0/0"',
+    'ipv6_cidr_blocks = ["::/0"]',
+    'cidr_ipv6 = "::/0"',
+]
+
+
+class TestDangerousPublicIngress:
+    # Drive from the code's own port set so every sensitive port — and any added
+    # later — is covered, not just SSH/22.
+    @pytest.mark.parametrize("port", sorted(_DANGEROUS_PORTS))
+    def test_every_dangerous_port_open_to_public_is_flagged(self, port: int) -> None:
+        assert _contains_dangerous_public_ingress(_ingress_rule(port, _PUBLIC_CIDR_FORMS[0]))
+
+    @pytest.mark.parametrize("cidr_attr", _PUBLIC_CIDR_FORMS)
+    def test_every_public_cidr_form_is_recognized(self, cidr_attr: str) -> None:
+        port = min(_DANGEROUS_PORTS)
+        assert _contains_dangerous_public_ingress(_ingress_rule(port, cidr_attr))
+
+    def test_safe_port_open_to_public_is_not_flagged(self) -> None:
+        # 443 is not a sensitive port — public HTTPS ingress is expected.
+        assert not _contains_dangerous_public_ingress(_ingress_rule(443, _PUBLIC_CIDR_FORMS[0]))
+
+    def test_dangerous_port_with_restricted_cidr_is_not_flagged(self) -> None:
+        rule = _ingress_rule(min(_DANGEROUS_PORTS), 'cidr_blocks = ["10.0.0.0/8"]')
+        assert not _contains_dangerous_public_ingress(rule)

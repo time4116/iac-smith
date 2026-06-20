@@ -16,6 +16,9 @@ Current hard checks include:
 * generated Terragrunt remote state keys must not be fixed shared values;
 * generated Terraform should flag clearly dangerous public ingress for administrative or database ports in PR review warnings;
 * generated module READMEs should include terraform-docs markers;
-* generated module files must not reference `module.x` unless that module is declared in the same generated module.
+* generated module files must not reference `module.x` unless that module is declared in the same generated module;
+* the same AWS provider-level resource `name` must not be declared for the same resource type in two modules — this is an apply-time collision (e.g. an ALB or ECS-tasks security group duplicated across `foundation` and a workload module) that Terraform's per-module validation cannot catch, so it blocks PR creation;
+* the generated apply workflow must trigger only on push to `main`, gate apply behind a manual-approval `environment:`, and scope the run to the components that changed;
+* structural checks — duplicate declarations across a module's files, undeclared `var.`/`module.` references, missing required Terragrunt inputs (a no-default module variable the stack never passes), and dependency-output mismatches — are surfaced for review and fed to the bounded repair loop rather than blocking; the real `terraform`/`terragrunt` validation is the correctness gate.
 
 Ruleset text remains prompt guidance for broader design choices, but prompt-only enforcement is not enough for safety-critical rules. Add a deterministic static review or validation test whenever a generation failure can be recognized mechanically.

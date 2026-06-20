@@ -144,13 +144,19 @@ def test_run_iac_smith_repairs_runtime_validation_failures_before_pr(tmp_path: P
     pr_client = FakePullRequestClient()
 
     class ValidationResult:
-        def __init__(self, passed: bool, errors: list[str] | None = None):
+        def __init__(
+            self,
+            passed: bool,
+            errors: list[str] | None = None,
+            checks: list[str] | None = None,
+        ):
             self.passed = passed
             self.errors = errors or []
+            self.checks = checks or []
 
     validation_results = [
         ValidationResult(False, ["terraform validate failed: invalid cidr_block"]),
-        ValidationResult(True),
+        ValidationResult(True, checks=["terraform validate modules/vpc-foundation passed."]),
     ]
 
     def fake_validate(repo_path, **kwargs):

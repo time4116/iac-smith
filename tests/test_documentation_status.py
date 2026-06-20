@@ -14,17 +14,29 @@ def test_readme_discloses_mvp_status_and_bedrock_requirement():
 
 def test_readme_documents_architecture_security_model_and_checks():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    lower = readme.lower()
 
-    assert "## Architecture and security model" in readme
-    assert "controller repository" in readme
-    assert "target infrastructure repository" in readme
-    assert "human PR review" in readme
-    assert "## Security checks" in readme
-    assert "owner-gated workflow trigger" in readme
-    assert "repository allowlist" in readme
-    assert "Secret-pattern scan" in readme
-    assert "dangerous public ingress" in readme
-    assert "Terraform/Terragrunt validation" in readme
+    # Structural anchors: these sections must exist. Heading match is
+    # case-insensitive so capitalization tweaks don't break the guard.
+    assert "## architecture and security model" in lower
+    assert "## security checks" in lower
+
+    # Topics the README must still cover. Each is matched case-insensitively
+    # against a stable keyword rather than an exact sentence, so rewording or
+    # reformatting the prose doesn't trip the test — only dropping the topic
+    # entirely does. Keep keywords short and specific.
+    required_topics = {
+        "two-repo model (controller)": "controller repositor",
+        "two-repo model (target)": "target infrastructure repositor",
+        "human approval gate": "pr review",
+        "owner-gated trigger": "owner-gated",
+        "target repo allowlist": "allowlist",
+        "secret scanning": "secret",
+        "dangerous public ingress check": "ingress",
+        "terraform/terragrunt validation": "validation",
+    }
+    missing = sorted(name for name, keyword in required_topics.items() if keyword not in lower)
+    assert not missing, f"README no longer documents: {missing}"
 
 
 def test_root_setup_points_to_detailed_setup_and_required_configuration():

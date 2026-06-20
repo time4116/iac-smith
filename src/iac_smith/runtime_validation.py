@@ -29,10 +29,21 @@ def _run_check(command: list[str], cwd: Path, env: dict[str, str]) -> tuple[bool
 
 def _changed_roots(repo_path: Path) -> tuple[list[Path], list[Path]]:
     module_roots = sorted({path.parent for path in (repo_path / "modules").glob("*/*.tf")})
+
+    # A stack is any terragrunt.hcl nested at least one level below its
+    # environment dir (environments/<env>/<stack>/…). This matches
+    # static_review._is_stack_terragrunt, so grouped stacks like
+    # environments/<env>/<group>/<stack>/terragrunt.hcl are planned too — not just
+    # the flat two-level layout. The environment root config
+    # (environments/<env>/terragrunt.hcl) is excluded, and cache/hidden dirs are
+    # skipped so we never pick up a .terragrunt-cache copy.
+    env_dir = repo_path / "environments"
     terragrunt_stacks = sorted(
         path.parent
-        for path in (repo_path / "environments").glob("*/*/terragrunt.hcl")
+        for path in env_dir.rglob("terragrunt.hcl")
         if path.parent.is_dir()
+        and len((rel := path.relative_to(env_dir)).parts) >= 3
+        and not any(part.startswith(".") for part in rel.parts)
     )
     return module_roots, terragrunt_stacks
 
@@ -129,8 +140,13 @@ def _force_local_state(scratch_root: Path) -> None:
             cfg.write_text(stripped)
 
 
-def _run_local_state_plans(root: Path, env: dict[str, str], non_interactive: str) -> list[str]:
-    """Run ``terragrunt plan`` per stack against local state, returning any errors.
+def _run_local_state_plans(
+    root: Path, env: dict[str, str], non_interactive: str
+) -> tuple[list[str], list[str]]:
+    """Run ``terragrunt plan`` per stack against local state.
+
+    Returns ``(passed_checks, errors)`` where each passed check names the literal
+    command and stack it ran in.
 
     Plan-only — never apply — so no infrastructure is created.  Stacks are copied
     into a temp tree whose root remote_state is rewritten to a local backend, so
@@ -140,8 +156,10 @@ def _run_local_state_plans(root: Path, env: dict[str, str], non_interactive: str
     """
     _, terragrunt_stacks = _changed_roots(root)
     if not terragrunt_stacks:
-        return []
+        return [], []
 
+    plan_command = ["terragrunt", "plan", non_interactive, "-input=false"]
+    checks: list[str] = []
     errors: list[str] = []
     with tempfile.TemporaryDirectory(prefix="iac-smith-plan-") as tmp:
         scratch = Path(tmp) / "repo"
@@ -154,16 +172,15 @@ def _run_local_state_plans(root: Path, env: dict[str, str], non_interactive: str
         )
         _force_local_state(scratch)
         for stack in terragrunt_stacks:
+            rel = stack.relative_to(root).as_posix()
             stack_dir = scratch / stack.relative_to(root)
-            label = f"terragrunt plan {stack.relative_to(root)}"
-            ok, output = _run_check(
-                ["terragrunt", "plan", non_interactive, "-input=false"], stack_dir, env
-            )
+            ok, output = _run_check(plan_command, stack_dir, env)
             if ok:
+                checks.append(f"`{' '.join(plan_command)}` in `{rel}` (local state)")
                 continue
-            errors.append(f"{label} failed in `{stack.relative_to(root)}`:\n{output}")
+            errors.append(f"terragrunt plan {rel} failed in `{rel}`:\n{output}")
             break
-    return errors
+    return checks, errors
 
 
 def validate_generated_iac(
@@ -238,8 +255,10 @@ def validate_generated_iac(
 
     for label, command, cwd in command_specs:
         ok, output = _run_check(command, cwd, env)
+        where = cwd.relative_to(root).as_posix()
+        location = "repo root" if where == "." else f"`{where}`"
         if ok:
-            checks.append(f"{label} passed.")
+            checks.append(f"`{' '.join(command)}` in {location}")
             continue
         errors.append(f"{label} failed in `{cwd.relative_to(root)}`:\n{output}")
         break
@@ -249,10 +268,10 @@ def validate_generated_iac(
     # the repair loop before a PR is opened. Opt-in: the controller's AWS role
     # must have read/describe permissions for the providers being planned.
     if not errors and env.get("IAC_SMITH_RUNTIME_PLAN") == "1":
-        plan_errors = _run_local_state_plans(root, env, non_interactive)
+        plan_checks, plan_errors = _run_local_state_plans(root, env, non_interactive)
         if plan_errors:
             errors.extend(plan_errors)
         else:
-            checks.append("terragrunt plan (local state) passed.")
+            checks.extend(plan_checks)
 
     return RuntimeValidationResult(passed=not errors, checks=checks, errors=errors)

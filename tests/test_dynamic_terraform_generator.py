@@ -170,6 +170,9 @@ def test_generation_prompt_contains_rules_repo_patterns_and_requested_paths():
     assert "top-level key listed" in prompt
     assert "Nested object keys are not inputs" in prompt
     assert "preserve existing" in prompt
+    # Module READMEs must carry terraform-docs markers (canonical shape + rule).
+    assert "<!-- BEGIN_TF_DOCS -->" in prompt
+    assert "<!-- END_TF_DOCS -->" in prompt
 
 
 def test_generation_prompt_includes_existing_file_content_when_provided():
@@ -989,7 +992,9 @@ class TestBuildApplyWorkflow:
         content = _build_apply_workflow(plan)
 
         assert "working-directory: environments/non-prod/${{ matrix.stack }}" in content
-        assert "stack: [ecs-fargate]" in content
+        # The matrix is driven by the detect job; the stack list flows through its env.
+        assert "stack: ${{ fromJson(needs.detect.outputs.stacks) }}" in content
+        assert 'WORKLOAD_STACKS: "ecs-fargate"' in content
         assert "ecs-fargate-stack" not in content
 
     def test_apply_workflow_has_foundation_job_when_foundation_in_plan(self):
@@ -1032,7 +1037,9 @@ class TestBuildApplyWorkflow:
 
         assert "apply-workloads:" in content
         assert "strategy:" in content
-        assert "stack: [api, batch]" in content
+        # Workloads run as a single matrix job scoped to the stacks the detect job found.
+        assert "stack: ${{ fromJson(needs.detect.outputs.stacks) }}" in content
+        assert 'WORKLOAD_STACKS: "api batch"' in content
         assert "working-directory: environments/non-prod/${{ matrix.stack }}" in content
         assert "apply-api:" not in content
         assert "apply-batch:" not in content
@@ -1044,6 +1051,40 @@ class TestBuildApplyWorkflow:
         assert "role-to-assume: ${{ secrets.AWS_ROLE_ARN_NON_PROD }}" in content
         assert "AWS_ACCESS_KEY_ID" not in content
         assert "AWS_SECRET_ACCESS_KEY" not in content
+
+    def test_apply_workflow_has_change_detect_job(self):
+        plan = self._plan_with_foundation_and_stack("ecs-fargate")
+        content = _build_apply_workflow(plan)
+
+        assert "  detect:" in content
+        # Greenfield (no before-SHA) applies everything; otherwise diff the push range.
+        assert "git ls-files environments modules bootstrap" in content
+        assert 'git diff --name-only "$BEFORE" "$SHA"' in content
+        # The workload matrix is driven by the components the detect job found changed.
+        assert "stack: ${{ fromJson(needs.detect.outputs.stacks) }}" in content
+
+    def test_apply_jobs_are_scoped_to_changed_components(self):
+        plan = self._plan_with_foundation_and_stack("ecs-fargate")
+        content = _build_apply_workflow(plan)
+
+        assert "needs.detect.outputs.bootstrap == 'true'" in content
+        assert "needs.detect.outputs.foundation == 'true'" in content
+        assert "needs.detect.outputs.stacks != '[]'" in content
+        # Skipped upstream jobs must not cancel independent downstream applies.
+        assert "always()" in content
+
+    def test_apply_workflow_has_single_approval_gate(self):
+        plan = self._plan_with_foundation_and_stack("ecs-fargate")
+        content = _build_apply_workflow(plan)
+
+        assert "  gate:" in content
+        assert "    environment: non-prod" in content
+        # Exactly one environment gate covers the whole run — not one per apply job.
+        assert content.count("environment:") == 1
+        # The gate only prompts when something will actually apply.
+        assert "needs.detect.outputs.any == 'true'" in content
+        # Every apply job waits on the gate before any AWS mutation.
+        assert "needs.gate.result == 'success'" in content
 
     def test_workflow_overrides_model_generated_content(self):
         """generate_files must replace model workflow content with deterministic version."""

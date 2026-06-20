@@ -65,6 +65,17 @@ def _apply_workflow_errors(path: str, content: str) -> list[str]:
         errors.append(
             f"Terraform apply workflow `{path}` push trigger must be limited to main or master."
         )
+    if not re.search(r"^\s*environment\s*:", content, re.MULTILINE):
+        errors.append(
+            f"Terraform apply workflow `{path}` must gate apply behind a manual approval "
+            f"`environment:` so merging to main never auto-applies without sign-off."
+        )
+    if "needs.detect.outputs" not in content:
+        errors.append(
+            f"Terraform apply workflow `{path}` must scope the run to changed components "
+            f"via a `detect` job (apply jobs gate on `needs.detect.outputs.*`) so an "
+            f"unrelated push never re-applies unchanged live infrastructure."
+        )
     return errors
 
 
@@ -610,6 +621,24 @@ def _contains_dangerous_public_ingress(content: str) -> bool:
     return bool(ports & _DANGEROUS_PORTS)
 
 
+# Human-readable description of each blocking security/safety check this review
+# enforces. Surfaced in the PR body so reviewers see exactly what was verified
+# rather than a single opaque "passed" line. Keep in sync with the error-tier
+# checks below.
+_SECURITY_CHECKS_PERFORMED = (
+    "No hardcoded secrets or AWS credentials (access keys, private keys, "
+    "password/token/secret literals) in any generated file.",
+    "No `***` redaction artifacts left in generated workflow files.",
+    "Apply workflow runs only on push to `main` — never on pull requests or feature branches.",
+    "Apply is gated behind a manual-approval `environment:` and scoped to the "
+    "components that actually changed, so merging never auto-applies unrelated infra.",
+    "Terragrunt remote-state keys are namespaced with `path_relative_to_include()` "
+    "so stacks cannot overwrite each other's state.",
+    "No duplicate provider-level resource names across modules (prevents "
+    "apply-time collisions Terraform's per-module validation cannot catch).",
+)
+
+
 def static_review_generated_files(generated_files: dict[str, str]) -> ValidationResult:
     # Three tiers:
     #   errors      — security/safety. These BLOCK PR creation; real Terraform
@@ -680,7 +709,7 @@ def static_review_generated_files(generated_files: dict[str, str]) -> Validation
         status = ValidationStatus.PASSED
 
     if not errors:
-        checks.append("Static security review passed.")
+        checks.extend(_SECURITY_CHECKS_PERFORMED)
 
     return ValidationResult(
         status=status,

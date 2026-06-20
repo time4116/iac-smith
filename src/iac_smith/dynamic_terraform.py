@@ -263,6 +263,7 @@ include "root" {
 # Redeclare any values you need from the parent in this locals {} block.
 locals {
   environment = "non-prod"
+  aws_region  = "us-east-1"
 }
 
 terraform {
@@ -285,9 +286,25 @@ dependency "foundation" {
 
 inputs = {
   environment        = local.environment
+  aws_region         = local.aws_region   # pass EVERY required (no-default) module variable
   vpc_id             = dependency.foundation.outputs.vpc_id
   private_subnet_ids = dependency.foundation.outputs.private_subnet_ids
 }
+```
+
+--- modules/<stack>/README.md (every module README MUST include the terraform-docs marker pair) ---
+```markdown
+# <stack>
+
+One- or two-sentence description of what this module provisions.
+
+## Usage
+
+This module is consumed through its Terragrunt stack under `environments/<env>/<stack>/`.
+
+<!-- BEGIN_TF_DOCS -->
+<!-- terraform-docs fills in inputs/outputs/providers here; leave this block empty -->
+<!-- END_TF_DOCS -->
 ```
 
 --- .github/workflows/terraform-pr-check.yml (trigger paths and working-dirs must match files_to_generate exactly) ---
@@ -441,10 +458,20 @@ IMPORTANT for terraform-apply.yml:
   or `terragrunt plan --non-interactive -lock-timeout=20m -out=tfplan`) and apply
   that exact plan file. Do not run blind `terragrunt apply --auto-approve` without
   a preceding plan step.
-- The `bootstrap` job runs first and is idempotent — it imports existing S3/DynamoDB resources
+- The `bootstrap` job is idempotent — it imports existing S3/DynamoDB resources
   before planning/applying so the workflow is safe to run on ephemeral CI runners without persisted state.
+- A `detect` job runs first and diffs the push range to scope the run: `bootstrap`,
+  `apply-foundation`, and the workload matrix each run only when their files changed
+  (greenfield pushes apply everything). Downstream applies guard with
+  `if: always() && ...` so a skipped upstream job does not cancel them.
+- A single `gate` job (`environment:`) sits between `detect` and the apply jobs to
+  require manual approval before any AWS mutation. Do not add `environment:` to the
+  individual apply jobs — one gate covers the run.
 - Always use `secrets.AWS_ROLE_ARN_NON_PROD` — never `AWS_ROLE_TO_ASSUME` or `AWS_ROLE_ARN`.
 - Only trigger on branch `main`, not `master`.
+
+This workflow file is normalized deterministically after generation, so match this
+structure but small deviations are corrected automatically.
 """
 
 
@@ -555,16 +582,21 @@ Non-negotiable rules:
 * Prefer secure AWS defaults: private networking, encryption, least privilege,
   no dangerous public ingress.
 * If a request needs both networking/foundation and a workload, split ownership
-  cleanly. `modules/foundation` may create only shared network primitives such
-  as VPC, subnets, route tables, NAT/IGW, and explicitly shared network-boundary
-  security groups that downstream stacks consume. It must NOT create workload
-  security groups, ALBs, target groups/listeners, CloudWatch log groups, ECS
-  clusters, task definitions, ECS services, or workload IAM. Those belong in the
-  workload module, which consumes `modules/foundation` outputs through
-  Terragrunt dependency inputs. Never generate the same AWS provider-level
-  resource `name` for the same resource type in both foundation and workload
-  modules; that creates apply-time name collisions Terraform module validation
-  cannot catch.
+  cleanly. `modules/foundation` owns ONLY shared network primitives: VPC,
+  subnets, route tables, NAT/IGW. Every security group is a WORKLOAD resource —
+  ALB security groups, ECS task/service security groups, and database security
+  groups all belong in the workload module, declared exactly ONCE there,
+  referencing `dependency.foundation.outputs.vpc_id` for their `vpc_id`. So an
+  `aws_security_group` named `${{var.environment}}-alb-sg` or
+  `${{var.environment}}-ecs-tasks-sg` MUST appear in `modules/ecs-fargate` only,
+  never also in `modules/foundation`. Foundation must likewise NOT create ALBs,
+  target groups/listeners, CloudWatch log groups, ECS clusters, task
+  definitions, ECS services, or workload IAM. Never declare the same AWS
+  provider-level resource `name` for the same resource type in two modules; that
+  is an apply-time name collision Terraform's per-module validation cannot catch.
+  If foundation genuinely must own a security group that several workloads
+  share, declare it once in foundation, expose its id via an `output`, and have
+  each workload consume that id — do not re-declare the group in any workload.
 * If a workload stack depends on foundation outputs for VPC/subnets/security
   groups, do not reference module.vpc unless that same module declares
   module "vpc". In Terragrunt, every `dependency.foundation.outputs.<name>`
@@ -585,6 +617,11 @@ Non-negotiable rules:
 * When files_to_generate includes both a `main.tf` and a `variables.tf`
   for the same module, put variables in `variables.tf` only, not in
   `main.tf`. Same rule applies to outputs.tf and versions.tf.
+* Every generated `modules/<stack>/README.md` MUST contain the terraform-docs
+  marker pair `<!-- BEGIN_TF_DOCS -->` and `<!-- END_TF_DOCS -->` (on their own
+  lines, in that order) so terraform-docs can populate the inputs/outputs table.
+  A module README without both markers is incomplete — follow the canonical
+  README shape below.
 * When files_to_generate contains one path, return exactly that one file path
   in files. Use the full change_plan and repo_patterns as context, but do not
   include sibling planned files in the response.
@@ -641,10 +678,14 @@ Non-negotiable rules:
   (any variable without a `default =`) must be passed by the corresponding
   Terragrunt stack's `inputs = {{}}` block; otherwise non-interactive plan/apply
   will fail. If a variable should not be passed by Terragrunt, give it an
-  explicit safe default. When repairing variables.tf, preserve existing valid
-  variable declarations and append missing ones; do not replace the file with
-  only the newly mentioned variables. Missing any one variable will fail
-  `terraform validate` or live Terragrunt plan/apply.
+  explicit safe default. Commonly-forgotten required inputs are `aws_region` and
+  other root values: if the module declares `variable "aws_region"` without a
+  default, the stack MUST pass `aws_region = local.aws_region` (redeclared in the
+  stack's own `locals {{}}` since parent locals are not accessible), exactly as
+  the canonical stack template shows. When repairing variables.tf,
+  preserve existing valid variable declarations and append missing ones; do not
+  replace the file with only the newly mentioned variables. Missing any one
+  variable will fail `terraform validate` or live Terragrunt plan/apply.
 {_CANONICAL_FILE_SHAPES}{sibling_section}{existing_section}{repair_section}
 Generation context JSON:
 {json.dumps(context, indent=2)}
@@ -828,8 +869,108 @@ def _build_pr_check_workflow(change_plan: ChangePlan) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _change_detect_job(workload_modules: list[str]) -> list[str]:
+    """Build the `detect` job that scopes apply to the components that changed.
+
+    It diffs the push range (`github.event.before`..`github.sha`) and emits, per
+    component, whether it changed. A change to a shared root config
+    (`environments/**/terragrunt.hcl`) fans out to foundation and every workload
+    stack. When the before-SHA is missing/zero (first push) it treats every
+    tracked infra file as changed so greenfield applies everything.
+    """
+    stack_list = " ".join(workload_modules)
+    return [
+        "  detect:",
+        "    name: Detect changed components",
+        "    runs-on: ubuntu-latest",
+        "    outputs:",
+        "      any: ${{ steps.scan.outputs.any }}",
+        "      bootstrap: ${{ steps.scan.outputs.bootstrap }}",
+        "      foundation: ${{ steps.scan.outputs.foundation }}",
+        "      stacks: ${{ steps.scan.outputs.stacks }}",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "        with:",
+        "          fetch-depth: 0",
+        "      - name: Scan changed paths",
+        "        id: scan",
+        "        env:",
+        "          BEFORE: ${{ github.event.before }}",
+        "          SHA: ${{ github.sha }}",
+        f'          WORKLOAD_STACKS: "{stack_list}"',
+        "        run: |",
+        "          set -euo pipefail",
+        '          if [ -z "${BEFORE:-}" ] || [ "$BEFORE" = '
+        '"0000000000000000000000000000000000000000" ]'
+        ' || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then',
+        "            CHANGED=$(git ls-files environments modules bootstrap)",
+        "          else",
+        '            CHANGED=$(git diff --name-only "$BEFORE" "$SHA")',
+        "          fi",
+        "          printf 'Changed files:\\n%s\\n' \"$CHANGED\"",
+        '          changed() { grep -qE "$1" <<< "$CHANGED"; }',
+        "          bootstrap=false",
+        "          foundation=false",
+        "          root=false",
+        "          if changed '^bootstrap/'; then bootstrap=true; fi",
+        "          if changed '^environments/terragrunt\\.hcl$'"
+        " || changed '^environments/[^/]+/terragrunt\\.hcl$'; then root=true; fi",
+        "          if changed '^modules/foundation/'"
+        " || changed '^environments/[^/]+/foundation/'; then foundation=true; fi",
+        '          if [ "$root" = true ]; then foundation=true; fi',
+        "          stack_args=()",
+        "          for s in ${WORKLOAD_STACKS}; do",
+        '            if [ "$root" = true ] || changed "^modules/${s}/"'
+        ' || changed "^environments/[^/]+/${s}/"; then',
+        '              stack_args+=("$s")',
+        "            fi",
+        "          done",
+        "          if [ ${#stack_args[@]} -eq 0 ]; then",
+        '            stacks="[]"',
+        "          else",
+        "            stacks=$(printf '%s\\n' \"${stack_args[@]}\" | python3 -c"
+        ' "import sys,json;'
+        ' print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))")',
+        "          fi",
+        "          any=false",
+        '          if [ "$bootstrap" = true ] || [ "$foundation" = true ]'
+        ' || [ "$stacks" != "[]" ]; then any=true; fi',
+        "          {",
+        '            echo "bootstrap=$bootstrap"',
+        '            echo "foundation=$foundation"',
+        '            echo "stacks=$stacks"',
+        '            echo "any=$any"',
+        '          } >> "$GITHUB_OUTPUT"',
+    ]
+
+
+def _gate_environment_job(env: str) -> list[str]:
+    """Single manual-approval checkpoint for the whole apply run.
+
+    `environment:` references a GitHub Environment; the apply only proceeds once a
+    required reviewer approves it in the target repo. It runs only when `detect`
+    found something to apply, so unrelated pushes never prompt for approval.
+    """
+    return [
+        "  gate:",
+        "    name: Approve apply",
+        "    needs: detect",
+        "    if: ${{ needs.detect.outputs.any == 'true' }}",
+        "    runs-on: ubuntu-latest",
+        f"    environment: {env}",
+        "    steps:",
+        '      - run: echo "Approved — applying only the changed components."',
+    ]
+
+
 def _build_apply_workflow(change_plan: ChangePlan) -> str:
-    """Build terraform-apply.yml deterministically from the actual module paths."""
+    """Build terraform-apply.yml deterministically from the actual module paths.
+
+    The run is scoped to the components whose files changed (`detect` job) and
+    routed through one manual approval (`gate` job backed by a GitHub Environment)
+    before any AWS mutation. Greenfield pushes apply every component in dependency
+    order. Skipped upstream jobs do not cancel independent downstream applies.
+    """
     module_names = _extract_module_names(change_plan.files_to_generate)
     bootstrap_envs = (
         _extract_bootstrap_envs(change_plan.files_to_generate)
@@ -855,8 +996,15 @@ def _build_apply_workflow(change_plan: ChangePlan) -> str:
         "  id-token: write",
         "",
         "jobs:",
+        *_change_detect_job(workload_modules),
+        "",
+        *_gate_environment_job(env),
+        "",
         "  bootstrap:",
         "    name: Bootstrap state backend",
+        "    needs: [detect, gate]",
+        "    if: ${{ always() && needs.gate.result == 'success'"
+        " && needs.detect.outputs.bootstrap == 'true' }}",
         "    runs-on: ubuntu-latest",
         "    steps:",
         "      - uses: actions/checkout@v4",
@@ -875,7 +1023,11 @@ def _build_apply_workflow(change_plan: ChangePlan) -> str:
             "",
             "  apply-foundation:",
             f"    name: Apply — {env}/foundation",
-            "    needs: bootstrap",
+            "    needs: [detect, gate, bootstrap]",
+            "    if: ${{ always() && needs.gate.result == 'success'"
+            " && needs.detect.outputs.foundation == 'true'"
+            " && needs.bootstrap.result != 'failure'"
+            " && needs.bootstrap.result != 'cancelled' }}",
             "    runs-on: ubuntu-latest",
             "    steps:",
             "      - uses: actions/checkout@v4",
@@ -886,18 +1038,26 @@ def _build_apply_workflow(change_plan: ChangePlan) -> str:
         ]
 
     if workload_modules:
-        needs = "apply-foundation" if has_foundation else "bootstrap"
-        matrix_stacks = ", ".join(workload_modules)
+        if has_foundation:
+            pred_job = "apply-foundation"
+            pred_ref = "needs['apply-foundation']"
+        else:
+            pred_job = "bootstrap"
+            pred_ref = "needs.bootstrap"
         lines += [
             "",
             "  apply-workloads:",
             f"    name: Apply — {env}/${{{{ matrix.stack }}}}",
-            f"    needs: {needs}",
+            f"    needs: [detect, gate, {pred_job}]",
+            "    if: ${{ always() && needs.gate.result == 'success'"
+            " && needs.detect.outputs.stacks != '[]'"
+            f" && {pred_ref}.result != 'failure'"
+            f" && {pred_ref}.result != 'cancelled' }}}}",
             "    runs-on: ubuntu-latest",
             "    strategy:",
             "      fail-fast: false",
             "      matrix:",
-            f"        stack: [{matrix_stacks}]",
+            "        stack: ${{ fromJson(needs.detect.outputs.stacks) }}",
             "    steps:",
             "      - uses: actions/checkout@v4",
             "      - uses: hashicorp/setup-terraform@v3",
