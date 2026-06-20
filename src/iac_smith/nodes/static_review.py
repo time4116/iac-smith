@@ -13,6 +13,18 @@ SECRET_PATTERNS = [
     re.compile(r"""(password|token|secret)\s*=\s*(?:"[^"]{6,}"|'[^']{6,}')""", re.IGNORECASE),
 ]
 
+# A literal string assigned to a field whose *name* implies a secret — e.g.
+# `WEBUI_SECRET_KEY = "change-me-in-production"`. The blocking patterns above miss
+# this because the key is only named like a secret (the `secret =` anchor needs
+# `secret` immediately before `=`). Surfaced as an advisory warning, not a block,
+# since an identifier merely containing "secret"/"token" is often a reference.
+_SECRET_LITERAL_RE = re.compile(
+    r"(?P<id>[A-Za-z0-9_]*(?:password|passwd|secret|token)[A-Za-z0-9_]*)\s*=\s*"
+    r'"(?P<val>[^"]{6,})"',
+    re.IGNORECASE,
+)
+_SECRET_REFERENCE_SUFFIXES = ("_arn", "_arns", "_id", "_ids", "_name", "_names", "_path")
+
 # Matches both old-style bracket form and newer aws_vpc_security_group_ingress_rule form.
 _CIDR_BLOCK_V4 = re.compile(
     r"cidr_blocks\s*=\s*\[[^\]]*0\.0\.0\.0/0"
@@ -667,6 +679,39 @@ def _find_terragrunt_dangling_dependencies(
     return errors
 
 
+def _find_hardcoded_secret_values(generated_files: dict[str, str]) -> list[str]:
+    """Flag literal string values assigned to secret-named fields (advisory).
+
+    Catches e.g. `WEBUI_SECRET_KEY = "change-me-in-production"` — a predictable
+    application secret baked into IaC that the blocking credential patterns miss
+    because the field is only *named* like a secret. Reference-style identifiers
+    (`*_arn`, `*_id`, `*_name`, ...) and ARN/URL/path literal values are skipped so
+    a secret reference is not mistaken for a secret value. Advisory only.
+    """
+    warnings: list[str] = []
+    for path, content in generated_files.items():
+        if path.endswith(".md"):
+            continue
+        seen: set[str] = set()
+        for match in _SECRET_LITERAL_RE.finditer(content):
+            ident = match.group("id")
+            value = match.group("val")
+            if ident.lower().endswith(_SECRET_REFERENCE_SUFFIXES):
+                continue
+            if value.startswith(("arn:", "/", "http://", "https://")):
+                continue
+            if ident in seen:
+                continue
+            seen.add(ident)
+            warnings.append(
+                f"`{path}` assigns a literal value to `{ident}`, which is named like a "
+                f"secret. Generate it with `random_password`, source it from AWS Secrets "
+                f"Manager/SSM, or declare a `sensitive` required variable — do not hardcode "
+                f"a literal (even a placeholder)."
+            )
+    return warnings
+
+
 def _find_singleton_resource_duplication(generated_files: dict[str, str]) -> list[str]:
     """Flag foundational resource types (e.g. aws_vpc) declared in multiple modules.
 
@@ -840,6 +885,7 @@ def static_review_generated_files(
 
     # Advisory only.
     warnings.extend(_find_singleton_resource_duplication(generated_files))
+    warnings.extend(_find_hardcoded_secret_values(generated_files))
 
     if errors:
         status = ValidationStatus.FAILED

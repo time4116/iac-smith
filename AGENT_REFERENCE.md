@@ -348,6 +348,7 @@ class ValidationResult(BaseModel):
 **PARTIAL (warnings, no block) if:**
 - Public ingress (0.0.0.0/0 or ::/0) to any of: SSH (22), RDP (3389), PostgreSQL (5432), MySQL (3306), MSSQL (1433), Redis (6379), MongoDB (27017)
 - Module README missing terraform-docs markers
+- A literal string assigned to a secret-named field (`*secret*`/`*password*`/`*token*`, e.g. `WEBUI_SECRET_KEY = "change-me"`). Reference-style identifiers (`*_arn`/`*_id`/`*_name`) and ARN/URL/path values are excluded. Advisory because the blocking credential patterns only match `secret =`/`password =` anchored directly before `=`, so a secret-*named* field with a suffix slips past them
 
 **Terragrunt input direction is asymmetric:** Terragrunt passes inputs as `TF_VAR_*` environment variables and Terraform silently ignores undeclared ones, so a stack passing an *extra* input the module does not declare is **not** an error. Only the reverse is flagged — a *required* module variable (one declared without a `default`) that the stack fails to pass, which would fail non-interactive `terragrunt plan/apply`.
 
