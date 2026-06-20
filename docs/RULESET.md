@@ -15,6 +15,7 @@ Current hard checks include:
 * every planned file must be present in the model response;
 * generated Terragrunt remote state keys must not be fixed shared values;
 * generated Terraform should flag clearly dangerous public ingress for administrative or database ports in PR review warnings;
+* a literal value assigned to a secret-named field (e.g. `WEBUI_SECRET_KEY = "change-me"`) is flagged as a warning — application secrets should come from `random_password`, Secrets Manager/SSM, or a `sensitive` required variable, never a hardcoded literal;
 * generated module READMEs should include terraform-docs markers;
 * generated module files must not reference `module.x` unless that module is declared in the same generated module;
 * the same AWS provider-level resource `name` must not be declared for the same resource type in two modules — this is an apply-time collision (e.g. an ALB or ECS-tasks security group duplicated across `foundation` and a workload module) that Terraform's per-module validation cannot catch, so it blocks PR creation;

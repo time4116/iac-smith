@@ -2,7 +2,7 @@ import subprocess
 from pathlib import Path
 
 from iac_smith.blackboard import TerraformContract
-from iac_smith.cli import _repair_runtime_static_issues, run_iac_smith
+from iac_smith.cli import _descriptive_title, _repair_runtime_static_issues, run_iac_smith
 from iac_smith.models.change_plan import BackendResource, ChangePlan
 from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
@@ -29,6 +29,29 @@ class FakePullRequestClient:
         return GitHubPullRequest(
             number=9, url="https://github.com/time4116/iac-smith-demo-infra/pull/9"
         )
+
+
+def test_descriptive_title_includes_stack_region_and_env():
+    result = {
+        "issue_number": 37,
+        "change_plan": ChangePlan(
+            stack_name="app-runner-open-webui",
+            environments=["non-prod"],
+            files_to_generate=[],
+            backend_resources={},
+            summary=[],
+        ),
+        "intent": _fake_intent_parser("Deploy Open WebUI on App Runner"),
+    }
+
+    assert _descriptive_title(result) == "feat: app-runner-open-webui in us-west-2 (non-prod) (#37)"
+
+
+def test_descriptive_title_falls_back_without_a_stack():
+    assert (
+        _descriptive_title({"issue_number": 9, "change_plan": None, "intent": None})
+        == "feat: generate IaC for issue #9"
+    )
 
 
 def _fake_intent_parser(issue_text: str) -> InfrastructureIntent:

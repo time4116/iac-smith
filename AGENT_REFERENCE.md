@@ -4,6 +4,8 @@
 
 IaC Smith is an agentic workflow that converts a GitHub Issue into a validated Terraform/Terragrunt pull request on a target infrastructure repository. It does not apply infrastructure; it only generates, validates, and opens a PR.
 
+It generates **infrastructure, not application code** — no `Program.cs`, Dockerfile, or build pipeline. This is not a refusal rule but a structural property: the change planner only plans IaC/workflow/doc files, and the generator is constrained to that planned set (`dynamic_terraform.py`: "Do not generate files outside files_to_generate"). A request like "deploy my .NET app" yields the hosting infrastructure; the deployable artifact and its build/deploy belong to a separate application pipeline.
+
 **Input:** GitHub Issue with the `iac-smith` label  
 **Output:** PR on the target repo containing Terraform/Terragrunt files, or a blocked/ignored status
 
@@ -250,11 +252,16 @@ dynamically:
   mistaken for unsupported arguments). Runs in `validation_runner` after static
   review.
 - **`normalize_validation_findings(errors)`** turns `terraform`/`terragrunt
-  validate` failures into negative patterns; `RunBlackboard.with_findings` merges
-  them. The runtime-repair loop (`cli.py`) feeds these back into the blackboard —
-  together with the harvested provider contracts — and into `repair_files`, so
-  each repair prompt is told both the real allowed/required arguments and what not
-  to repeat.
+  validate`/`plan` failures into negative patterns; `RunBlackboard.with_findings`
+  merges them. Recognized error classes: unsupported argument, unsupported block
+  type, unsupported resource type, and the plan-time provider **value
+  constraints** that `validate` cannot catch — `expected … to match regular
+  expression` (e.g. an App Runner image that isn't ECR/`public.ecr.aws`),
+  `expected … to be in the range` (e.g. a health-check interval outside 1–20), and
+  `No value for required variable`. The runtime-repair loop (`cli.py`) feeds these
+  back into the blackboard — together with the harvested provider contracts — and
+  into `repair_files`, so each repair prompt is told both the real allowed/required
+  arguments and what not to repeat.
 
 The blackboard is injected into generation/repair prompts via
 `build_blackboard_prompt_section`, which emits nothing until something has
@@ -341,6 +348,7 @@ class ValidationResult(BaseModel):
 **PARTIAL (warnings, no block) if:**
 - Public ingress (0.0.0.0/0 or ::/0) to any of: SSH (22), RDP (3389), PostgreSQL (5432), MySQL (3306), MSSQL (1433), Redis (6379), MongoDB (27017)
 - Module README missing terraform-docs markers
+- A literal string assigned to a secret-named field (`*secret*`/`*password*`/`*token*`, e.g. `WEBUI_SECRET_KEY = "change-me"`). Reference-style identifiers (`*_arn`/`*_id`/`*_name`) and ARN/URL/path values are excluded. Advisory because the blocking credential patterns only match `secret =`/`password =` anchored directly before `=`, so a secret-*named* field with a suffix slips past them
 
 **Terragrunt input direction is asymmetric:** Terragrunt passes inputs as `TF_VAR_*` environment variables and Terraform silently ignores undeclared ones, so a stack passing an *extra* input the module does not declare is **not** an error. Only the reverse is flagged — a *required* module variable (one declared without a `default`) that the stack fails to pass, which would fail non-interactive `terragrunt plan/apply`.
 

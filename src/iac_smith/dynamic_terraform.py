@@ -658,6 +658,13 @@ Non-negotiable rules:
   and preference rules must be followed unless they conflict with the explicit
   issue request or existing repo convention; explain conflicts in warnings.
 * Never apply infrastructure, destroy resources, or include plaintext credentials.
+* **Never hardcode a secret value — not even a placeholder like "change-me".**
+  For any application secret (signing keys such as `WEBUI_SECRET_KEY`, passwords,
+  API tokens, DB credentials), do NOT assign a literal string. Instead generate it
+  with `random_password`/`random_id`, source it from AWS Secrets Manager or SSM
+  Parameter Store (via a data source), or declare a `sensitive` required variable
+  with no default so the operator must supply it. A predictable hardcoded secret
+  is a real vulnerability even when the value looks like a placeholder.
 * Terraform apply workflows must never run on pull_request events or feature
   branches. `.github/workflows/terraform-apply.yml` must trigger only on push
   to `main` — never `master`, never both.

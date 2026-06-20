@@ -88,6 +88,8 @@ The agent reads the issue, infers the AWS infrastructure intent, scans the fixed
 
 IaC Smith should not be tied to a single proof-of-concept such as "deploy my app to AWS." The project should focus on infrastructure generation from natural-language requirements.
 
+IaC Smith generates **infrastructure, not application code**. It does not write application source (a `Program.cs`, a Dockerfile, a build script) and is not designed to — that boundary is intentional (see "Out of Scope": full application deployment workflow, app build standards, app framework detection, Dockerfile generation). A request such as "deploy my .NET web app on Elastic Beanstalk" produces the Terraform/Terragrunt for the hosting infrastructure (the EB application + environment, networking wiring, IAM, logging), but the deployable artifact and the build/deploy step that ships it are expected to come from a separate application pipeline. The generated infrastructure is the landing zone the application deploys *into*. This boundary is enforced structurally rather than by a refusal rule: the change planner only plans IaC/workflow/doc files, and the generator is constrained to that planned file set.
+
 The MVP may use ECS Fargate or EKS Fargate as a demonstration scenario if useful, but the agent should not be hardcoded to one blueprint. It should infer what to generate from the issue text.
 
 The goal is:

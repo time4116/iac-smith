@@ -14,6 +14,7 @@ from iac_smith.nodes.static_review import (
     _contains_dangerous_public_ingress,
     _find_cross_file_duplicates,
     _find_duplicate_named_resources,
+    _find_hardcoded_secret_values,
     _find_redacted_placeholders,
     _find_singleton_resource_duplication,
     _find_terragrunt_dangling_dependencies,
@@ -567,6 +568,52 @@ class TestTerragruntDanglingDependencies:
 
         assert dirs == {"environments/non-prod/foundation"}
         assert existing_stack_dirs(None) == set()
+
+
+class TestHardcodedSecretValues:
+    def test_flags_named_secret_literal(self) -> None:
+        files = {
+            "environments/non-prod/app/terragrunt.hcl": (
+                "inputs = {\n"
+                "  environment_variables = {\n"
+                '    WEBUI_SECRET_KEY = "change-me-in-production"\n'
+                "  }\n"
+                "}\n"
+            )
+        }
+
+        warnings = _find_hardcoded_secret_values(files)
+
+        assert len(warnings) == 1
+        assert "WEBUI_SECRET_KEY" in warnings[0]
+        assert "random_password" in warnings[0]
+
+    def test_flags_plain_password_literal(self) -> None:
+        files = {
+            "modules/db/main.tf": 'resource "x" "y" {\n  master_password = "hunter2value"\n}\n'
+        }
+        assert len(_find_hardcoded_secret_values(files)) == 1
+
+    def test_ignores_secret_reference_identifiers(self) -> None:
+        # `*_arn` / `*_name` / `*_id` are references to a secret, not the secret.
+        files = {
+            "modules/app/main.tf": (
+                'resource "x" "y" {\n'
+                '  secret_arn  = "arn:aws:secretsmanager:us-west-2:1234:secret:foo"\n'
+                '  secret_name = "myapp/db-credentials"\n'
+                "}\n"
+            )
+        }
+        assert _find_hardcoded_secret_values(files) == []
+
+    def test_ignores_secret_sourced_from_reference(self) -> None:
+        # A non-literal value (var/data reference) is fine.
+        files = {"modules/app/main.tf": "locals {\n  api_token = var.api_token\n}\n"}
+        assert _find_hardcoded_secret_values(files) == []
+
+    def test_ignores_markdown(self) -> None:
+        files = {"README.md": 'Set `WEBUI_SECRET_KEY = "change-me-in-production"` before deploy.'}
+        assert _find_hardcoded_secret_values(files) == []
 
 
 class TestDuplicateNamedResources:
