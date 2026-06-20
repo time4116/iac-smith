@@ -12,6 +12,7 @@ from iac_smith.nodes.static_review import (
     _SINGLETON_RESOURCE_TYPES,
     _apply_workflow_errors,
     _contains_dangerous_public_ingress,
+    _find_app_runner_provider_schema_issues,
     _find_cross_file_duplicates,
     _find_duplicate_named_resources,
     _find_redacted_placeholders,
@@ -739,6 +740,113 @@ class TestApplyWorkflowGuards:
     def test_non_apply_workflow_ignored(self) -> None:
         pr_check = ".github/workflows/terraform-pr-check.yml"
         assert _apply_workflow_errors(pr_check, "on: pull_request") == []
+
+
+class TestAppRunnerProviderSchemaIssues:
+    def test_ghcr_image_and_invalid_health_interval_are_flagged(self) -> None:
+        files = {
+            "modules/app-runner-open-webui/main.tf": """
+resource "aws_apprunner_service" "open_webui" {
+  service_name = "non-prod-open-webui"
+
+  source_configuration {
+    image_repository {
+      image_repository_type = "ECR_PUBLIC"
+      image_identifier      = var.image_identifier
+      image_configuration {
+        port = "8080"
+      }
+    }
+  }
+
+  health_check_configuration {
+    interval = var.health_check_interval_seconds
+  }
+}
+""",
+            "modules/app-runner-open-webui/variables.tf": """
+variable "image_identifier" {
+  type    = string
+  default = "ghcr.io/open-webui/open-webui:latest"
+}
+
+variable "health_check_interval_seconds" {
+  type    = number
+  default = 30
+}
+""",
+            "environments/non-prod/app-runner-open-webui/terragrunt.hcl": """
+terraform {
+  source = "../../../modules/app-runner-open-webui"
+}
+
+inputs = {
+  image_identifier             = "ghcr.io/open-webui/open-webui:latest"
+  health_check_interval_seconds = 30
+}
+""",
+        }
+
+        errors = _find_app_runner_provider_schema_issues(files)
+
+        assert any("ghcr.io/open-webui/open-webui:latest" in e for e in errors)
+        assert any("1..20" in e or "between 1 and 20" in e for e in errors)
+
+        result = static_review_generated_files(files)
+        assert result.status == ValidationStatus.PARTIAL
+        assert any("AWS App Runner cannot consume GHCR" in e for e in result.structural)
+        assert any("requires 1..20 seconds" in e for e in result.structural)
+
+    def test_public_ecr_image_and_valid_health_interval_pass(self) -> None:
+        files = {
+            "modules/app-runner-open-webui/main.tf": """
+resource "aws_apprunner_service" "open_webui" {
+  source_configuration {
+    image_repository {
+      image_identifier = var.image_identifier
+    }
+  }
+
+  health_check_configuration {
+    interval = 20
+  }
+}
+""",
+            "modules/app-runner-open-webui/variables.tf": """
+variable "image_identifier" {
+  type    = string
+  default = "public.ecr.aws/example/open-webui:latest"
+}
+
+variable "health_check_interval_seconds" {
+  type    = number
+  default = 20
+}
+""",
+            "environments/non-prod/app-runner-open-webui/terragrunt.hcl": """
+terraform {
+  source = "../../../modules/app-runner-open-webui"
+}
+
+inputs = {
+  image_identifier              = "public.ecr.aws/example/open-webui:latest"
+  health_check_interval_seconds = 20
+}
+""",
+        }
+
+        assert _find_app_runner_provider_schema_issues(files) == []
+
+    def test_unrelated_interval_inputs_are_not_flagged(self) -> None:
+        files = {
+            "environments/non-prod/cache/terragrunt.hcl": """
+inputs = {
+  interval = 30
+}
+""",
+        }
+
+        assert _find_app_runner_provider_schema_issues(files) == []
 
 
 def _ingress_rule(port: int, cidr_attr: str) -> str:

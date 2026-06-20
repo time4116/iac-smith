@@ -271,6 +271,16 @@ _CONFIG_PATH_RE = re.compile(r'\bconfig_path\s*=\s*"([^"]+)"')
 _TG_DEPENDENCY_OUTPUT_REF_RE = re.compile(
     r"\bdependency\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)\b"
 )
+_APP_RUNNER_SERVICE_RE = re.compile(r'\bresource\s+"aws_apprunner_service"\s+"[^"]+"\s*\{')
+_APP_RUNNER_IMAGE_IDENTIFIER_RE = re.compile(
+    r"\bimage_identifier\s*=\s*\"([^\"]+)\"|\bimage_identifier\s*=\s*var\.([A-Za-z0-9_]+)"
+)
+_APP_RUNNER_IMAGE_INPUT_RE = re.compile(r"\b(image_identifier|image_uri)\s*=\s*\"([^\"]+)\"")
+_APP_RUNNER_PUBLIC_ECR_RE = re.compile(r"^public\.ecr\.aws\/.+\/.+")
+_APP_RUNNER_PRIVATE_ECR_RE = re.compile(
+    r"^[0-9]{12}\.dkr\.ecr\.[a-z-]+-[0-9]{1,2}\.amazonaws\.com\/.+"
+)
+_APP_RUNNER_INTERVAL_RE = re.compile(r"\b(health_check_interval(?:_seconds)?|interval)\s*=\s*(\d+)")
 
 
 def _strip_hcl_comments(content: str) -> str:
@@ -667,6 +677,77 @@ def _find_terragrunt_dangling_dependencies(
     return errors
 
 
+def _is_valid_app_runner_image_identifier(value: str) -> bool:
+    return bool(_APP_RUNNER_PUBLIC_ECR_RE.match(value) or _APP_RUNNER_PRIVATE_ECR_RE.match(value))
+
+
+def _find_app_runner_provider_schema_issues(generated_files: dict[str, str]) -> list[str]:
+    """Catch App Runner provider constraints that Terraform reports only at plan.
+
+    The AWS provider validates App Runner image repositories more strictly than
+    generic Docker image references: `image_identifier` must point to private ECR
+    or public ECR, not GHCR/Docker Hub. It also restricts health check interval
+    to 1..20 seconds. These failures happen late in `terragrunt plan`, so surface
+    them in static review with exact file paths for the repair loop.
+    """
+    errors: list[str] = []
+    app_runner_var_names: set[str] = {"image_identifier", "image_uri"}
+
+    for path, content in generated_files.items():
+        if not path.startswith("modules/") or not path.endswith(".tf"):
+            continue
+        for match in _APP_RUNNER_SERVICE_RE.finditer(content):
+            body = _extract_hcl_block_body(content, match.start())
+            if body is None:
+                continue
+            for image_match in _APP_RUNNER_IMAGE_IDENTIFIER_RE.finditer(body):
+                literal, var_name = image_match.groups()
+                if var_name:
+                    app_runner_var_names.add(var_name)
+                    continue
+                if literal and not _is_valid_app_runner_image_identifier(literal):
+                    errors.append(
+                        f"App Runner service in `{path}` uses invalid image_identifier "
+                        f"`{literal}`. AWS App Runner image repositories accept only "
+                        "private ECR `<account>.dkr.ecr.<region>.amazonaws.com/repo:tag` "
+                        "or public ECR `public.ecr.aws/alias/repo:tag` identifiers; mirror "
+                        "GHCR/Docker Hub images into ECR before referencing them."
+                    )
+            for interval_match in _APP_RUNNER_INTERVAL_RE.finditer(body):
+                name, raw_value = interval_match.groups()
+                value = int(raw_value)
+                if not 1 <= value <= 20:
+                    errors.append(
+                        f"App Runner service in `{path}` sets `{name}` to {value}. "
+                        "AWS App Runner health check interval must be between 1 and 20 seconds."
+                    )
+
+    for path, content in generated_files.items():
+        if not path.endswith((".hcl", ".tf")):
+            continue
+        for input_match in _APP_RUNNER_IMAGE_INPUT_RE.finditer(content):
+            name, value = input_match.groups()
+            if name not in app_runner_var_names:
+                continue
+            if not _is_valid_app_runner_image_identifier(value):
+                errors.append(
+                    f"App Runner image input `{name}` in `{path}` uses `{value}`. "
+                    "AWS App Runner cannot consume GHCR/Docker Hub image identifiers "
+                    "directly; use a private ECR or public ECR image identifier."
+                )
+        for interval_match in _APP_RUNNER_INTERVAL_RE.finditer(content):
+            name, raw_value = interval_match.groups()
+            if name == "interval":
+                continue
+            value = int(raw_value)
+            if not 1 <= value <= 20:
+                errors.append(
+                    f"App Runner health check input `{name}` in `{path}` is {value}; "
+                    "AWS App Runner requires 1..20 seconds."
+                )
+    return errors
+
+
 def _find_singleton_resource_duplication(generated_files: dict[str, str]) -> list[str]:
     """Flag foundational resource types (e.g. aws_vpc) declared in multiple modules.
 
@@ -827,6 +908,7 @@ def static_review_generated_files(
     structural.extend(
         _find_terragrunt_dangling_dependencies(generated_files, known_stack_dirs or set())
     )
+    structural.extend(_find_app_runner_provider_schema_issues(generated_files))
 
     # Cross-module provider name collisions are not caught by module-level
     # terraform validate and can fail only at apply time, so they block PR

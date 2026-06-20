@@ -802,6 +802,17 @@ Non-negotiable rules:
   preserve existing valid variable declarations and append missing ones; do not
   replace the file with only the newly mentioned variables. Missing any one
   variable will fail `terraform validate` or live Terragrunt plan/apply.
+* **AWS App Runner provider constraints — CRITICAL:** when generating
+  `aws_apprunner_service` with `image_repository`, the Terraform AWS provider
+  accepts only private ECR image identifiers like
+  `<account>.dkr.ecr.<region>.amazonaws.com/repo:tag` or public ECR identifiers
+  like `public.ecr.aws/alias/repo:tag`. Do NOT use `ghcr.io/...`, Docker Hub,
+  or arbitrary OCI registry identifiers directly in `image_identifier`; mirror
+  those images into ECR with generated ECR/build/push workflow support or expose
+  an ECR image variable/default. App Runner `health_check_configuration.interval`
+  must be 1..20 seconds. The AWS provider does not support `runtime_secrets` as
+  an argument inside `image_configuration`; use the provider-supported runtime
+  environment variable/secrets blocks only if the schema supports them.
 {_CANONICAL_FILE_SHAPES}{build_blackboard_prompt_section(blackboard)}{sibling_section}{existing_section}{repair_section}
 Generation context JSON:
 {json.dumps(context, indent=2)}
