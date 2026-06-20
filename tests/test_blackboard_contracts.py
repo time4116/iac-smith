@@ -228,6 +228,51 @@ def test_normalize_validation_findings_extracts_negative_schema_patterns():
     ]
 
 
+def test_normalize_validation_findings_extracts_value_regex_constraint():
+    errors = [
+        "terragrunt plan environments/non-prod/app-runner failed:\n"
+        "│ Error: expected value of source_configuration.0.image_repository.0.image_identifier "
+        'to match regular expression "(ECR)|(public.ecr.aws)", got ghcr.io/open-webui/open-webui:latest\n'
+        "│   with aws_apprunner_service.open_webui,"
+    ]
+
+    findings = normalize_validation_findings(errors)
+
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.scope == "source_configuration.0.image_repository.0.image_identifier"
+    assert "ghcr.io/open-webui/open-webui:latest" in f.negative_pattern
+    assert "must match the provider pattern" in f.negative_pattern
+
+
+def test_normalize_validation_findings_extracts_value_range_constraint():
+    errors = [
+        "│ Error: expected health_check_configuration.0.interval to be in the range (1 - 20), got 30\n"
+        "│   with aws_apprunner_service.open_webui,"
+    ]
+
+    findings = normalize_validation_findings(errors)
+
+    assert len(findings) == 1
+    assert findings[0].scope == "health_check_configuration.0.interval"
+    assert "must be within (1 - 20)" in findings[0].negative_pattern
+    assert "`30`" in findings[0].negative_pattern
+
+
+def test_normalize_validation_findings_extracts_missing_required_variable():
+    errors = [
+        "│ Error: No value for required variable\n"
+        '│   on variables.tf line 37:  variable "image_uri" {\n'
+        '│ The root module input variable "image_uri" is not set, and has no default value.'
+    ]
+
+    findings = normalize_validation_findings(errors)
+
+    assert len(findings) == 1
+    assert findings[0].scope == "image_uri"
+    assert "Required variable `image_uri` has no value" in findings[0].negative_pattern
+
+
 def test_normalize_validation_findings_extracts_unsupported_block():
     errors = [
         "terraform validate bootstrap/backend/non-prod failed:\n"

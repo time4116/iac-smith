@@ -250,11 +250,16 @@ dynamically:
   mistaken for unsupported arguments). Runs in `validation_runner` after static
   review.
 - **`normalize_validation_findings(errors)`** turns `terraform`/`terragrunt
-  validate` failures into negative patterns; `RunBlackboard.with_findings` merges
-  them. The runtime-repair loop (`cli.py`) feeds these back into the blackboard —
-  together with the harvested provider contracts — and into `repair_files`, so
-  each repair prompt is told both the real allowed/required arguments and what not
-  to repeat.
+  validate`/`plan` failures into negative patterns; `RunBlackboard.with_findings`
+  merges them. Recognized error classes: unsupported argument, unsupported block
+  type, unsupported resource type, and the plan-time provider **value
+  constraints** that `validate` cannot catch — `expected … to match regular
+  expression` (e.g. an App Runner image that isn't ECR/`public.ecr.aws`),
+  `expected … to be in the range` (e.g. a health-check interval outside 1–20), and
+  `No value for required variable`. The runtime-repair loop (`cli.py`) feeds these
+  back into the blackboard — together with the harvested provider contracts — and
+  into `repair_files`, so each repair prompt is told both the real allowed/required
+  arguments and what not to repeat.
 
 The blackboard is injected into generation/repair prompts via
 `build_blackboard_prompt_section`, which emits nothing until something has
