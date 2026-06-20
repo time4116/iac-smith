@@ -1,5 +1,6 @@
 from typing import TypedDict
 
+from iac_smith.blackboard import RunBlackboard
 from iac_smith.models.change_plan import ChangePlan
 from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
@@ -19,6 +20,7 @@ class IaCSmithState(TypedDict, total=False):
     ruleset: Ruleset
     repo_patterns: RepoPatterns
     change_plan: ChangePlan
+    blackboard: RunBlackboard
     generated_files: dict[str, str]
     validation: ValidationResult
     pr_body: str | None

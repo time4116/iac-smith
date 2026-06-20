@@ -154,8 +154,14 @@ def test_run_iac_smith_repairs_runtime_validation_failures_before_pr(tmp_path: P
             self.errors = errors or []
             self.checks = checks or []
 
+    unsupported_arg_error = (
+        "terraform validate modules/vpc-foundation failed:\n"
+        "│ Error: Unsupported argument\n"
+        '│   on main.tf line 5, in resource "aws_vpc" "this":\n'
+        '│ An argument named "instance_type" is not expected here.'
+    )
     validation_results = [
-        ValidationResult(False, ["terraform validate failed: invalid cidr_block"]),
+        ValidationResult(False, [unsupported_arg_error]),
         ValidationResult(True, checks=["terraform validate modules/vpc-foundation passed."]),
     ]
 
@@ -165,6 +171,7 @@ def test_run_iac_smith_repairs_runtime_validation_failures_before_pr(tmp_path: P
     class RepairingFileGenerator:
         def __init__(self):
             self.repair_errors: list[str] = []
+            self.blackboard = None
 
         def __call__(
             self, *, intent, change_plan, repo_patterns, ruleset, target_repo, repo_path=None
@@ -187,8 +194,10 @@ def test_run_iac_smith_repairs_runtime_validation_failures_before_pr(tmp_path: P
             target_repo,
             generated_files,
             repair_errors,
+            blackboard=None,
         ):
             self.repair_errors = repair_errors
+            self.blackboard = blackboard
             repaired = dict(generated_files)
             repaired["modules/vpc-foundation/main.tf"] = (
                 'resource "aws_vpc" "this" { cidr_block = "10.1.0.0/16" }\n'
@@ -214,7 +223,14 @@ def test_run_iac_smith_repairs_runtime_validation_failures_before_pr(tmp_path: P
     )
 
     assert result.status == "pr_created"
-    assert generator.repair_errors == ["terraform validate failed: invalid cidr_block"]
+    assert generator.repair_errors == [unsupported_arg_error]
+    # The runtime failure was learned into the blackboard and handed to the repair
+    # step as a negative pattern, so the model is told not to repeat it.
+    assert generator.blackboard is not None
+    assert any(
+        "instance_type" in pattern and "aws_vpc" in pattern
+        for pattern in generator.blackboard.negative_patterns
+    )
     assert pr_client.calls
     assert (
         tmp_path / "modules" / "vpc-foundation" / "main.tf"

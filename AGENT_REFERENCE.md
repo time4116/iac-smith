@@ -72,8 +72,9 @@ GitHub Issue (with "iac-smith" label)
   → ruleset_loader        reads rules/*.yaml from target repo or bundled default
   → repo_pattern_scanner  scans target repo for existing patterns
   → change_planner        plans which files to generate
+  → blackboard_planner    starts the run blackboard (shared contract/negative-pattern state)
   → code_generator        Bedrock: generates files in parallel; static review; per-file repair
-  → validation_runner     static review on full set; routes back to code_generator if needed
+  → validation_runner     static review + contract validation; routes back to code_generator if needed
   → pr_writer             builds PR body
   → cli.py post-graph     writes files, runtime validation, runtime repair loop, commit, push, PR
 ```
@@ -97,6 +98,7 @@ GitHub Issue (with "iac-smith" label)
     "ruleset": Ruleset,
     "repo_patterns": RepoPatterns,
     "change_plan": ChangePlan,
+    "blackboard": RunBlackboard,          # run-scoped contract/negative-pattern state
     "generated_files": dict[str, str],   # file path → file content
     "validation": ValidationResult,
     "pr_body": str | None,
@@ -116,8 +118,9 @@ GitHub Issue (with "iac-smith" label)
 | `ruleset_loaded` | ruleset_loader | Rules ready |
 | `patterns_scanned` | repo_pattern_scanner | Repo patterns ready |
 | `plan_ready` | change_planner | Files to generate planned |
-| `needs_repair` | validation_runner | Static review failed; retry code_generator |
-| `validated` | validation_runner | Static review passed |
+| `blackboard_ready` | blackboard_planner | Run blackboard initialized |
+| `needs_repair` | validation_runner | Static review (or contract validation) failed; retry code_generator |
+| `validated` | validation_runner | Static review and contract validation passed |
 | `pr_ready` | pr_writer | PR body built |
 
 ---
@@ -213,6 +216,37 @@ modules/{stack_name}/outputs.tf
 modules/{stack_name}/versions.tf
 modules/{stack_name}/README.md
 ```
+
+---
+
+## Node: blackboard_planner
+
+**Module:** `src/iac_smith/blackboard.py`
+
+Starts a run-scoped `RunBlackboard` — typed shared state that coordinates
+generation and repair without becoming long-term memory. Deliberately makes **no
+service- or language-specific assumptions**: it carries no curated keyword lists
+or golden-path file sets. Contracts and constraints are filled in later,
+dynamically:
+
+- **`resolve_contracts_for_files(files, resolver)`** derives candidate contracts
+  from the resource types that actually appear in the generated Terraform — not
+  from keywords. `ContractResolver` is the generic injection point for a future
+  provider-schema / Terraform Registry lookup; until one is wired it returns
+  nothing, so contract validation is a no-op pass.
+- **`validate_generated_contracts(files, contract_docs)`** checks generated
+  resources against resolved docs, tracking brace depth so only top-level
+  (depth-0) arguments are validated (nested `setting {}` / `tag {}` keys are not
+  mistaken for unsupported arguments). Runs in `validation_runner` after static
+  review.
+- **`normalize_validation_findings(errors)`** turns `terraform`/`terragrunt
+  validate` failures into negative patterns; `RunBlackboard.with_findings` merges
+  them. The runtime-repair loop (`cli.py`) feeds these back into the blackboard
+  and into `repair_files`, so each repair prompt is told what not to repeat.
+
+The blackboard is injected into generation/repair prompts via
+`build_blackboard_prompt_section`, which emits nothing until something has
+actually been resolved or learned (no boilerplate on the first pass).
 
 ---
 
@@ -334,8 +368,9 @@ After runtime validation fails:
 
 ```
 for attempt in range(IAC_SMITH_RUNTIME_REPAIR_ATTEMPTS):
+    blackboard += normalize_validation_findings(runtime_errors)   # learn negative patterns
     call repair_files(intent, change_plan, repo_patterns, ruleset, target_repo,
-                      generated_files, runtime_errors)
+                      generated_files, runtime_errors, blackboard)
     static_review repaired files
     if static_review FAILED:
         append static errors to runtime errors

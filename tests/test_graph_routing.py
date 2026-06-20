@@ -83,11 +83,18 @@ def test_default_file_generator_uses_bedrock_dynamic_generator(monkeypatch):
     assert calls[0]["change_plan"] is change_plan
 
 
-def test_graph_passes_ruleset_and_repo_context_to_injected_file_generator(tmp_path):
+def test_graph_passes_ruleset_repo_context_and_blackboard_to_injected_file_generator(tmp_path):
     calls = []
 
     def fake_file_generator(
-        *, intent, change_plan, repo_patterns, ruleset, target_repo, repo_path=None
+        *,
+        intent,
+        change_plan,
+        repo_patterns,
+        ruleset,
+        target_repo,
+        repo_path=None,
+        blackboard=None,
     ):
         calls.append(
             {
@@ -96,6 +103,7 @@ def test_graph_passes_ruleset_and_repo_context_to_injected_file_generator(tmp_pa
                 "repo_patterns": repo_patterns,
                 "ruleset": ruleset,
                 "target_repo": target_repo,
+                "blackboard": blackboard,
             }
         )
         return {
@@ -134,6 +142,8 @@ def test_graph_passes_ruleset_and_repo_context_to_injected_file_generator(tmp_pa
     assert calls[0]["repo_patterns"].uses_terragrunt is True
     assert isinstance(calls[0]["ruleset"], Ruleset)
     assert calls[0]["ruleset"].rules[0].id == "dynamic-generation-rule"
+    assert calls[0]["blackboard"] is not None
+    assert calls[0]["blackboard"].repo_patterns.uses_terragrunt is True
 
 
 def test_graph_passes_repo_path_to_file_generator(tmp_path):
