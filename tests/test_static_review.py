@@ -19,9 +19,59 @@ from iac_smith.nodes.static_review import (
     _find_terragrunt_dependency_output_mismatches,
     _find_terragrunt_missing_required_inputs,
     _find_terragrunt_orphaned_locals,
+    _find_terragrunt_required_providers,
     _find_undeclared_variable_references,
     static_review_generated_files,
 )
+
+
+class TestTerragruntRequiredProviders:
+    def test_required_providers_in_terragrunt_hcl_flagged(self) -> None:
+        files = {
+            "environments/non-prod/terragrunt.hcl": (
+                'generate "provider" {\n'
+                '  path     = "provider.tf"\n'
+                "  contents = <<EOF\n"
+                "terraform {\n  required_providers {\n"
+                '    aws = { source = "hashicorp/aws", version = "~> 5.0" }\n'
+                "  }\n}\n"
+                'provider "aws" { region = "us-east-1" }\n'
+                "EOF\n"
+                "}\n"
+            ),
+        }
+        errors = _find_terragrunt_required_providers(files)
+        assert len(errors) == 1
+        assert "Duplicate required providers" in errors[0]
+
+    def test_required_providers_block_makes_review_fail(self) -> None:
+        files = {
+            "environments/non-prod/terragrunt.hcl": (
+                'generate "provider" {\n  contents = <<EOF\nterraform {\n'
+                "  required_providers { aws = {} }\n}\nEOF\n}\n"
+            ),
+        }
+        result = static_review_generated_files(files)
+        assert result.status == ValidationStatus.FAILED
+        assert any("required_providers" in e for e in result.errors)
+
+    def test_provider_only_generate_block_is_clean(self) -> None:
+        files = {
+            "environments/non-prod/terragrunt.hcl": (
+                'generate "provider" {\n  path = "provider.tf"\n  contents = <<EOF\n'
+                'provider "aws" {\n  region = "${local.aws_region}"\n}\nEOF\n}\n'
+            ),
+        }
+        assert _find_terragrunt_required_providers(files) == []
+
+    def test_required_providers_in_module_versions_not_flagged(self) -> None:
+        # versions.tf is the correct home for required_providers.
+        files = {
+            "modules/foundation/versions.tf": (
+                "terraform {\n  required_providers { aws = {} }\n}\n"
+            ),
+        }
+        assert _find_terragrunt_required_providers(files) == []
 
 
 class TestCrossFileDuplicates:
