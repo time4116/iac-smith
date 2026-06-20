@@ -219,6 +219,60 @@ def _repair_generated_files(
     )
 
 
+def _repair_runtime_static_issues(
+    *,
+    repairer: RuntimeRepairer,
+    result: IaCSmithState,
+    repo_path: Path,
+    repaired_files: dict[str, str],
+    repair_errors: list[str],
+    max_passes: int = 3,
+) -> dict[str, str]:
+    """Run bounded static review repairs after a runtime repair.
+
+    Runtime repairs can fix the original Terraform error but introduce a new
+    cross-file contract issue. Example: repairing a module may add a required
+    variable to ``variables.tf`` after static review previously asked for it;
+    the matching stack ``terragrunt.hcl`` then also needs an ``inputs`` entry
+    before the next ``terragrunt plan``. Catch and repair those deterministic
+    contract issues before spending another runtime validation attempt.
+    """
+    seen_issue_sets: set[frozenset[str]] = set()
+    current_files = repaired_files
+    accumulated_errors = list(repair_errors)
+
+    for _ in range(max_passes):
+        static_check = static_review_generated_files(
+            current_files, known_stack_dirs=existing_stack_dirs(repo_path)
+        )
+        static_issues = [*static_check.errors, *static_check.structural]
+        if not static_issues:
+            return current_files
+
+        issue_set = frozenset(static_issues)
+        if issue_set in seen_issue_sets:
+            _log(
+                "IaC Smith: static review issues after runtime repair are oscillating; "
+                "leaving remaining issues for runtime validation to gate."
+            )
+            return current_files
+        seen_issue_sets.add(issue_set)
+
+        _log(
+            "IaC Smith: static review found issues after runtime repair: "
+            + "; ".join(static_issues)
+        )
+        result["generated_files"] = current_files
+        accumulated_errors = [*accumulated_errors, *static_issues]
+        current_files = _repair_generated_files(
+            repairer=repairer,
+            result=result,
+            repair_errors=accumulated_errors,
+        )
+
+    return current_files
+
+
 def run_iac_smith(
     env: Mapping[str, str],
     issue_client: IssueClient,
@@ -333,21 +387,13 @@ def run_iac_smith(
                     result=result,
                     repair_errors=repair_errors,
                 )
-                static_check = static_review_generated_files(
-                    repaired_files, known_stack_dirs=existing_stack_dirs(repo_path)
+                repaired_files = _repair_runtime_static_issues(
+                    repairer=runtime_repairer,
+                    result=result,
+                    repo_path=repo_path,
+                    repaired_files=repaired_files,
+                    repair_errors=repair_errors,
                 )
-                static_issues = [*static_check.errors, *static_check.structural]
-                if static_issues:
-                    _log(
-                        "IaC Smith: static review found issues after runtime repair: "
-                        + "; ".join(static_issues)
-                    )
-                    result["generated_files"] = repaired_files
-                    repaired_files = _repair_generated_files(
-                        repairer=runtime_repairer,
-                        result=result,
-                        repair_errors=[*repair_errors, *static_issues],
-                    )
             except Exception as exc:
                 if _is_bedrock_throttle(exc):
                     return IaCSmithRunResult(
