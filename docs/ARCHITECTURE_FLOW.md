@@ -12,12 +12,13 @@ flowchart TD
     E --> F[Scan target repo conventions and snippets]
     F --> G[Infer infrastructure intent with LangGraph]
     G --> H[Plan generated file set]
+    H --> H2[Start run blackboard: contracts and negative patterns]
 
-    H --> I[Bedrock Terraform/Terragrunt generation]
+    H2 --> I[Bedrock Terraform/Terragrunt generation]
     I --> J[Static review of generated files]
     J -->|Fails| K[Generation repair with exact static errors]
     K --> I
-    J -->|Passes| L[Graph-level validation runner]
+    J -->|Passes| L[Graph-level validation runner: static + contract checks]
 
     L -->|Fails within retry budget| M[Route back through code generation with accumulated errors]
     M --> I
@@ -29,7 +30,7 @@ flowchart TD
     P1 --> P2[backend-free terraform init and validate where possible]
     P2 --> Q{Runtime validation passed?}
 
-    Q -- No, retries remain --> R[Runtime repair with exact command output]
+    Q -- No, retries remain --> R[Runtime repair with exact command output and learned negative patterns]
     R --> O
     Q -- No, retries exhausted --> N
     Q -- Yes --> S[Commit generated IaC to target branch]
