@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
+from iac_smith.blackboard import RunBlackboard, normalize_validation_findings
 from iac_smith.dynamic_terraform import BedrockTerraformGenerator
 from iac_smith.graph import FileGenerator, IntentParser, build_graph
 from iac_smith.models.change_plan import ChangePlan
@@ -60,6 +61,7 @@ class RuntimeRepairer(Protocol):
         target_repo: str,
         generated_files: dict[str, str],
         repair_errors: list[str],
+        blackboard: RunBlackboard | None = None,
     ) -> dict[str, str]: ...
 
 
@@ -213,6 +215,7 @@ def _repair_generated_files(
         target_repo=result["target_repo"],
         generated_files=result["generated_files"],
         repair_errors=repair_errors,
+        blackboard=result.get("blackboard"),
     )
 
 
@@ -307,6 +310,14 @@ def run_iac_smith(
                 f"from runtime failure ({repair_attempt + 1}/{max_runtime_repairs})."
             )
             repair_errors = list(runtime_validation.errors)
+            # Learn negative patterns from the real terraform/terragrunt failures
+            # and carry them in the blackboard so each repair prompt is told what
+            # not to repeat.
+            blackboard = result.get("blackboard")
+            if blackboard is not None:
+                result["blackboard"] = blackboard.with_findings(
+                    normalize_validation_findings(repair_errors)
+                )
             try:
                 repaired_files = _repair_generated_files(
                     repairer=runtime_repairer,
