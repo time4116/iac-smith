@@ -85,6 +85,13 @@ def _module_already_exists(stack: str, repo_patterns: RepoPatterns | None) -> bo
     )
 
 
+def _requires_application_source(intent: InfrastructureIntent) -> bool:
+    haystack = " ".join([intent.raw_request, intent.resource_type, *intent.features]).lower()
+    return "src" in haystack or any(
+        token in haystack for token in ["dotnet", ".net", "web app", "application source"]
+    )
+
+
 def plan_changes(
     intent: InfrastructureIntent,
     target_repo: str,
@@ -147,6 +154,15 @@ def plan_changes(
             ]
         )
 
+    if _requires_application_source(intent):
+        files.extend(
+            [
+                f"src/{stack_name}/{stack_name}.csproj",
+                f"src/{stack_name}/Program.cs",
+                f"src/{stack_name}/README.md",
+            ]
+        )
+
     summary = [
         f"Generate {stack_name} Terraform/Terragrunt structure",
         "Generate AWS infrastructure with secure defaults regardless of prompt wording",
@@ -165,6 +181,8 @@ def plan_changes(
             )
         else:
             summary.append("Generate foundation module for shared network dependencies")
+    if _requires_application_source(intent):
+        summary.append("Generate application source under src/")
 
     return ChangePlan(
         stack_name=stack_name,

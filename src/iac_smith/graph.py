@@ -1,9 +1,17 @@
 from collections.abc import Callable
+from inspect import signature
 from pathlib import Path
 from typing import Protocol
 
 from langgraph.graph import END, StateGraph
 
+from iac_smith.blackboard import (
+    ContractResolver,
+    RunBlackboard,
+    build_blackboard,
+    normalize_validation_findings,
+    validate_generated_contracts,
+)
 from iac_smith.dynamic_terraform import BedrockTerraformGenerator
 from iac_smith.models.change_plan import ChangePlan
 from iac_smith.models.intent import InfrastructureIntent
@@ -31,6 +39,7 @@ class FileGenerator(Protocol):
         ruleset: Ruleset | None,
         target_repo: str,
         repo_path: Path | None = None,
+        blackboard: RunBlackboard | None = None,
     ) -> dict[str, str]: ...
 
 
@@ -42,6 +51,7 @@ def default_file_generator(
     ruleset: Ruleset | None,
     target_repo: str,
     repo_path: Path | None = None,
+    blackboard: RunBlackboard | None = None,
 ) -> dict[str, str]:
     return BedrockTerraformGenerator().generate_files(
         intent=intent,
@@ -50,7 +60,15 @@ def default_file_generator(
         ruleset=ruleset,
         target_repo=target_repo,
         repo_path=repo_path,
+        blackboard=blackboard,
     )
+
+
+def _call_file_generator(file_generator_fn: FileGenerator, **kwargs) -> dict[str, str]:
+    params = signature(file_generator_fn).parameters
+    if "blackboard" not in params:
+        kwargs.pop("blackboard", None)
+    return file_generator_fn(**kwargs)
 
 
 def issue_intake(state: IaCSmithState) -> IaCSmithState:
@@ -107,6 +125,19 @@ def change_planner(state: IaCSmithState) -> IaCSmithState:
     }
 
 
+def blackboard_planner(state: IaCSmithState) -> IaCSmithState:
+    return {
+        **state,
+        "blackboard": build_blackboard(
+            intent=state["intent"],
+            change_plan=state["change_plan"],
+            repo_patterns=state.get("repo_patterns"),
+            resolver=ContractResolver(),
+        ),
+        "status": "blackboard_ready",
+    }
+
+
 def make_code_generator(file_generator_fn: FileGenerator):
     def code_generator_node(state: IaCSmithState) -> IaCSmithState:
         # If we have generated files and we are not in a validation-repair loop, reuse them.
@@ -122,13 +153,15 @@ def make_code_generator(file_generator_fn: FileGenerator):
 
         # Perform Bedrock generation or recovery attempt
         raw_repo_path = state.get("target_repo_path")
-        generated_files = file_generator_fn(
+        generated_files = _call_file_generator(
+            file_generator_fn,
             intent=state["intent"],
             change_plan=state["change_plan"],
             repo_patterns=state["repo_patterns"],
             ruleset=state.get("ruleset"),
             target_repo=state["target_repo"],
             repo_path=Path(raw_repo_path) if raw_repo_path else None,
+            blackboard=state.get("blackboard"),
         )
         return {
             **state,
@@ -143,6 +176,12 @@ def validation_runner(state: IaCSmithState) -> IaCSmithState:
     generated_files = state.get("generated_files", {})
     if generated_files:
         validation = static_review_generated_files(generated_files)
+        if validation.status != ValidationStatus.FAILED:
+            contract_validation = validate_generated_contracts(
+                generated_files, state.get("blackboard")
+            )
+            if contract_validation.status == ValidationStatus.FAILED:
+                validation = contract_validation
     else:
         validation = ValidationResult(
             status=ValidationStatus.FAILED,
@@ -158,9 +197,14 @@ def validation_runner(state: IaCSmithState) -> IaCSmithState:
     if validation.status == ValidationStatus.FAILED:
         status = "blocked" if repair_attempts >= 3 else "needs_repair"
 
+    blackboard = state.get("blackboard")
+    if validation.status == ValidationStatus.FAILED and blackboard:
+        blackboard = blackboard.with_findings(normalize_validation_findings(validation.errors))
+
     return {
         **state,
         "validation": validation,
+        "blackboard": blackboard,
         "repair_attempts": repair_attempts,
         "status": status,
     }
@@ -206,6 +250,7 @@ def build_graph(
     graph.add_node("ruleset_loader", ruleset_loader)
     graph.add_node("repo_pattern_scanner", repo_pattern_scanner)
     graph.add_node("change_planner", change_planner)
+    graph.add_node("blackboard_planner", blackboard_planner)
     graph.add_node("code_generator", make_code_generator(file_generator_fn))
     graph.add_node("validation_runner", validation_runner)
     graph.add_node("pr_writer", pr_writer)
@@ -223,7 +268,8 @@ def build_graph(
     )
     graph.add_edge("ruleset_loader", "repo_pattern_scanner")
     graph.add_edge("repo_pattern_scanner", "change_planner")
-    graph.add_edge("change_planner", "code_generator")
+    graph.add_edge("change_planner", "blackboard_planner")
+    graph.add_edge("blackboard_planner", "code_generator")
     graph.add_edge("code_generator", "validation_runner")
     graph.add_conditional_edges(
         "validation_runner",

@@ -42,6 +42,26 @@ def test_plan_accepts_arbitrary_resource_type():
         assert plan.files_to_generate
 
 
+def test_plan_changes_includes_src_artifacts_for_application_source_requests():
+    intent = InfrastructureIntent(
+        raw_request=(
+            "Create a dotnet web app welcome page on Elastic Beanstalk and create "
+            "a src directory where the code will be stored."
+        ),
+        resource_type="elastic_beanstalk_dotnet",
+        environment_scope=EnvironmentScope.NON_PROD_ONLY,
+        environments=["non-prod"],
+        region="us-west-2",
+        features=["dotnet", "web", "https"],
+    )
+
+    plan = plan_changes(intent, "time4116/iac-smith-demo-infra")
+
+    assert "src/elastic-beanstalk-dotnet/Program.cs" in plan.files_to_generate
+    assert "src/elastic-beanstalk-dotnet/elastic-beanstalk-dotnet.csproj" in plan.files_to_generate
+    assert any(item == "Generate application source under src/" for item in plan.summary)
+
+
 def test_plan_uses_existing_environment_names_when_issue_does_not_pin_scope():
     intent = InfrastructureIntent(
         raw_request="Create a VPC foundation",

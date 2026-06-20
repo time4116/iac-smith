@@ -9,6 +9,7 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
+from iac_smith.blackboard import RunBlackboard, build_blackboard_prompt_section
 from iac_smith.models.change_plan import ChangePlan
 from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
@@ -587,6 +588,7 @@ def build_generation_prompt(
     repo_patterns: RepoPatterns,
     ruleset: Ruleset | None,
     target_repo: str,
+    blackboard: RunBlackboard | None = None,
     repair_errors: list[str] | None = None,
     previous_content: str | None = None,
     sibling_content: dict[str, str] | None = None,
@@ -788,7 +790,7 @@ Non-negotiable rules:
   preserve existing valid variable declarations and append missing ones; do not
   replace the file with only the newly mentioned variables. Missing any one
   variable will fail `terraform validate` or live Terragrunt plan/apply.
-{_CANONICAL_FILE_SHAPES}{sibling_section}{existing_section}{repair_section}
+{_CANONICAL_FILE_SHAPES}{build_blackboard_prompt_section(blackboard)}{sibling_section}{existing_section}{repair_section}
 Generation context JSON:
 {json.dumps(context, indent=2)}
 """
@@ -1290,6 +1292,7 @@ class BedrockTerraformGenerator:
         previous_content: str | None = None,
         sibling_content: dict[str, str] | None = None,
         existing_content: str | None = None,
+        blackboard: RunBlackboard | None = None,
     ) -> str:
         single_file_plan = change_plan.model_copy(update={"files_to_generate": [path]})
         prompt = build_generation_prompt(
@@ -1298,6 +1301,7 @@ class BedrockTerraformGenerator:
             repo_patterns=repo_patterns,
             ruleset=ruleset,
             target_repo=target_repo,
+            blackboard=blackboard,
             repair_errors=repair_errors,
             previous_content=previous_content,
             sibling_content=sibling_content,
@@ -1354,6 +1358,7 @@ class BedrockTerraformGenerator:
         ruleset: Ruleset | None,
         target_repo: str,
         repo_path: Path | None = None,
+        blackboard: RunBlackboard | None = None,
     ) -> dict[str, str]:
         generated_files: dict[str, str] = {}
         total_files = len(change_plan.files_to_generate)
@@ -1397,6 +1402,7 @@ class BedrockTerraformGenerator:
                     target_repo=target_repo,
                     sibling_content=_sibling_content(path, accumulated) or None,
                     existing_content=existing_contents.get(path),
+                    blackboard=blackboard,
                 )
                 accumulated[path] = content
                 results.append((path, content))
@@ -1500,6 +1506,7 @@ class BedrockTerraformGenerator:
                             repair_errors=repair_errors,
                             previous_content=previous_files[path],
                             sibling_content=_unit_sibling_content(path, accumulated) or None,
+                            blackboard=blackboard,
                         )
                     except (ValueError, json.JSONDecodeError) as exc:
                         # A single file failing to repair must not crash the run.
@@ -1539,6 +1546,7 @@ class BedrockTerraformGenerator:
         target_repo: str,
         generated_files: dict[str, str],
         repair_errors: list[str],
+        blackboard: RunBlackboard | None = None,
     ) -> dict[str, str]:
         """Repair generated files using runtime validation/plan failures.
 
@@ -1584,6 +1592,7 @@ class BedrockTerraformGenerator:
                     repair_errors=repair_errors,
                     previous_content=generated_files[path],
                     sibling_content=_unit_sibling_content(path, accumulated) or None,
+                    blackboard=blackboard,
                 )
                 accumulated[path] = content
                 results.append((path, content))
