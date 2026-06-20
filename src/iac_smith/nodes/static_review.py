@@ -1,4 +1,6 @@
+import posixpath
 import re
+from pathlib import Path
 
 from iac_smith.models.validation import ValidationResult, ValidationStatus
 from iac_smith.nodes.contract import parse_module_variables
@@ -564,6 +566,107 @@ def _find_terragrunt_dependency_output_mismatches(
     return errors
 
 
+def existing_stack_dirs(repo_path: Path | str | None) -> set[str]:
+    """Repo-relative directories of every Terragrunt stack already in the target repo.
+
+    Used so a workload that legitimately depends on a pre-existing foundation
+    stack (one this change does not regenerate) is not flagged as dangling.
+    """
+    if not repo_path:
+        return set()
+    root = Path(repo_path)
+    env_dir = root / "environments"
+    if not env_dir.is_dir():
+        return set()
+    dirs: set[str] = set()
+    for tg in env_dir.rglob("terragrunt.hcl"):
+        rel = tg.relative_to(root)
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        rel_posix = rel.as_posix()
+        if _is_stack_terragrunt(rel_posix):
+            dirs.add(posixpath.dirname(rel_posix))
+    return dirs
+
+
+def _resolve_dependency_target(stack_path: str, config_path: str) -> str | None:
+    """Resolve a Terragrunt `config_path` to the repo-relative stack dir it targets.
+
+    Returns ``None`` when the path is remote/unverifiable (git/http) or escapes the
+    repo root, so those are left to runtime rather than guessed at here.
+    """
+    clean = config_path.strip().rstrip("/")
+    if not clean or clean.startswith(("git::", "http://", "https://", "github.com")):
+        return None
+    target = posixpath.normpath(posixpath.join(posixpath.dirname(stack_path), clean))
+    if target.startswith("..") or target in (".", ""):
+        return None
+    return target
+
+
+def _find_terragrunt_dangling_dependencies(
+    generated_files: dict[str, str], known_stack_dirs: set[str]
+) -> list[str]:
+    """Flag Terragrunt `dependency` references whose target stack does not exist.
+
+    Terragrunt only reports these cryptically, and far too late — at `terragrunt
+    plan` ("There is no variable named dependency" / "<stack> does not exist"),
+    after the file set is fixed and the runtime repair loop can no longer add the
+    missing stack. Two cases:
+
+    1. `dependency.<name>.outputs.*` is referenced but no `dependency "<name>"`
+       block is declared in the stack.
+    2. A `dependency "<name>"` points at a stack that is neither created by this
+       change nor already present in the target repo.
+
+    Both mean the model invented a cross-stack dependency on infrastructure that
+    isn't there. Generic by design: the rule is "the target stack must exist",
+    never "it must be called foundation". ``known_stack_dirs`` carries the stacks
+    that already exist in the repo so pre-existing dependencies are not flagged.
+    """
+    resolvable = {
+        posixpath.dirname(path) for path in generated_files if _is_stack_terragrunt(path)
+    } | known_stack_dirs
+    errors: list[str] = []
+    for path, content in generated_files.items():
+        if not _is_stack_terragrunt(path):
+            continue
+        declared = {
+            label: _CONFIG_PATH_RE.search(block)
+            for label, block in _extract_named_hcl_blocks(content, _DEPENDENCY_HEADER_RE).items()
+        }
+        referenced = {
+            m.group(1) for m in _TG_DEPENDENCY_OUTPUT_REF_RE.finditer(_strip_hcl_comments(content))
+        }
+        for label in sorted(referenced):
+            if label not in declared:
+                errors.append(
+                    f"Terragrunt stack `{path}` references `dependency.{label}.outputs.*` "
+                    f'but declares no `dependency "{label}"` block. Add the dependency block '
+                    f"(with `config_path` and `mock_outputs`) or stop referencing it."
+                )
+                continue
+            config_m = declared[label]
+            if config_m is None:
+                errors.append(
+                    f'Terragrunt stack `{path}` declares `dependency "{label}"` without a '
+                    f"`config_path`. Point it at the stack that produces those outputs."
+                )
+                continue
+            target = _resolve_dependency_target(path, config_m.group(1))
+            if target is None or target in resolvable:
+                continue
+            errors.append(
+                f"Terragrunt stack `{path}` depends on stack `{target}` (via "
+                f'`dependency "{label}"`, `config_path = "{config_m.group(1)}"`), but that '
+                f"stack is neither created by this change nor present in the target repo. "
+                f"Either create the `{target}` stack in this change, provision those "
+                f"resources inside this module, or source them with Terraform data sources "
+                f"instead of a cross-stack dependency."
+            )
+    return errors
+
+
 def _find_singleton_resource_duplication(generated_files: dict[str, str]) -> list[str]:
     """Flag foundational resource types (e.g. aws_vpc) declared in multiple modules.
 
@@ -666,7 +769,9 @@ _SECURITY_CHECKS_PERFORMED = (
 )
 
 
-def static_review_generated_files(generated_files: dict[str, str]) -> ValidationResult:
+def static_review_generated_files(
+    generated_files: dict[str, str], known_stack_dirs: set[str] | None = None
+) -> ValidationResult:
     # Three tiers:
     #   errors      — security/safety. These BLOCK PR creation; real Terraform
     #                 will not catch them (secrets, workflow privilege, hardcoded
@@ -719,6 +824,9 @@ def static_review_generated_files(generated_files: dict[str, str]) -> Validation
     structural.extend(_find_terragrunt_orphaned_locals(generated_files))
     structural.extend(_find_terragrunt_missing_required_inputs(generated_files))
     structural.extend(_find_terragrunt_dependency_output_mismatches(generated_files))
+    structural.extend(
+        _find_terragrunt_dangling_dependencies(generated_files, known_stack_dirs or set())
+    )
 
     # Cross-module provider name collisions are not caught by module-level
     # terraform validate and can fail only at apply time, so they block PR

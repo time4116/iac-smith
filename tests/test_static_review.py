@@ -16,11 +16,13 @@ from iac_smith.nodes.static_review import (
     _find_duplicate_named_resources,
     _find_redacted_placeholders,
     _find_singleton_resource_duplication,
+    _find_terragrunt_dangling_dependencies,
     _find_terragrunt_dependency_output_mismatches,
     _find_terragrunt_missing_required_inputs,
     _find_terragrunt_orphaned_locals,
     _find_terragrunt_required_providers,
     _find_undeclared_variable_references,
+    existing_stack_dirs,
     static_review_generated_files,
 )
 
@@ -474,6 +476,97 @@ class TestTerragruntDependencyOutputMismatches:
         }
 
         assert _find_terragrunt_dependency_output_mismatches(files) == []
+
+
+class TestTerragruntDanglingDependencies:
+    def _workload_stack(self) -> str:
+        return (
+            'dependency "foundation" {\n'
+            '  config_path = "../foundation"\n'
+            '  mock_outputs = { vpc_id = "vpc-123" }\n'
+            "}\n"
+            "inputs = {\n"
+            "  vpc_id = dependency.foundation.outputs.vpc_id\n"
+            "}\n"
+        )
+
+    def test_flags_dependency_on_stack_not_in_change(self) -> None:
+        # The EB failure: a workload stack depends on a foundation stack that was
+        # never generated and does not exist in the repo.
+        files = {
+            "environments/non-prod/eb-dotnet/terragrunt.hcl": self._workload_stack(),
+            "modules/eb-dotnet/main.tf": 'resource "aws_vpc" "x" {}\n',
+        }
+
+        errors = _find_terragrunt_dangling_dependencies(files, set())
+
+        assert len(errors) == 1
+        assert "environments/non-prod/foundation" in errors[0]
+        assert "data sources" in errors[0]
+
+    def test_flags_reference_without_dependency_block(self) -> None:
+        files = {
+            "environments/non-prod/eb-dotnet/terragrunt.hcl": (
+                "inputs = { vpc_id = dependency.foundation.outputs.vpc_id }\n"
+            ),
+        }
+
+        errors = _find_terragrunt_dangling_dependencies(files, set())
+
+        assert len(errors) == 1
+        assert 'declares no `dependency "foundation"` block' in errors[0]
+
+    def test_ok_when_foundation_stack_generated_in_same_change(self) -> None:
+        files = {
+            "environments/non-prod/eb-dotnet/terragrunt.hcl": self._workload_stack(),
+            "environments/non-prod/foundation/terragrunt.hcl": (
+                'terraform { source = "../../../modules/foundation" }\n'
+            ),
+        }
+
+        assert _find_terragrunt_dangling_dependencies(files, set()) == []
+
+    def test_ok_when_foundation_stack_pre_exists_in_repo(self) -> None:
+        files = {"environments/non-prod/eb-dotnet/terragrunt.hcl": self._workload_stack()}
+
+        # The foundation stack already lives in the target repo (not regenerated).
+        known = {"environments/non-prod/foundation"}
+
+        assert _find_terragrunt_dangling_dependencies(files, known) == []
+
+    def test_remote_config_path_is_not_flagged(self) -> None:
+        files = {
+            "environments/non-prod/eb-dotnet/terragrunt.hcl": (
+                'dependency "shared" {\n'
+                '  config_path = "git::https://example.com/infra.git//foundation"\n'
+                "}\n"
+                "inputs = { vpc_id = dependency.shared.outputs.vpc_id }\n"
+            )
+        }
+
+        assert _find_terragrunt_dangling_dependencies(files, set()) == []
+
+    def test_surfaced_as_structural_in_full_review(self) -> None:
+        files = {
+            "environments/non-prod/eb-dotnet/terragrunt.hcl": self._workload_stack(),
+        }
+
+        result = static_review_generated_files(files)
+
+        assert any("environments/non-prod/foundation" in s for s in result.structural)
+
+    def test_existing_stack_dirs_reads_repo(self, tmp_path) -> None:
+        env = tmp_path / "environments" / "non-prod"
+        (env / "foundation").mkdir(parents=True)
+        (env / "foundation" / "terragrunt.hcl").write_text("# foundation\n")
+        (env.parent / "non-prod" / "terragrunt.hcl").write_text("# env root, not a stack\n")
+        (env / ".terragrunt-cache").mkdir()
+        (env / ".terragrunt-cache" / "terragrunt.hcl").write_text("# cached copy\n")
+
+        dirs = existing_stack_dirs(tmp_path)
+
+        assert dirs == {"environments/non-prod/foundation"}
+        assert existing_stack_dirs(None) == set()
 
 
 class TestDuplicateNamedResources:

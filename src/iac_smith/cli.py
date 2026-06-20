@@ -15,7 +15,7 @@ from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
 from iac_smith.models.rules import Ruleset
 from iac_smith.nodes.pr_writer import branch_name_for_issue, build_pr_body
-from iac_smith.nodes.static_review import static_review_generated_files
+from iac_smith.nodes.static_review import existing_stack_dirs, static_review_generated_files
 from iac_smith.runtime_validation import validate_generated_iac
 from iac_smith.services.github import (
     GitHubIssue,
@@ -333,7 +333,9 @@ def run_iac_smith(
                     result=result,
                     repair_errors=repair_errors,
                 )
-                static_check = static_review_generated_files(repaired_files)
+                static_check = static_review_generated_files(
+                    repaired_files, known_stack_dirs=existing_stack_dirs(repo_path)
+                )
                 static_issues = [*static_check.errors, *static_check.structural]
                 if static_issues:
                     _log(
