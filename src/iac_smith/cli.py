@@ -201,6 +201,31 @@ def _runtime_repair_attempts(env: Mapping[str, str]) -> int:
     return max(0, attempts)
 
 
+def _descriptive_title(result: IaCSmithState) -> str:
+    """Build a human-readable commit/PR title from the change plan.
+
+    Conveys *what* the change is (stack, region, environments) at a glance so a
+    reviewer does not have to open the source issue to learn anything. Falls back
+    to the issue-number form only when the plan has no stack name.
+    """
+    issue = result["issue_number"]
+    plan = result.get("change_plan")
+    intent = result.get("intent")
+    stack = (getattr(plan, "stack_name", "") or "").strip()
+    if not stack:
+        return f"feat: generate IaC for issue #{issue}"
+    environments = (
+        getattr(plan, "environments", None) or getattr(intent, "environments", None) or []
+    )
+    region = (getattr(intent, "region", "") or "").strip()
+    bits = [stack]
+    if region:
+        bits.append(f"in {region}")
+    if environments:
+        bits.append(f"({', '.join(environments)})")
+    return f"feat: {' '.join(bits)} (#{issue})"
+
+
 def _repair_generated_files(
     *,
     repairer: RuntimeRepairer,
@@ -416,7 +441,7 @@ def run_iac_smith(
             runtime_checks=runtime_validation.checks,
         )
 
-    commit_message = f"feat: generate IaC for issue #{result['issue_number']}"
+    commit_message = _descriptive_title(result)
     _log("IaC Smith: committing generated files.")
     committed = commit_generated_files(repo_path, commit_message)
     if not committed:
@@ -432,7 +457,7 @@ def run_iac_smith(
     _log("IaC Smith: opening pull request.")
     pr = pr_client.create_pull_request(
         repo=target_repo,
-        title=f"feat: generate IaC for issue #{result['issue_number']}",
+        title=_descriptive_title(result),
         body=result["pr_body"] or "",
         head=branch,
         base="main",
