@@ -226,3 +226,28 @@ def test_normalize_validation_findings_extracts_negative_schema_patterns():
             ),
         )
     ]
+
+
+def test_normalize_validation_findings_extracts_unsupported_block():
+    errors = [
+        "terraform validate bootstrap/backend/non-prod failed:\n"
+        "│ Error: Unsupported block type\n"
+        '│   on main.tf line 49, in resource "aws_dynamodb_table" "terraform_locks":\n'
+        "│   49:   point_in_time_recovery_specification {\n"
+        '│ Blocks of type "point_in_time_recovery_specification" are not expected here.'
+    ]
+
+    findings = normalize_validation_findings(errors)
+
+    assert findings == [
+        ValidationFinding(
+            scope="aws_dynamodb_table",
+            finding="Unsupported block point_in_time_recovery_specification",
+            source="terraform validation",
+            severity="hard",
+            negative_pattern=(
+                "Do not use a `point_in_time_recovery_specification` block in "
+                "`aws_dynamodb_table`; it is not in that contract."
+            ),
+        )
+    ]

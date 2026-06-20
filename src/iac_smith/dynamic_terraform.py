@@ -802,6 +802,16 @@ Non-negotiable rules:
   preserve existing valid variable declarations and append missing ones; do not
   replace the file with only the newly mentioned variables. Missing any one
   variable will fail `terraform validate` or live Terragrunt plan/apply.
+* **Provider schema errors are authoritative — CRITICAL:** when repair errors
+  include Terraform/Terragrunt validation or plan output, treat quoted provider
+  schema constraints as the source of truth for any resource type. Satisfy the
+  exact regex, enum, type, range, and unsupported-argument errors reported by the
+  provider rather than preserving the previous value. If a requested third-party
+  artifact, endpoint, image, ARN, region, or identifier does not match a provider
+  constraint, dynamically choose the smallest valid Terraform design that bridges
+  the mismatch using generated resources, inputs, or workflows inside the planned
+  file boundary. Do not special-case one AWS service; infer the fix from the
+  issue text, repo patterns, active rules, and the exact provider error.
 {_CANONICAL_FILE_SHAPES}{build_blackboard_prompt_section(blackboard)}{sibling_section}{existing_section}{repair_section}
 Generation context JSON:
 {json.dumps(context, indent=2)}

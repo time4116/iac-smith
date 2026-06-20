@@ -36,7 +36,21 @@ def _run_check(command: list[str], cwd: Path, env: dict[str, str]) -> tuple[bool
 
 
 def _changed_roots(repo_path: Path) -> tuple[list[Path], list[Path]]:
-    module_roots = sorted({path.parent for path in (repo_path / "modules").glob("*/*.tf")})
+    # Every standalone Terraform root gets schema-validated, not just `modules/*`.
+    # `bootstrap/**` (the backend S3/DynamoDB roots) is a real root that must be
+    # `terraform validate`d too — otherwise schema errors there reach the target
+    # repo's own CI instead of IaC Smith's pre-PR repair loop. `environments/` is
+    # excluded (those are Terragrunt stacks, exercised via `terragrunt plan`), and
+    # cache/hidden dirs are skipped so we never pick up a `.terraform` copy.
+    terraform_roots: set[Path] = set()
+    for tf in repo_path.rglob("*.tf"):
+        rel = tf.relative_to(repo_path)
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        if rel.parts[0] == "environments":
+            continue
+        terraform_roots.add(tf.parent)
+    module_roots = sorted(terraform_roots)
 
     # A stack is any terragrunt.hcl nested at least one level below its
     # environment dir (environments/<env>/<stack>/…). This matches

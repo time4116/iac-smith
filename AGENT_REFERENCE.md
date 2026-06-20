@@ -359,7 +359,7 @@ class ValidationResult(BaseModel):
 |---|---|
 | `environments/` (if exists) | `terragrunt hcl format` (v0.71+) or `terragrunt hclfmt` — auto-fix, no `--check` |
 | `modules/` and `bootstrap/` | `terraform fmt -recursive` — auto-fix, silently corrects formatting in place |
-| Each dir in `modules/` with `*.tf` | `terraform init -backend=false -input=false` then `terraform validate` |
+| Every standalone Terraform root with `*.tf` (any dir under `modules/`, `bootstrap/`, etc. — everything except `environments/` Terragrunt stacks and `.`-prefixed cache dirs) | `terraform init -backend=false -input=false` then `terraform validate` |
 
 After each successful `terraform init`, IaC Smith also runs `terraform providers schema -json` in that module and parses the authoritative resource contracts (scoped to the resource types the module declares) onto `RuntimeValidationResult.contract_docs`. This is best-effort — any failure to read or parse the schema is swallowed and never blocks validation. The contracts feed the run blackboard so repair prompts get real allowed/required arguments (see Runtime Repair Loop).
 
