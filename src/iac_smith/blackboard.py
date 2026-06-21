@@ -261,6 +261,13 @@ _VALUE_RANGE_RE = re.compile(
 _MISSING_REQUIRED_VAR_RE = re.compile(
     r'The root module input variable "(?P<var>[^"]+)" is not set, and has no default value'
 )
+# A value rejected by a Terraform custom `validation {}` block on a variable —
+# the model's *own* declared constraint, surfaced only at plan time (e.g.
+# `var.health_check_interval is 30` / "must be between 1 and 20 seconds").
+_INVALID_VAR_VALUE_RE = re.compile(
+    r"var\.(?P<var>[A-Za-z0-9_]+) is (?P<got>[^\n]+)"
+    r"(?P<message>[\s\S]*?)This was checked by the validation rule"
+)
 
 
 def validate_generated_contracts(
@@ -429,6 +436,27 @@ def normalize_validation_findings(
                     negative_pattern=(
                         f"Required variable `{var}` has no value and no default; pass it in the "
                         f"stack `inputs` block or give it a safe default — never leave it unset."
+                    ),
+                )
+            )
+        for match in _INVALID_VAR_VALUE_RE.finditer(error):
+            var = match.group("var")
+            got = match.group("got").strip()
+            rule = " ".join(match.group("message").split()).strip(" .")
+            key = (var, f"validation:{got}")
+            if key in seen:
+                continue
+            seen.add(key)
+            constraint = f" ({rule})" if rule else ""
+            findings.append(
+                ValidationFinding(
+                    scope=var,
+                    finding=f"Value {got} fails variable validation",
+                    source="terraform plan",
+                    negative_pattern=(
+                        f"`{var}` value `{got}` violates its own `validation` rule{constraint}; "
+                        f"set a value that satisfies the declared constraint (or correct the rule "
+                        f"if the rule itself is wrong) — do not keep the rejected value."
                     ),
                 )
             )

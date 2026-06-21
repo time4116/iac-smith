@@ -276,6 +276,30 @@ def test_normalize_validation_findings_extracts_missing_required_variable():
     assert "Required variable `image_uri` has no value" in findings[0].negative_pattern
 
 
+def test_normalize_validation_findings_extracts_invalid_variable_validation_value():
+    errors = [
+        "Error: Invalid value for variable\n"
+        "\n"
+        "  on variables.tf line 74:\n"
+        '  74: variable "health_check_interval" {\n'
+        "\n"
+        "var.health_check_interval is 30\n"
+        "\n"
+        "health_check_interval must be between 1 and 20 seconds.\n"
+        "\n"
+        "This was checked by the validation rule at variables.tf:78,3-13."
+    ]
+
+    findings = normalize_validation_findings(errors)
+
+    assert len(findings) == 1
+    assert findings[0].scope == "health_check_interval"
+    assert findings[0].source == "terraform plan"
+    pattern = findings[0].negative_pattern
+    assert "`health_check_interval` value `30` violates its own `validation` rule" in pattern
+    assert "must be between 1 and 20 seconds" in pattern
+
+
 def test_normalize_validation_findings_extracts_unsupported_block():
     errors = [
         "terraform validate bootstrap/backend/non-prod failed:\n"

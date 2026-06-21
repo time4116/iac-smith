@@ -81,27 +81,33 @@ def test_select_repair_model_without_escalation_always_uses_primary():
         assert escalated is False
 
 
-def test_select_repair_model_escalates_only_the_final_attempt():
+def test_select_repair_model_escalates_penultimate_then_cleans_up_with_primary():
+    # Default budget of 3 repairs (indices 0,1,2): Haiku, Sonnet, Haiku-cleanup.
     primary = _FakeRepairer("haiku")
     escalation = _FakeRepairer("sonnet")
 
-    first, first_escalated = _select_repair_model(
-        repair_attempt=0,
-        max_runtime_repairs=2,
-        primary=primary,
-        escalation=escalation,
-    )
-    assert first is primary
-    assert first_escalated is False
+    def select(attempt):
+        return _select_repair_model(
+            repair_attempt=attempt,
+            max_runtime_repairs=3,
+            primary=primary,
+            escalation=escalation,
+        )
 
-    final, final_escalated = _select_repair_model(
-        repair_attempt=1,
-        max_runtime_repairs=2,
-        primary=primary,
-        escalation=escalation,
-    )
-    assert final is escalation
-    assert final_escalated is True
+    assert select(0) == (primary, False)  # first repair stays on the primary model
+    assert select(1) == (escalation, True)  # still stuck -> escalate the heavy lift
+    assert select(2) == (primary, False)  # final pass cleans up what escalation unlocked
+
+
+def test_select_repair_model_never_escalates_the_first_repair():
+    primary = _FakeRepairer("haiku")
+    escalation = _FakeRepairer("sonnet")
+
+    # With only 2 repairs, the penultimate is index 0; escalation must NOT fire
+    # as the very first repair, so the whole loop stays on the primary model.
+    assert _select_repair_model(
+        repair_attempt=0, max_runtime_repairs=2, primary=primary, escalation=escalation
+    ) == (primary, False)
 
 
 def test_build_escalation_repairer_returns_none_without_env():

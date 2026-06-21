@@ -193,7 +193,7 @@ def _target_repo_path(env: Mapping[str, str], target_repo: str, token: str) -> P
 
 
 def _runtime_repair_attempts(env: Mapping[str, str]) -> int:
-    value = env.get("IAC_SMITH_RUNTIME_REPAIR_ATTEMPTS", "2")
+    value = env.get("IAC_SMITH_RUNTIME_REPAIR_ATTEMPTS", "3")
     try:
         attempts = int(value)
     except ValueError as exc:
@@ -204,14 +204,15 @@ def _runtime_repair_attempts(env: Mapping[str, str]) -> int:
 def _build_escalation_repairer(
     env: Mapping[str, str], primary_model_id: str
 ) -> RuntimeRepairer | None:
-    """A stronger model used only for the final runtime repair attempt.
+    """A stronger model used for one heavy repair pass when the primary is stuck.
 
-    The primary model (e.g. Haiku) handles generation and every repair attempt
-    but the last. Provider-schema mistakes a weak model cannot self-correct —
-    inventing an argument, block, or resource type the schema does not have — are
-    escalated to ``BEDROCK_ESCALATION_MODEL_ID`` (e.g. Sonnet) for one final pass
-    over only the failing files, so the stronger model is billed solely on the
-    hard cases. Unset, blank, or equal to the primary model means no escalation.
+    The primary model (e.g. Haiku) handles generation and most repair attempts.
+    Provider-schema mistakes it cannot self-correct — inventing an argument,
+    block, or resource type the schema does not have — are escalated to
+    ``BEDROCK_ESCALATION_MODEL_ID`` (e.g. Sonnet) for one pass over only the
+    failing files (see ``_select_repair_model`` for when), so the stronger model
+    is billed solely on the hard cases. Unset, blank, or equal to the primary
+    model means no escalation.
     """
     escalation_model = (env.get("BEDROCK_ESCALATION_MODEL_ID") or "").strip()
     if not escalation_model or escalation_model == primary_model_id:
@@ -226,13 +227,19 @@ def _select_repair_model(
     primary: RuntimeRepairer,
     escalation: RuntimeRepairer | None,
 ) -> tuple[RuntimeRepairer, bool]:
-    """Pick the repairer for this attempt; escalate only the final one.
+    """Pick the repairer for this attempt; escalate the *penultimate* one.
 
-    Returns ``(repairer, escalated)``. The final repair is the last attempt
-    before the loop gives up (``repair_attempt == max_runtime_repairs - 1``).
+    Returns ``(repairer, escalated)``. The stronger model does the hard lift on
+    the second-to-last repair, so a final primary-model pass can still clean up a
+    cheaper follow-on error its bigger fix unlocks (e.g. a value that violates a
+    variable ``validation`` rule, only reachable once the schema finally plans).
+    Requires at least one prior primary attempt, so escalation never fires as the
+    very first repair.
     """
-    is_final = escalation is not None and repair_attempt == max_runtime_repairs - 1
-    if is_final and escalation is not None:
+    is_escalation_attempt = (
+        escalation is not None and repair_attempt >= 1 and repair_attempt == max_runtime_repairs - 2
+    )
+    if is_escalation_attempt and escalation is not None:
         return escalation, True
     return primary, False
 
@@ -430,7 +437,7 @@ def run_iac_smith(
             )
             if escalated:
                 _log(
-                    "IaC Smith: escalating final repair attempt "
+                    "IaC Smith: escalating repair attempt "
                     f"({repair_attempt + 1}/{max_runtime_repairs}) to "
                     f"{getattr(active_repairer, 'model_id', 'escalation model')} "
                     "(failing files only)."
