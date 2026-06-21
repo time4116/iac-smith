@@ -12,6 +12,7 @@ from iac_smith.nodes.static_review import (
     _SINGLETON_RESOURCE_TYPES,
     _apply_workflow_errors,
     _contains_dangerous_public_ingress,
+    _find_apprunner_non_ecr_image,
     _find_cross_file_duplicates,
     _find_duplicate_named_resources,
     _find_hardcoded_secret_values,
@@ -122,6 +123,118 @@ class TestTerragruntIncludeCycles:
         }
 
         assert _find_terragrunt_include_cycles(files) == []
+
+
+class TestAppRunnerImageSource:
+    def _service(self, image_line: str) -> str:
+        return (
+            'resource "aws_apprunner_service" "this" {\n'
+            '  service_name = "open-webui"\n'
+            "  source_configuration {\n"
+            "    image_repository {\n"
+            f"      {image_line}\n"
+            '      image_repository_type = "ECR_PUBLIC"\n'
+            "    }\n"
+            "  }\n"
+            "}\n"
+        )
+
+    def test_ghcr_literal_image_is_blocked(self) -> None:
+        files = {
+            "modules/app-runner-open-webui/main.tf": self._service(
+                'image_identifier = "ghcr.io/open-webui/open-webui:latest"'
+            )
+        }
+
+        errors = _find_apprunner_non_ecr_image(files)
+
+        assert len(errors) == 1
+        assert "ghcr.io/open-webui/open-webui:latest" in errors[0]
+        assert "ECR" in errors[0]
+
+    def test_ecr_public_literal_image_is_allowed(self) -> None:
+        files = {
+            "modules/app-runner-open-webui/main.tf": self._service(
+                'image_identifier = "public.ecr.aws/aws-containers/hello:latest"'
+            )
+        }
+        assert _find_apprunner_non_ecr_image(files) == []
+
+    def test_private_ecr_literal_image_is_allowed(self) -> None:
+        files = {
+            "modules/app-runner-open-webui/main.tf": self._service(
+                "image_identifier = "
+                '"123456789012.dkr.ecr.us-west-2.amazonaws.com/open-webui:latest"'
+            )
+        }
+        assert _find_apprunner_non_ecr_image(files) == []
+
+    def test_image_from_variable_default_is_resolved_and_blocked(self) -> None:
+        files = {
+            "modules/app-runner-open-webui/main.tf": self._service(
+                "image_identifier = var.image_uri"
+            ),
+            "modules/app-runner-open-webui/variables.tf": (
+                'variable "image_uri" {\n'
+                "  type    = string\n"
+                '  default = "docker.io/open-webui/open-webui:latest"\n'
+                "}\n"
+            ),
+        }
+
+        errors = _find_apprunner_non_ecr_image(files)
+
+        assert len(errors) == 1
+        assert "docker.io/open-webui/open-webui:latest" in errors[0]
+
+    def test_image_from_stack_input_is_resolved_and_blocked(self) -> None:
+        files = {
+            "modules/app-runner-open-webui/main.tf": self._service(
+                "image_identifier = var.image_uri"
+            ),
+            "modules/app-runner-open-webui/variables.tf": (
+                'variable "image_uri" { type = string }\n'
+            ),
+            "environments/non-prod/app-runner-open-webui/terragrunt.hcl": (
+                'terraform {\n  source = "../../../modules/app-runner-open-webui"\n}\n'
+                'inputs = {\n  image_uri = "ghcr.io/open-webui/open-webui:latest"\n}\n'
+            ),
+        }
+
+        errors = _find_apprunner_non_ecr_image(files)
+
+        assert len(errors) == 1
+        assert "ghcr.io/open-webui/open-webui:latest" in errors[0]
+
+    def test_interpolated_image_value_is_not_flagged(self) -> None:
+        files = {
+            "modules/app-runner-open-webui/main.tf": self._service(
+                'image_identifier = "${var.registry}/open-webui:latest"'
+            )
+        }
+        assert _find_apprunner_non_ecr_image(files) == []
+
+    def test_non_apprunner_file_with_image_string_is_ignored(self) -> None:
+        files = {
+            "modules/ecs-fargate/main.tf": (
+                'resource "aws_ecs_task_definition" "this" {\n'
+                '  container_definitions = "image_identifier = \\"ghcr.io/x/y:latest\\""\n'
+                "}\n"
+            )
+        }
+        assert _find_apprunner_non_ecr_image(files) == []
+
+    def test_blocks_pr_via_static_review(self) -> None:
+        files = {
+            "modules/app-runner-open-webui/main.tf": self._service(
+                'image_identifier = "ghcr.io/open-webui/open-webui:latest"'
+            )
+        }
+
+        result = static_review_generated_files(files)
+
+        assert result.status == ValidationStatus.FAILED
+        assert any("App Runner service" in e for e in result.errors)
 
 
 class TestTerragruntRequiredProviders:
