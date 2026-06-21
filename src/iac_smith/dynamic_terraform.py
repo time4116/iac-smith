@@ -1371,6 +1371,40 @@ class BedrockTerraformGenerator:
         assert last_error is not None
         raise last_error
 
+    def summarize_failure(self, block_reason: str) -> str:
+        """Summarize a run's block reason in one short paragraph for the issue author.
+
+        Grounded strictly on the real terraform/terragrunt error text — the model
+        compresses a concrete failure into plain language, it does not speculate.
+        Used to comment back on the source issue when no PR could be opened.
+        """
+        prompt = (
+            "You are IaC Smith. A request to generate Terraform/Terragrunt could not be "
+            "fulfilled and no pull request was opened. In ONE short paragraph (at most 80 "
+            "words), in plain language for the person who filed the issue, explain why, "
+            "based ONLY on the errors below. If a concrete next step is obvious from the "
+            "errors, add one sentence suggesting it. Do not invent any detail that is not "
+            "in the errors, and do not include code blocks.\n\nErrors:\n" + block_reason
+        )
+        response = self._invoke_model_with_retries(
+            modelId=self.model_id,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps(
+                {
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": 400,
+                    "temperature": 0,
+                    "messages": [{"role": "user", "content": prompt}],
+                }
+            ),
+        )
+        raw_body = response["body"].read().decode("utf-8")
+        payload = json.loads(raw_body)
+        parts = payload.get("content") or []
+        text = "".join(block.get("text", "") for block in parts if isinstance(block, dict))
+        return text.strip()
+
     def _generate_planned_file(
         self,
         *,

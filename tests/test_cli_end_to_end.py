@@ -3,8 +3,10 @@ from pathlib import Path
 
 from iac_smith.blackboard import TerraformContract
 from iac_smith.cli import (
+    IaCSmithRunResult,
     _build_escalation_repairer,
     _descriptive_title,
+    _maybe_comment_on_block,
     _repair_runtime_static_issues,
     _select_repair_model,
     run_iac_smith,
@@ -124,6 +126,83 @@ def test_build_escalation_repairer_builds_generator_for_distinct_model():
     repairer = _build_escalation_repairer(env, "anthropic.claude-haiku")
     assert repairer is not None
     assert repairer.model_id == "anthropic.claude-sonnet-4-6"
+
+
+class _FakeCommentClient:
+    def __init__(self, raises: bool = False) -> None:
+        self.calls: list[tuple[str, int, str]] = []
+        self._raises = raises
+
+    def create_issue_comment(self, repo: str, issue_number: int, body: str) -> None:
+        if self._raises:
+            raise RuntimeError("github down")
+        self.calls.append((repo, issue_number, body))
+
+
+_COMMENT_ENV = {"IAC_SMITH_SOURCE_REPO": "owner/repo", "IAC_SMITH_ISSUE_NUMBER": "40"}
+
+
+def test_block_comment_posts_summary_to_source_issue():
+    client = _FakeCommentClient()
+    result = IaCSmithRunResult(status="blocked", block_reason="terraform validate failed: ...")
+
+    _maybe_comment_on_block(
+        env=_COMMENT_ENV,
+        comment_client=client,
+        summarizer=lambda reason: "App Runner cannot pull that image.",
+        result=result,
+    )
+
+    assert len(client.calls) == 1
+    repo, issue_number, body = client.calls[0]
+    assert (repo, issue_number) == ("owner/repo", 40)
+    assert "App Runner cannot pull that image." in body
+    assert "could not open a pull request" in body.lower()
+
+
+def test_block_comment_skipped_on_success_and_without_reason():
+    client = _FakeCommentClient()
+    summarizer = lambda reason: "x"  # noqa: E731
+
+    _maybe_comment_on_block(
+        env=_COMMENT_ENV,
+        comment_client=client,
+        summarizer=summarizer,
+        result=IaCSmithRunResult(status="pr_created", pr_url="http://x", pr_number=1),
+    )
+    _maybe_comment_on_block(
+        env=_COMMENT_ENV,
+        comment_client=client,
+        summarizer=summarizer,
+        result=IaCSmithRunResult(status="blocked", block_reason=None),
+    )
+
+    assert client.calls == []
+
+
+def test_block_comment_skipped_when_client_or_summarizer_missing():
+    client = _FakeCommentClient()
+    result = IaCSmithRunResult(status="blocked", block_reason="boom")
+
+    _maybe_comment_on_block(
+        env=_COMMENT_ENV, comment_client=None, summarizer=lambda r: "x", result=result
+    )
+    _maybe_comment_on_block(env=_COMMENT_ENV, comment_client=client, summarizer=None, result=result)
+
+    assert client.calls == []
+
+
+def test_block_comment_is_best_effort_when_posting_raises():
+    client = _FakeCommentClient(raises=True)
+    result = IaCSmithRunResult(status="blocked", block_reason="boom")
+
+    # Must not propagate — notifying the author can never change the run outcome.
+    _maybe_comment_on_block(
+        env=_COMMENT_ENV,
+        comment_client=client,
+        summarizer=lambda reason: "summary",
+        result=result,
+    )
 
 
 def _fake_intent_parser(issue_text: str) -> InfrastructureIntent:

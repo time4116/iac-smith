@@ -46,6 +46,18 @@ class GitHubIssueClient:
             labels=[label["name"] for label in payload.get("labels", [])],
         )
 
+    def create_issue_comment(self, repo: str, issue_number: int, body: str) -> None:
+        response = self._http_client.post(
+            f"https://api.github.com/repos/{repo}/issues/{issue_number}/comments",
+            headers={
+                "Authorization": f"Bearer {self._token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            json={"body": body},
+        )
+        response.raise_for_status()
+
 
 class GitHubPullRequestClient:
     def __init__(self, token: str, http_client: httpx.Client | None = None) -> None:
