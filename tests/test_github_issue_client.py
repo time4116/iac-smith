@@ -36,6 +36,30 @@ def test_github_issue_client_fetches_issue_metadata_without_comments():
     )
 
 
+def test_github_issue_client_posts_issue_comment():
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert (
+            str(request.url) == "https://api.github.com/repos/time4116/iac-smith/issues/40/comments"
+        )
+        assert request.headers["authorization"] == "Bearer test-token"
+        import json
+
+        captured.update(json.loads(request.content))
+        return httpx.Response(201, json={"id": 1})
+
+    client = GitHubIssueClient(
+        token="test-token",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    client.create_issue_comment("time4116/iac-smith", 40, "It could not be built because X.")
+
+    assert captured == {"body": "It could not be built because X."}
+
+
 def test_github_issue_client_rejects_pull_request_payloads():
     client = GitHubIssueClient(
         token="test-token",

@@ -808,6 +808,26 @@ class TestPathNeedsRepair:
         assert _path_needs_repair("modules/dynamodb-table/outputs.tf", errors) is False
         assert _path_needs_repair("modules/dynamodb-table/README.md", errors) is False
 
+    def test_stack_plan_error_reaches_sourced_module_tf_files(self):
+        # A terragrunt plan failure names the stack dir; the offending value lives
+        # in modules/<stack>, so the module's .tf files must be in scope.
+        errors = [
+            "terragrunt plan environments/non-prod/app-runner-open-webui failed in "
+            "`environments/non-prod/app-runner-open-webui`:\n"
+            "│ Error: expected image_identifier to match regular expression ...\n"
+        ]
+        assert _path_needs_repair("modules/app-runner-open-webui/main.tf", errors) is True
+        assert _path_needs_repair("modules/app-runner-open-webui/variables.tf", errors) is True
+        # An unrelated module must not be pulled in.
+        assert _path_needs_repair("modules/foundation/main.tf", errors) is False
+
+    def test_stack_bridge_does_not_touch_module_non_tf_files(self):
+        errors = [
+            "terragrunt plan environments/non-prod/app-runner-open-webui failed in "
+            "`environments/non-prod/app-runner-open-webui`:\n│ Error: ...\n"
+        ]
+        assert _path_needs_repair("modules/app-runner-open-webui/README.md", errors) is False
+
     def test_directory_error_without_pinpoint_repairs_whole_unit(self):
         # A directory-level error with no "on <file> line N" pinpoint (e.g. a
         # missing-provider init failure) still falls back to whole-unit repair.

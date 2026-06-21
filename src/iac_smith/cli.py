@@ -2,7 +2,7 @@ import os
 import re
 import subprocess
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
@@ -48,6 +48,10 @@ class PullRequestClient(Protocol):
         head: str,
         base: str = "main",
     ) -> GitHubPullRequest: ...
+
+
+class IssueCommentClient(Protocol):
+    def create_issue_comment(self, repo: str, issue_number: int, body: str) -> None: ...
 
 
 class RuntimeRepairer(Protocol):
@@ -341,7 +345,67 @@ def _repair_runtime_static_issues(
     return current_files
 
 
+def _block_comment_body(summary: str) -> str:
+    return (
+        "**IaC Smith could not open a pull request for this issue.**\n\n"
+        f"{summary}\n\n"
+        "_Automated summary of the validation failure — no infrastructure was changed._"
+    )
+
+
+def _maybe_comment_on_block(
+    *,
+    env: Mapping[str, str],
+    comment_client: IssueCommentClient | None,
+    summarizer: Callable[[str], str] | None,
+    result: IaCSmithRunResult,
+) -> None:
+    """Post a plain-language block summary back to the source issue (best-effort).
+
+    Only fires on ``blocked`` runs that carry a reason. A failure to summarize or
+    comment is swallowed and logged — notifying the author must never change the
+    run's outcome or exit status.
+    """
+    if comment_client is None or summarizer is None:
+        return
+    if result.status != "blocked" or not result.block_reason:
+        return
+    source_repo = env.get("IAC_SMITH_SOURCE_REPO")
+    issue_raw = env.get("IAC_SMITH_ISSUE_NUMBER")
+    if not source_repo or not issue_raw:
+        return
+    try:
+        issue_number = int(issue_raw)
+        summary = summarizer(result.block_reason)
+        comment_client.create_issue_comment(source_repo, issue_number, _block_comment_body(summary))
+        _log(f"IaC Smith: posted block summary to {source_repo}#{issue_number}.")
+    except Exception as exc:  # noqa: BLE001 - notifying the author is best-effort
+        _log(f"IaC Smith: could not post block summary to the issue: {exc}")
+
+
 def run_iac_smith(
+    env: Mapping[str, str],
+    issue_client: IssueClient,
+    pr_client: PullRequestClient,
+    intent_parser_fn: IntentParser | None = None,
+    file_generator_fn: FileGenerator | None = None,
+    comment_client: IssueCommentClient | None = None,
+    summarizer: Callable[[str], str] | None = None,
+) -> IaCSmithRunResult:
+    result = _run_iac_smith_core(
+        env,
+        issue_client=issue_client,
+        pr_client=pr_client,
+        intent_parser_fn=intent_parser_fn,
+        file_generator_fn=file_generator_fn,
+    )
+    _maybe_comment_on_block(
+        env=env, comment_client=comment_client, summarizer=summarizer, result=result
+    )
+    return result
+
+
+def _run_iac_smith_core(
     env: Mapping[str, str],
     issue_client: IssueClient,
     pr_client: PullRequestClient,
@@ -532,14 +596,30 @@ def run_iac_smith(
     return IaCSmithRunResult(status="pr_created", branch=branch, pr_url=pr.url, pr_number=pr.number)
 
 
+def _build_failure_summarizer() -> Callable[[str], str] | None:
+    """A block-reason summarizer backed by the primary model, or None if unavailable.
+
+    Construction only reads ``BEDROCK_MODEL_ID``; if that is unset the block comment
+    is simply skipped rather than failing the run.
+    """
+    try:
+        return BedrockTerraformGenerator(logger=_log).summarize_failure
+    except Exception as exc:  # noqa: BLE001 - the comment is best-effort
+        _log(f"IaC Smith: block-summary model unavailable, skipping issue comment: {exc}")
+        return None
+
+
 def main() -> None:
     env = os.environ
     github_token = select_github_token(env)
     target_token = select_target_repo_token(env)
+    issue_client = GitHubIssueClient(token=github_token)
     result = run_iac_smith(
         env,
-        issue_client=GitHubIssueClient(token=github_token),
+        issue_client=issue_client,
         pr_client=GitHubPullRequestClient(token=target_token),
+        comment_client=issue_client,
+        summarizer=_build_failure_summarizer(),
     )
     if result.status in {"ignored", "blocked", "no_changes"}:
         message = f"IaC Smith finished with status `{result.status}`: {result.block_reason or ''}"

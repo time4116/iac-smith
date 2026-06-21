@@ -758,6 +758,107 @@ def _find_terragrunt_dangling_dependencies(
     return errors
 
 
+_APPRUNNER_RESOURCE_RE = re.compile(r'\bresource\s+"aws_apprunner_service"')
+_APPRUNNER_IMAGE_LITERAL_RE = re.compile(r'image_identifier\s*=\s*"([^"]+)"')
+_APPRUNNER_IMAGE_VAR_RE = re.compile(r"image_identifier\s*=\s*var\.([A-Za-z0-9_]+)")
+# App Runner accepts ONLY an Amazon ECR or ECR Public image_identifier; the
+# provider rejects anything else at plan time. Mirrors the provider's own regex.
+_ECR_IMAGE_RE = re.compile(
+    r"^[0-9]{12}\.dkr\.ecr\.[a-z-]+-[0-9]{1,2}\.amazonaws\.com/.+$"
+    r"|^public\.ecr\.aws/.+/.+$"
+)
+_DEFAULT_LITERAL_RE = re.compile(r'\bdefault\s*=\s*"([^"]+)"')
+
+
+def _is_ecr_image_identifier(value: str) -> bool:
+    return bool(_ECR_IMAGE_RE.match(value.strip()))
+
+
+def _apprunner_image_error(location: str, value: str) -> str:
+    return (
+        f"App Runner service in `{location}` uses image `{value}`, which is not an "
+        f"Amazon ECR or ECR Public image. AWS App Runner can only deploy container "
+        f"images from ECR (`<account>.dkr.ecr.<region>.amazonaws.com/...`) or ECR "
+        f"Public (`public.ecr.aws/.../...`); it cannot pull from other registries "
+        f"(Docker Hub, GitHub ghcr.io, quay.io, ...). Mirror the image into ECR, or "
+        f"use a platform that can pull from this registry (e.g. ECS/Fargate)."
+    )
+
+
+def _resolve_apprunner_image_var(
+    var_name: str, module_root: str, generated_files: dict[str, str]
+) -> list[tuple[str, str]]:
+    """Resolve literal values feeding an App Runner image variable.
+
+    Returns ``(source_path, literal_value)`` pairs from the module's
+    ``variables.tf`` ``default`` and from any stack ``inputs`` that sets the
+    variable. Interpolated/computed values are not resolvable and are skipped, so
+    nothing is falsely flagged.
+    """
+    resolved: list[tuple[str, str]] = []
+    vars_path = f"{module_root}/variables.tf"
+    vars_content = generated_files.get(vars_path)
+    if vars_content:
+        for name, body in _extract_named_hcl_blocks(vars_content, _VAR_DECL_RE).items():
+            if name == var_name:
+                default_m = _DEFAULT_LITERAL_RE.search(body)
+                if default_m:
+                    resolved.append((vars_path, default_m.group(1)))
+
+    module_name = module_root.split("/")[-1]
+    input_re = re.compile(rf'\b{re.escape(var_name)}\s*=\s*"([^"]+)"')
+    for path, content in generated_files.items():
+        if not _is_stack_terragrunt(path):
+            continue
+        source_m = _TG_SOURCE_RE.search(content)
+        if not source_m or _module_name_from_tg_source(source_m.group(1)) != module_name:
+            continue
+        inputs_m = _TG_INPUTS_HEADER_RE.search(content)
+        if not inputs_m:
+            continue
+        body = _extract_hcl_block_body(content, inputs_m.start())
+        if body is None:
+            continue
+        value_m = input_re.search(body)
+        if value_m:
+            resolved.append((path, value_m.group(1)))
+    return resolved
+
+
+def _find_apprunner_non_ecr_image(generated_files: dict[str, str]) -> list[str]:
+    """Block an aws_apprunner_service whose image is not an ECR/ECR Public image.
+
+    App Runner's provider only accepts an ECR or ECR Public ``image_identifier``;
+    any other registry (Docker Hub, ghcr.io, quay.io) is rejected at plan time
+    with a regex error the repair loop cannot satisfy, because no conforming value
+    exists for that image. Fail fast at review with an actionable reason instead
+    of burning the runtime repair budget. Only resolvable literal values (inline,
+    a variable ``default``, or a stack input) are checked, so a value computed at
+    apply time is never falsely flagged.
+    """
+    errors: list[str] = []
+    for path, content in generated_files.items():
+        if not path.endswith(".tf") or not _APPRUNNER_RESOURCE_RE.search(content):
+            continue
+        module_root = _module_root(path) or path.rpartition("/")[0]
+        stripped = _strip_hcl_comments(content)
+        seen: set[str] = set()
+        candidates: list[tuple[str, str]] = [
+            (path, m.group(1)) for m in _APPRUNNER_IMAGE_LITERAL_RE.finditer(stripped)
+        ]
+        for m in _APPRUNNER_IMAGE_VAR_RE.finditer(stripped):
+            candidates.extend(
+                _resolve_apprunner_image_var(m.group(1), module_root, generated_files)
+            )
+        for source_path, value in candidates:
+            if "${" in value or value in seen:
+                continue
+            seen.add(value)
+            if not _is_ecr_image_identifier(value):
+                errors.append(_apprunner_image_error(source_path, value))
+    return errors
+
+
 _AWS_KMS_KEY_RE = re.compile(r'\bresource\s+"aws_kms_key"\s+"([^"]+)"')
 _AWS_KMS_KEY_POLICY_RE = re.compile(r'\bresource\s+"aws_kms_key_policy"\s+"([^"]+)"')
 _AWS_CW_LOG_GROUP_RE = re.compile(r'\bresource\s+"aws_cloudwatch_log_group"\s+"([^"]+)"')
@@ -1062,6 +1163,11 @@ def static_review_generated_files(
     # module versions.tf at `terraform init`; block so it is caught at review time
     # rather than deep in the runtime plan.
     errors.extend(_find_terragrunt_required_providers(generated_files))
+
+    # App Runner can only pull an ECR/ECR Public image; a non-ECR image_identifier
+    # is rejected at plan time and the repair loop cannot satisfy it (no conforming
+    # value exists), so fail fast at review with an actionable reason.
+    errors.extend(_find_apprunner_non_ecr_image(generated_files))
 
     # Advisory only.
     warnings.extend(_find_singleton_resource_duplication(generated_files))

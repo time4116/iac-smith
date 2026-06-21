@@ -111,6 +111,24 @@ def _error_pinpointed_basenames(error: str) -> set[str]:
     return {match.group("file").rpartition("/")[2] for match in _SOURCE_PINPOINT_RE.finditer(error)}
 
 
+_ENV_STACK_PATH_RE = re.compile(r"environments/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+")
+
+
+def _error_stack_names(errors: list[str]) -> set[str]:
+    """Stack names blamed by an error via an ``environments/<env>/<stack>`` path.
+
+    The basename of each environments path token is the stack name, which by
+    convention matches the ``modules/<stack>`` directory that the stack sources.
+    """
+    names: set[str] = set()
+    for error in errors:
+        for token in _ENV_STACK_PATH_RE.findall(error):
+            parts = token.rstrip("/").split("/")
+            if len(parts) >= 3:
+                names.add(parts[-1])
+    return names
+
+
 def _path_needs_repair(path: str, errors: list[str]) -> bool:
     """Return True if `path` appears in any error as a file that needs to be changed.
 
@@ -173,6 +191,17 @@ def _path_needs_repair(path: str, errors: list[str]) -> bool:
             pinpointed = _error_pinpointed_basenames(error)
             if not pinpointed or basename in pinpointed:
                 return True
+
+    # Stack-to-module bridge: a `terragrunt plan`/`validate` failure names the
+    # stack dir (`environments/<env>/<stack>`), but the offending value (an image,
+    # a variable default) usually lives in `modules/<stack>`. They share the stack
+    # name by convention (see `_repair_unit_key`), so a stack-level failure must
+    # also reach the module's `.tf` files — otherwise the repair only touches the
+    # stack's terragrunt.hcl and can never fix a module-resident value.
+    if path.startswith("modules/") and path.endswith(".tf"):
+        module_stack = path.split("/")[1]
+        if module_stack in _error_stack_names(errors):
+            return True
 
     return False
 
@@ -1351,6 +1380,40 @@ class BedrockTerraformGenerator:
                 last_error = exc
         assert last_error is not None
         raise last_error
+
+    def summarize_failure(self, block_reason: str) -> str:
+        """Summarize a run's block reason in one short paragraph for the issue author.
+
+        Grounded strictly on the real terraform/terragrunt error text — the model
+        compresses a concrete failure into plain language, it does not speculate.
+        Used to comment back on the source issue when no PR could be opened.
+        """
+        prompt = (
+            "You are IaC Smith. A request to generate Terraform/Terragrunt could not be "
+            "fulfilled and no pull request was opened. In ONE short paragraph (at most 80 "
+            "words), in plain language for the person who filed the issue, explain why, "
+            "based ONLY on the errors below. If a concrete next step is obvious from the "
+            "errors, add one sentence suggesting it. Do not invent any detail that is not "
+            "in the errors, and do not include code blocks.\n\nErrors:\n" + block_reason
+        )
+        response = self._invoke_model_with_retries(
+            modelId=self.model_id,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps(
+                {
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": 400,
+                    "temperature": 0,
+                    "messages": [{"role": "user", "content": prompt}],
+                }
+            ),
+        )
+        raw_body = response["body"].read().decode("utf-8")
+        payload = json.loads(raw_body)
+        parts = payload.get("content") or []
+        text = "".join(block.get("text", "") for block in parts if isinstance(block, dict))
+        return text.strip()
 
     def _generate_planned_file(
         self,
