@@ -723,7 +723,8 @@ Non-negotiable rules:
 * **Terraform module file organization — CRITICAL: Do not duplicate
   declarations across files.** Each type of declaration belongs in exactly
   one file and must NOT be repeated in another file of the same module:
-  - `variables.tf` — ONLY variable declarations (e.g. `variable "name"` defined here)
+  - `variables.tf` — ONLY variable declarations using the exact Terraform block
+    keyword `variable "name"` (never `var "name"`)
   - `outputs.tf` — ONLY output declarations (e.g. `output "name"` defined here)
   - `versions.tf` — ONLY terraform settings and required_providers
   - `main.tf` — resource and data source definitions (NOT variables,
@@ -784,6 +785,13 @@ Non-negotiable rules:
 * `terraform-pr-check.yml` MUST use a single job named `validate`. Do NOT split
   into multiple jobs per stack — that wastes runners, installs tools multiple times,
   and makes some tool installs appear unused.
+* **Terragrunt includes — CRITICAL:** leaf stack configs such as
+  `environments/<env>/<stack>/terragrunt.hcl` may include a parent config with
+  `find_in_parent_folders()`, but root/environment configs such as
+  `environments/terragrunt.hcl` or `environments/<env>/terragrunt.hcl` must not
+  include themselves. Do not put `include {{ path = find_in_parent_folders() }}` in
+  a generated parent/root Terragrunt file; Terragrunt will report that the file
+  includes itself or that only one level of includes is allowed.
 * **Terragrunt locals scoping — CRITICAL:** In any terragrunt.hcl that has an
   `include` block, locals from the included parent config are NOT accessible as
   `local.xxx` in the child file. You MUST redeclare any needed values in a
