@@ -12,6 +12,7 @@ from iac_smith.nodes.static_review import (
     _SINGLETON_RESOURCE_TYPES,
     _apply_workflow_errors,
     _contains_dangerous_public_ingress,
+    _find_cloudwatch_logs_kms_without_grant,
     _find_cross_file_duplicates,
     _find_duplicate_named_resources,
     _find_hardcoded_secret_values,
@@ -122,6 +123,103 @@ class TestTerragruntIncludeCycles:
         }
 
         assert _find_terragrunt_include_cycles(files) == []
+
+
+class TestCloudwatchLogsKmsGrant:
+    _LOG_GROUP = (
+        'resource "aws_cloudwatch_log_group" "firehose_delivery" {\n'
+        '  name       = "/aws/kinesisfirehose/x"\n'
+        "  kms_key_id = aws_kms_key.platform_events.arn\n"
+        "}\n"
+    )
+
+    def test_default_policy_key_is_flagged(self) -> None:
+        # The exact PR #51 shape: a CMK with no policy block at all.
+        files = {
+            "modules/platform-event-ingestion/main.tf": (
+                'resource "aws_kms_key" "platform_events" {\n'
+                '  description = "platform events"\n'
+                "}\n" + self._LOG_GROUP
+            )
+        }
+
+        findings = _find_cloudwatch_logs_kms_without_grant(files)
+
+        assert len(findings) == 1
+        assert "aws_cloudwatch_log_group.firehose_delivery" in findings[0]
+        assert "logs.<region>.amazonaws.com" in findings[0]
+
+    def test_inline_policy_granting_logs_is_allowed(self) -> None:
+        files = {
+            "modules/platform-event-ingestion/main.tf": (
+                'resource "aws_kms_key" "platform_events" {\n'
+                "  policy = jsonencode({\n"
+                "    Statement = [{\n"
+                '      Principal = { Service = "logs.us-west-2.amazonaws.com" }\n'
+                '      Action    = ["kms:Encrypt", "kms:Decrypt"]\n'
+                "    }]\n"
+                "  })\n"
+                "}\n" + self._LOG_GROUP
+            )
+        }
+        assert _find_cloudwatch_logs_kms_without_grant(files) == []
+
+    def test_separate_key_policy_resource_granting_logs_is_allowed(self) -> None:
+        files = {
+            "modules/platform-event-ingestion/main.tf": (
+                'resource "aws_kms_key" "platform_events" {\n  description = "x"\n}\n'
+                + self._LOG_GROUP
+            ),
+            "modules/platform-event-ingestion/kms.tf": (
+                'resource "aws_kms_key_policy" "platform_events" {\n'
+                "  key_id = aws_kms_key.platform_events.id\n"
+                "  policy = jsonencode({\n"
+                '    Statement = [{ Principal = { Service = "logs.amazonaws.com" } }]\n'
+                "  })\n"
+                "}\n"
+            ),
+        }
+        assert _find_cloudwatch_logs_kms_without_grant(files) == []
+
+    def test_policy_via_data_document_granting_logs_is_allowed(self) -> None:
+        files = {
+            "modules/platform-event-ingestion/main.tf": (
+                'resource "aws_kms_key" "platform_events" {\n'
+                "  policy = data.aws_iam_policy_document.kms.json\n"
+                "}\n"
+                'data "aws_iam_policy_document" "kms" {\n'
+                "  statement {\n"
+                "    principals {\n"
+                '      type        = "Service"\n'
+                '      identifiers = ["logs.${data.aws_region.current.name}.amazonaws.com"]\n'
+                "    }\n"
+                "  }\n"
+                "}\n" + self._LOG_GROUP
+            )
+        }
+        assert _find_cloudwatch_logs_kms_without_grant(files) == []
+
+    def test_log_group_without_cmk_is_ignored(self) -> None:
+        files = {
+            "modules/platform-event-ingestion/main.tf": (
+                'resource "aws_kms_key" "platform_events" {\n  description = "x"\n}\n'
+                'resource "aws_cloudwatch_log_group" "plain" {\n  name = "/aws/x"\n}\n'
+            )
+        }
+        assert _find_cloudwatch_logs_kms_without_grant(files) == []
+
+    def test_blocks_are_surfaced_as_structural_not_error(self) -> None:
+        files = {
+            "modules/platform-event-ingestion/main.tf": (
+                'resource "aws_kms_key" "platform_events" {\n  description = "x"\n}\n'
+                + self._LOG_GROUP
+            )
+        }
+
+        result = static_review_generated_files(files)
+
+        assert any("CloudWatch Logs service principal" in s for s in result.structural)
+        assert not any("CloudWatch Logs service principal" in e for e in result.errors)
 
 
 class TestTerragruntRequiredProviders:

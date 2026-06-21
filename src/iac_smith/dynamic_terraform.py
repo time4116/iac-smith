@@ -691,6 +691,16 @@ Non-negotiable rules:
   Parameter Store (via a data source), or declare a `sensitive` required variable
   with no default so the operator must supply it. A predictable hardcoded secret
   is a real vulnerability even when the value looks like a placeholder.
+* **When a customer-managed KMS key encrypts an AWS service resource, the key's
+  policy MUST grant that service's principal access — or apply fails.** This is an
+  apply-time failure that `terraform validate` and `plan` do NOT catch. The most
+  common case: a `aws_cloudwatch_log_group` with `kms_key_id` pointing at your own
+  `aws_kms_key` needs a key policy statement allowing `logs.<region>.amazonaws.com`
+  to `kms:Encrypt*`/`Decrypt*`/`ReEncrypt*`/`GenerateDataKey*`/`Describe*` (scoped
+  with `kms:EncryptionContext:aws:logs:arn`). A KMS key with no `policy` uses the
+  default policy, which grants no service — so encrypting a log group with it fails
+  `CreateLogGroup` with AccessDenied. The same principle applies to SNS, SQS, S3,
+  Firehose, etc. encrypted with a CMK: grant the using service in the key policy.
 * Terraform apply workflows must never run on pull_request events or feature
   branches. `.github/workflows/terraform-apply.yml` must trigger only on push
   to `main` — never `master`, never both.
