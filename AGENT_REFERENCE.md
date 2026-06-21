@@ -42,7 +42,9 @@ All configuration is via environment variables. There are no CLI flags.
 | `IAC_SMITH_WORKDIR` | System temp | Dir to clone target repo into |
 | `IAC_SMITH_SKIP_RUNTIME_VALIDATION` | unset | Set to `1` to skip terraform/terragrunt validation |
 | `IAC_SMITH_SKIP_PUSH` | unset | Set to `1` to skip git push and PR creation |
-| `IAC_SMITH_RUNTIME_REPAIR_ATTEMPTS` | `2` | Max Bedrock repair attempts after runtime failures |
+| `IAC_SMITH_RUNTIME_REPAIR_ATTEMPTS` | `3` | Max Bedrock repair attempts after runtime failures |
+| `BEDROCK_MODEL_ID` | (required) | Primary Bedrock model/inference-profile for generation and repair |
+| `BEDROCK_ESCALATION_MODEL_ID` | unset | Stronger model used for one penultimate repair attempt (failing files only) when the primary is stuck; unset or equal to `BEDROCK_MODEL_ID` disables escalation |
 | `IAC_SMITH_BEDROCK_CONCURRENCY` | `4` | Parallel file generation threads |
 
 ---
@@ -185,7 +187,6 @@ class BackendResource(BaseModel):
 README.md
 .github/workflows/terraform-pr-check.yml
 .github/workflows/terraform-apply.yml
-environments/terragrunt.hcl
 ```
 
 **Per environment:**
@@ -194,7 +195,7 @@ bootstrap/backend/{env}/main.tf
 bootstrap/backend/{env}/variables.tf
 bootstrap/backend/{env}/outputs.tf
 bootstrap/backend/{env}/README.md
-environments/{env}/terragrunt.hcl
+environments/{env}/root.hcl                       # environment root config (NOT terragrunt.hcl)
 environments/{env}/{stack_name}/terragrunt.hcl
 environments/{env}/{stack_name}/README.md
 ```
@@ -311,8 +312,8 @@ Eight annotated structural templates are appended to every generation prompt imm
 - `main.tf` — resources and data sources only; no `terraform{}` block, no variable/output declarations
 - `variables.tf` — all `variable` declarations; shows `var.xxx` cross-file reference pattern
 - `outputs.tf` — all `output` declarations only
-- `environments/non-prod/terragrunt.hcl` (root) — `remote_state`, `locals`, `generate` block
-- `environments/non-prod/<stack>/terragrunt.hcl` (stack) — `include`, `dependency` blocks, `inputs`; explicitly warns "NEVER write `module.<name>.output_name`"
+- `environments/non-prod/root.hcl` (environment root, NOT terragrunt.hcl) — `remote_state`, `locals`, provider `generate` block, held directly with no `include`
+- `environments/non-prod/<stack>/terragrunt.hcl` (stack) — `include "root" { path = find_in_parent_folders("root.hcl") }`, `dependency` blocks, `inputs`; explicitly warns "NEVER write `module.<name>.output_name`"
 - `.github/workflows/terraform-pr-check.yml` — trigger path and working-directory alignment example
 - `.github/workflows/terraform-apply.yml` — bootstrap job with idempotent imports, apply-foundation and stack apply jobs with `needs:` dependencies, `secrets.AWS_ROLE_ARN_NON_PROD` usage
 
@@ -391,10 +392,15 @@ CI=true
 After runtime validation fails:
 
 ```
-for attempt in range(IAC_SMITH_RUNTIME_REPAIR_ATTEMPTS):
-    blackboard += normalize_validation_findings(runtime_errors)   # learn negative patterns
+for attempt in range(IAC_SMITH_RUNTIME_REPAIR_ATTEMPTS):   # default 3
     blackboard.contract_docs += runtime_validation.contract_docs  # authoritative provider schema
-    call repair_files(intent, change_plan, repo_patterns, ruleset, target_repo,
+    blackboard += normalize_validation_findings(runtime_errors, contract_docs)
+                  # learn negative patterns; an unsupported block/arg carries the
+                  # resource's real allowed args inline so the model gets the fix
+    repairer = escalation_model if penultimate attempt and BEDROCK_ESCALATION_MODEL_ID else primary
+                  # the stronger model does one heavy pass when the primary is stuck;
+                  # a final primary pass then cleans up cheaper follow-on errors
+    call repairer.repair_files(intent, change_plan, repo_patterns, ruleset, target_repo,
                       generated_files, runtime_errors, blackboard)
     static_review repaired files
     if static_review FAILED:
@@ -409,11 +415,13 @@ else:
 
 **File selection for repair (`_path_needs_repair`):**
 
-A file is selected for repair if it appears in any error string, with two refinements:
+A file is selected for repair if it appears in any error string, with these refinements:
 1. **"keep in" exclusion** — for duplicate-declaration errors the hint reads "Remove from X, keep in Y." The canonical file (Y) is excluded from repair so its declarations are not dropped.
 2. **Directory-based fallback** — runtime validation errors name the module/stack directory (e.g. `terraform validate modules/ecs-fargate failed`), not individual file paths. Any file whose parent directory matches the error is implicated. A negative-lookahead regex (`(?!/)`) prevents a shorter directory name (e.g. `environments`) from matching errors about a deeper path (e.g. `environments/non-prod/foundation`).
+3. **Pinpoint scoping** — when an error pinpoints exact files (`on main.tf line 5`), only those files are repaired, not the whole directory. This stops a weak model from regenerating files that already validated and regressing them (e.g. rewriting a valid `variables.tf` with `var "x" {`). A directory-level error with no file pinpoint still repairs the whole unit.
+4. **Stack→module bridge** — a `terragrunt plan`/`validate` failure names the stack dir (`environments/<env>/<stack>`), but the offending value (an image, a variable default) often lives in `modules/<stack>`; the module's `.tf` files are repaired too, matched by the shared stack name.
 
-If no files match either criterion, all files are repaired as a fallback.
+If no files match any criterion, all files are repaired as a fallback.
 
 `repair_files` sends the original Bedrock generation prompt plus a repair section containing:
 - Each validation failure message
@@ -442,7 +450,7 @@ class RepoPatterns(BaseModel):
 
 **Layout detection:** `terragrunt_live_modules` if `environments/` directory exists, else `iac_smith_default`
 
-**Representative files** are sampled from `environments/**/terragrunt.hcl`, `modules/**/*.tf`, `modules/**/README.md` and injected verbatim into the Bedrock generation prompt to teach it existing conventions.
+**Representative files** are sampled from `environments/**/root.hcl`, `environments/**/terragrunt.hcl`, `modules/**/*.tf`, `modules/**/README.md` and injected verbatim into the Bedrock generation prompt to teach it existing conventions.
 
 ---
 

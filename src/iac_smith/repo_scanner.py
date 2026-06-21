@@ -27,7 +27,7 @@ def _discover_environments(root: Path) -> list[str]:
     for child in sorted(envs_path.iterdir()):
         if not child.is_dir():
             continue
-        has_hcl = (child / "terragrunt.hcl").exists()
+        has_hcl = (child / "terragrunt.hcl").exists() or (child / "root.hcl").exists()
         has_subdirs = any(sub.is_dir() for sub in child.iterdir())
         if has_hcl or has_subdirs:
             envs.append(child.name)
@@ -69,7 +69,12 @@ def _discover_representative_files(
 ) -> dict[str, str]:
     """Capture bounded examples so the model can follow existing repo conventions."""
     candidates: list[Path] = []
-    for pattern in ["environments/**/terragrunt.hcl", "modules/**/*.tf", "modules/**/README.md"]:
+    for pattern in [
+        "environments/**/root.hcl",
+        "environments/**/terragrunt.hcl",
+        "modules/**/*.tf",
+        "modules/**/README.md",
+    ]:
         candidates.extend(sorted(root.glob(pattern)))
 
     samples: dict[str, str] = {}

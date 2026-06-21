@@ -364,7 +364,7 @@ output "private_subnet_ids" {
 }
 ```
 
---- environments/non-prod/terragrunt.hcl (root config — remote_state, shared locals) ---
+--- environments/non-prod/root.hcl (environment root config — remote_state, shared locals) ---
 ```hcl
 locals {
   environment = "non-prod"
@@ -404,8 +404,10 @@ EOF
 
 --- environments/non-prod/<stack>/terragrunt.hcl (stack config — source, dependency blocks, inputs) ---
 ```hcl
+# The environment root config is named root.hcl (Terragrunt deprecated using
+# terragrunt.hcl as an include root), so name it explicitly here.
 include "root" {
-  path = find_in_parent_folders()
+  path = find_in_parent_folders("root.hcl")
 }
 
 # locals from the included parent config are NOT available as local.xxx here.
@@ -850,13 +852,15 @@ Non-negotiable rules:
 * `terraform-pr-check.yml` MUST use a single job named `validate`. Do NOT split
   into multiple jobs per stack — that wastes runners, installs tools multiple times,
   and makes some tool installs appear unused.
-* **Terragrunt includes — CRITICAL:** leaf stack configs such as
-  `environments/<env>/<stack>/terragrunt.hcl` may include a parent config with
-  `find_in_parent_folders()`, but root/environment configs such as
-  `environments/terragrunt.hcl` or `environments/<env>/terragrunt.hcl` must not
-  include themselves. Do not put `include {{ path = find_in_parent_folders() }}` in
-  a generated parent/root Terragrunt file; Terragrunt will report that the file
-  includes itself or that only one level of includes is allowed.
+* **Terragrunt includes — CRITICAL:** the environment root config is named
+  `environments/<env>/root.hcl` and holds `remote_state` + the provider `generate`
+  block DIRECTLY — it has no `include` block of its own. Leaf stack configs
+  (`environments/<env>/<stack>/terragrunt.hcl`) include that root explicitly with
+  `include "root" {{ path = find_in_parent_folders("root.hcl") }}`. Never put an
+  `include`/`find_in_parent_folders` in the `root.hcl` itself (there is no parent to
+  find — Terragrunt will report it includes itself / only one level of includes is
+  allowed). Do not name the root config `terragrunt.hcl`; that is a deprecated
+  Terragrunt anti-pattern.
 * **Terragrunt locals scoping — CRITICAL:** In any terragrunt.hcl that has an
   `include` block, locals from the included parent config are NOT accessible as
   `local.xxx` in the child file. You MUST redeclare any needed values in a

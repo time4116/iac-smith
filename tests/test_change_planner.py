@@ -15,6 +15,19 @@ def _intent(resource_type: str = "eks_fargate") -> InfrastructureIntent:
     )
 
 
+def test_plan_uses_root_hcl_for_the_environment_root_config():
+    # The environment root config is root.hcl, not terragrunt.hcl (Terragrunt
+    # deprecated terragrunt.hcl as an include root), and the redundant top-level
+    # environments/terragrunt.hcl is not generated.
+    plan = plan_changes(_intent("eks_fargate"), target_repo="time4116/iac-smith-demo-infra")
+
+    assert "environments/non-prod/root.hcl" in plan.files_to_generate
+    assert "environments/non-prod/terragrunt.hcl" not in plan.files_to_generate
+    assert "environments/terragrunt.hcl" not in plan.files_to_generate
+    # Stack configs stay terragrunt.hcl.
+    assert "environments/non-prod/eks-fargate/terragrunt.hcl" in plan.files_to_generate
+
+
 def test_plan_derives_stack_name_from_resource_type():
     plan = plan_changes(_intent("eks_fargate"), target_repo="time4116/iac-smith-demo-infra")
 

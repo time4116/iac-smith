@@ -32,9 +32,8 @@ Each stack lives at `environments/<env>/<stack-name>/` and maps to a reusable Te
 │           ├── outputs.tf
 │           └── README.md
 ├── environments/
-│   ├── terragrunt.hcl           # root config: remote_state, shared locals
 │   └── <env>/                   # e.g. non-prod, prod
-│       ├── terragrunt.hcl       # environment config: includes root, sets env locals
+│       ├── root.hcl             # environment root config: remote_state, provider, shared locals
 │       ├── foundation/          # present when a VPC/networking layer is needed
 │       │   ├── terragrunt.hcl
 │       │   └── README.md
@@ -71,11 +70,10 @@ Each file in a module has a fixed responsibility. IaC Smith checks these in stat
 
 ## Terragrunt hierarchy
 
-The three-level hierarchy keeps remote state config DRY while giving each stack isolated state:
+The two-level hierarchy keeps remote state config DRY while giving each stack isolated state:
 
-1. **`environments/terragrunt.hcl`** — defines `remote_state` once for all environments. The state key uses `path_relative_to_include()`, which resolves to the directory path of the calling stack relative to this file (e.g. `non-prod/ecs-fargate-stack/terraform.tfstate`). Every stack therefore gets its own isolated state file in S3 automatically — no manual key management and no risk of one stack's plan touching another's state.
-2. **`environments/<env>/terragrunt.hcl`** — includes the root config and sets environment locals (`env`, `region`, `account_id`).
-3. **`environments/<env>/<stack>/terragrunt.hcl`** — declares the module source (relative path into `modules/`), dependency blocks, and input variable bindings.
+1. **`environments/<env>/root.hcl`** — the environment **root config**: defines `remote_state` and the provider `generate` block once for the environment, plus shared locals. It is named `root.hcl` (not `terragrunt.hcl`) because Terragrunt deprecated using `terragrunt.hcl` as an include root. The state key uses `path_relative_to_include()`, which resolves to the calling stack's directory relative to this file (e.g. `ecs-fargate/terraform.tfstate`), so every stack gets its own isolated state file in S3 automatically. The root config holds its config **directly** — it has no `include` block of its own.
+2. **`environments/<env>/<stack>/terragrunt.hcl`** — the **stack config**: includes the root with `include "root" { path = find_in_parent_folders("root.hcl") }`, then declares the module source (relative path into `modules/`), dependency blocks, and input variable bindings.
 
 Because state is isolated per stack, a `terragrunt plan` or `apply` in `environments/non-prod/ecs-fargate-stack/` only reads and writes state for that stack. The foundation stack and any future stacks each have their own state files and can be planned or applied independently.
 
