@@ -78,6 +78,51 @@ class TestTerragruntIncludeCycles:
 
         assert _find_terragrunt_include_cycles(files) == []
 
+    def test_environment_root_self_include_via_find_in_parent_folders_argument(self) -> None:
+        files = {
+            "environments/non-prod/terragrunt.hcl": (
+                'include "root" {\n  path = find_in_parent_folders("terragrunt.hcl")\n}\n'
+            ),
+        }
+
+        errors = _find_terragrunt_include_cycles(files)
+
+        assert len(errors) == 1
+        assert "environments/non-prod/terragrunt.hcl" in errors[0]
+        assert "includes itself" in errors[0]
+
+    def test_environment_root_parent_root_hcl_include_is_allowed(self) -> None:
+        # Walking up for a *different* file (a real repo root.hcl) is valid.
+        files = {
+            "environments/non-prod/terragrunt.hcl": (
+                'include "root" {\n  path = find_in_parent_folders("root.hcl")\n}\n'
+            ),
+        }
+
+        assert _find_terragrunt_include_cycles(files) == []
+
+    def test_self_include_via_get_terragrunt_dir_is_flagged_in_any_config(self) -> None:
+        files = {
+            "environments/non-prod/dynamodb-table/terragrunt.hcl": (
+                'include "root" {\n  path = "${get_terragrunt_dir()}/terragrunt.hcl"\n}\n'
+            ),
+        }
+
+        errors = _find_terragrunt_include_cycles(files)
+
+        assert len(errors) == 1
+        assert "includes itself" in errors[0]
+
+    def test_relative_parent_include_path_is_allowed(self) -> None:
+        # `../terragrunt.hcl` points at a real parent, not the config itself.
+        files = {
+            "environments/non-prod/dynamodb-table/terragrunt.hcl": (
+                'include "root" {\n  path = "../terragrunt.hcl"\n}\n'
+            ),
+        }
+
+        assert _find_terragrunt_include_cycles(files) == []
+
 
 class TestTerragruntRequiredProviders:
     def test_required_providers_in_terragrunt_hcl_flagged(self) -> None:
