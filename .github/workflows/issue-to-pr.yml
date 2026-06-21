@@ -80,6 +80,10 @@ jobs:
           IAC_SMITH_SOURCE_REPO: ${{ inputs.source_repo || github.repository }}
           IAC_SMITH_ISSUE_NUMBER: ${{ inputs.issue_number || github.event.issue.number }}
           BEDROCK_MODEL_ID: ${{ secrets.BEDROCK_MODEL_ID }}
+          # Stronger model used ONLY for the final runtime repair attempt, on the
+          # failing files, when the primary (Haiku) model cannot self-correct a
+          # provider-schema error. Unset/equal to BEDROCK_MODEL_ID disables it.
+          BEDROCK_ESCALATION_MODEL_ID: ${{ vars.BEDROCK_ESCALATION_MODEL_ID || 'anthropic.claude-sonnet-4-6' }}
           IAC_SMITH_TARGET_REPO: time4116/iac-smith-demo-infra
           # Gate PR creation on a real terragrunt plan (local state, mock_outputs
           # for dependencies). Requires the assumed AWS role to have read/describe

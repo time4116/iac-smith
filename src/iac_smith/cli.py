@@ -201,6 +201,42 @@ def _runtime_repair_attempts(env: Mapping[str, str]) -> int:
     return max(0, attempts)
 
 
+def _build_escalation_repairer(
+    env: Mapping[str, str], primary_model_id: str
+) -> RuntimeRepairer | None:
+    """A stronger model used only for the final runtime repair attempt.
+
+    The primary model (e.g. Haiku) handles generation and every repair attempt
+    but the last. Provider-schema mistakes a weak model cannot self-correct —
+    inventing an argument, block, or resource type the schema does not have — are
+    escalated to ``BEDROCK_ESCALATION_MODEL_ID`` (e.g. Sonnet) for one final pass
+    over only the failing files, so the stronger model is billed solely on the
+    hard cases. Unset, blank, or equal to the primary model means no escalation.
+    """
+    escalation_model = (env.get("BEDROCK_ESCALATION_MODEL_ID") or "").strip()
+    if not escalation_model or escalation_model == primary_model_id:
+        return None
+    return BedrockTerraformGenerator(model_id=escalation_model, logger=_log)
+
+
+def _select_repair_model(
+    *,
+    repair_attempt: int,
+    max_runtime_repairs: int,
+    primary: RuntimeRepairer,
+    escalation: RuntimeRepairer | None,
+) -> tuple[RuntimeRepairer, bool]:
+    """Pick the repairer for this attempt; escalate only the final one.
+
+    Returns ``(repairer, escalated)``. The final repair is the last attempt
+    before the loop gives up (``repair_attempt == max_runtime_repairs - 1``).
+    """
+    is_final = escalation is not None and repair_attempt == max_runtime_repairs - 1
+    if is_final and escalation is not None:
+        return escalation, True
+    return primary, False
+
+
 def _descriptive_title(result: IaCSmithState) -> str:
     """Build a human-readable commit/PR title from the change plan.
 
@@ -319,6 +355,7 @@ def run_iac_smith(
     _log(f"IaC Smith: fetched issue #{state.get('issue_number')}: {state.get('issue_title')}")
     state["target_repo_path"] = str(repo_path)
     runtime_repairer: RuntimeRepairer | None = None
+    escalation_repairer: RuntimeRepairer | None = None
     if file_generator_fn:
         selected_file_generator = file_generator_fn
         if hasattr(file_generator_fn, "repair_files"):
@@ -327,6 +364,7 @@ def run_iac_smith(
         generator = BedrockTerraformGenerator(logger=_log)
         selected_file_generator = generator.generate_files
         runtime_repairer = generator
+        escalation_repairer = _build_escalation_repairer(env, generator.model_id)
     graph = (
         build_graph(
             intent_parser_fn=intent_parser_fn,
@@ -384,10 +422,24 @@ def run_iac_smith(
             if repair_attempt >= max_runtime_repairs or runtime_repairer is None:
                 return IaCSmithRunResult(status="blocked", branch=branch, block_reason=block_reason)
 
-            _log(
-                "IaC Smith: asking Bedrock to repair Terraform/Terragrunt output "
-                f"from runtime failure ({repair_attempt + 1}/{max_runtime_repairs})."
+            active_repairer, escalated = _select_repair_model(
+                repair_attempt=repair_attempt,
+                max_runtime_repairs=max_runtime_repairs,
+                primary=runtime_repairer,
+                escalation=escalation_repairer,
             )
+            if escalated:
+                _log(
+                    "IaC Smith: escalating final repair attempt "
+                    f"({repair_attempt + 1}/{max_runtime_repairs}) to "
+                    f"{getattr(active_repairer, 'model_id', 'escalation model')} "
+                    "(failing files only)."
+                )
+            else:
+                _log(
+                    "IaC Smith: asking Bedrock to repair Terraform/Terragrunt output "
+                    f"from runtime failure ({repair_attempt + 1}/{max_runtime_repairs})."
+                )
             repair_errors = list(runtime_validation.errors)
             # Learn negative patterns from the real terraform/terragrunt failures
             # and carry them in the blackboard so each repair prompt is told what
@@ -416,12 +468,12 @@ def run_iac_smith(
                 result["blackboard"] = updated
             try:
                 repaired_files = _repair_generated_files(
-                    repairer=runtime_repairer,
+                    repairer=active_repairer,
                     result=result,
                     repair_errors=repair_errors,
                 )
                 repaired_files = _repair_runtime_static_issues(
-                    repairer=runtime_repairer,
+                    repairer=active_repairer,
                     result=result,
                     repo_path=repo_path,
                     repaired_files=repaired_files,

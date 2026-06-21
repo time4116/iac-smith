@@ -2,7 +2,13 @@ import subprocess
 from pathlib import Path
 
 from iac_smith.blackboard import TerraformContract
-from iac_smith.cli import _descriptive_title, _repair_runtime_static_issues, run_iac_smith
+from iac_smith.cli import (
+    _build_escalation_repairer,
+    _descriptive_title,
+    _repair_runtime_static_issues,
+    _select_repair_model,
+    run_iac_smith,
+)
 from iac_smith.models.change_plan import BackendResource, ChangePlan
 from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
@@ -52,6 +58,66 @@ def test_descriptive_title_falls_back_without_a_stack():
         _descriptive_title({"issue_number": 9, "change_plan": None, "intent": None})
         == "feat: generate IaC for issue #9"
     )
+
+
+class _FakeRepairer:
+    def __init__(self, name: str) -> None:
+        self.model_id = name
+
+    def repair_files(self, **kwargs):  # pragma: no cover - not invoked in selection tests
+        return kwargs["generated_files"]
+
+
+def test_select_repair_model_without_escalation_always_uses_primary():
+    primary = _FakeRepairer("haiku")
+    for attempt in range(3):
+        repairer, escalated = _select_repair_model(
+            repair_attempt=attempt,
+            max_runtime_repairs=2,
+            primary=primary,
+            escalation=None,
+        )
+        assert repairer is primary
+        assert escalated is False
+
+
+def test_select_repair_model_escalates_only_the_final_attempt():
+    primary = _FakeRepairer("haiku")
+    escalation = _FakeRepairer("sonnet")
+
+    first, first_escalated = _select_repair_model(
+        repair_attempt=0,
+        max_runtime_repairs=2,
+        primary=primary,
+        escalation=escalation,
+    )
+    assert first is primary
+    assert first_escalated is False
+
+    final, final_escalated = _select_repair_model(
+        repair_attempt=1,
+        max_runtime_repairs=2,
+        primary=primary,
+        escalation=escalation,
+    )
+    assert final is escalation
+    assert final_escalated is True
+
+
+def test_build_escalation_repairer_returns_none_without_env():
+    assert _build_escalation_repairer({}, "anthropic.claude-haiku") is None
+
+
+def test_build_escalation_repairer_returns_none_when_same_as_primary():
+    env = {"BEDROCK_ESCALATION_MODEL_ID": "anthropic.claude-haiku"}
+    assert _build_escalation_repairer(env, "anthropic.claude-haiku") is None
+
+
+def test_build_escalation_repairer_builds_generator_for_distinct_model():
+    env = {"BEDROCK_ESCALATION_MODEL_ID": "anthropic.claude-sonnet-4-6"}
+    repairer = _build_escalation_repairer(env, "anthropic.claude-haiku")
+    assert repairer is not None
+    assert repairer.model_id == "anthropic.claude-sonnet-4-6"
 
 
 def _fake_intent_parser(issue_text: str) -> InfrastructureIntent:
