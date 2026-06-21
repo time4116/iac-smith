@@ -781,13 +781,39 @@ class TestPathNeedsRepair:
         ]
         assert _path_needs_repair("modules/foundation/variables.tf", errors) is True
 
-    def test_returns_true_via_directory_match_for_runtime_validate_error(self):
-        # Runtime errors name the module directory, not individual .tf files.
-        # All files in that directory should be considered for repair.
+    def test_pinpointed_error_repairs_only_the_blamed_file(self):
+        # Terraform pinpoints the exact file ("on main.tf line 42"); only that
+        # file is repaired so a sibling that already validated is never
+        # regenerated (and regressed) by the repair model.
         errors = [
             "terraform validate modules/ecs-fargate failed in `modules/ecs-fargate`:\n"
             "│ Error: Reference to undeclared resource\n"
             "│   on main.tf line 42\n"
+        ]
+        assert _path_needs_repair("modules/ecs-fargate/main.tf", errors) is True
+        assert _path_needs_repair("modules/ecs-fargate/variables.tf", errors) is False
+
+    def test_unsupported_block_pinpoint_spares_unrelated_module_files(self):
+        # Regression guard for issue #40: a schema error in main.tf must not drag
+        # variables.tf / outputs.tf / README.md into repair.
+        errors = [
+            "terraform validate modules/dynamodb-table failed in `modules/dynamodb-table`:\n"
+            "│ Error: Unsupported block type\n"
+            '│   on main.tf line 5, in resource "aws_dynamodb_table" "feature_flags":\n'
+            "│    5:   stream_specification {\n"
+            '│ Blocks of type "stream_specification" are not expected here.\n'
+        ]
+        assert _path_needs_repair("modules/dynamodb-table/main.tf", errors) is True
+        assert _path_needs_repair("modules/dynamodb-table/variables.tf", errors) is False
+        assert _path_needs_repair("modules/dynamodb-table/outputs.tf", errors) is False
+        assert _path_needs_repair("modules/dynamodb-table/README.md", errors) is False
+
+    def test_directory_error_without_pinpoint_repairs_whole_unit(self):
+        # A directory-level error with no "on <file> line N" pinpoint (e.g. a
+        # missing-provider init failure) still falls back to whole-unit repair.
+        errors = [
+            "terraform init modules/ecs-fargate failed in `modules/ecs-fargate`:\n"
+            "│ Error: Failed to install provider\n"
         ]
         assert _path_needs_repair("modules/ecs-fargate/main.tf", errors) is True
         assert _path_needs_repair("modules/ecs-fargate/variables.tf", errors) is True

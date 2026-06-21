@@ -97,6 +97,20 @@ def _inject_missing_child_locals(generated_files: dict[str, str]) -> None:
             generated_files[path] = f"locals {{\n{inject}}}\n\n" + content
 
 
+_SOURCE_PINPOINT_RE = re.compile(r"\bon\s+(?P<file>[^\s,]+)\s+line\s+\d+")
+
+
+def _error_pinpointed_basenames(error: str) -> set[str]:
+    """Basenames Terraform/Terragrunt explicitly blames via ``on <file> line N``.
+
+    Returns an empty set for directory-level or pathless errors (terragrunt
+    include cycles, missing-provider init failures), which then fall back to
+    whole-unit repair. The basename is taken so a pinpoint given as a relative
+    path (``on modules/x/main.tf line 5``) still matches a generated file path.
+    """
+    return {match.group("file").rpartition("/")[2] for match in _SOURCE_PINPOINT_RE.finditer(error)}
+
+
 def _path_needs_repair(path: str, errors: list[str]) -> bool:
     """Return True if `path` appears in any error as a file that needs to be changed.
 
@@ -142,11 +156,23 @@ def _path_needs_repair(path: str, errors: list[str]) -> bool:
     # Use a negative lookahead for "/" to avoid matching a shorter directory
     # name that is a prefix of a longer path (e.g. `environments` must not
     # match an error about `environments/non-prod/foundation`).
+    #
+    # Terraform/Terragrunt errors pinpoint the exact file at fault ("on main.tf
+    # line 5"). When an error carries such pinpoints, only those files are
+    # repaired — regenerating the rest of the directory just hands a weak model
+    # files that already validated and lets it regress them (e.g. rewriting a
+    # valid `variables.tf` with `var "x" {` instead of `variable "x" {`). Only a
+    # directory-level error with no file pinpoint repairs the whole unit.
     path_dir = path.rpartition("/")[0]
+    basename = path.rpartition("/")[2]
     if path_dir:
         dir_pattern = re.escape(path_dir) + r"(?!/)"
-        if any(re.search(dir_pattern, error) for error in errors):
-            return True
+        for error in errors:
+            if not re.search(dir_pattern, error):
+                continue
+            pinpointed = _error_pinpointed_basenames(error)
+            if not pinpointed or basename in pinpointed:
+                return True
 
     return False
 
