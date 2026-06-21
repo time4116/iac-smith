@@ -125,6 +125,32 @@ class TestTerragruntIncludeCycles:
 
         assert _find_terragrunt_include_cycles(files) == []
 
+    def test_stack_including_root_hcl_is_allowed(self) -> None:
+        # The new convention: stacks include the environment root.hcl explicitly.
+        files = {
+            "environments/non-prod/root.hcl": "remote_state {}\n",
+            "environments/non-prod/dynamodb-table/terragrunt.hcl": (
+                'include "root" {\n  path = find_in_parent_folders("root.hcl")\n}\n'
+            ),
+        }
+
+        assert _find_terragrunt_include_cycles(files) == []
+
+    def test_root_hcl_that_walks_up_for_itself_is_flagged(self) -> None:
+        # A root.hcl has no parent root to find, so find_in_parent_folders("root.hcl")
+        # in it resolves back to itself.
+        files = {
+            "environments/non-prod/root.hcl": (
+                'include "root" {\n  path = find_in_parent_folders("root.hcl")\n}\n'
+            ),
+        }
+
+        errors = _find_terragrunt_include_cycles(files)
+
+        assert len(errors) == 1
+        assert "environments/non-prod/root.hcl" in errors[0]
+        assert "includes itself" in errors[0]
+
 
 class TestAppRunnerImageSource:
     def _service(self, image_line: str) -> str:

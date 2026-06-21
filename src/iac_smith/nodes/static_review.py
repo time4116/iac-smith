@@ -439,21 +439,21 @@ def _find_terragrunt_include_cycles(generated_files: dict[str, str]) -> list[str
     block resolves back to the same file fails at plan time with "includes itself
     / only one level of includes is allowed". Two shapes are caught:
 
-    * an explicit same-directory self path — `path = "terragrunt.hcl"`,
-      `"./terragrunt.hcl"`, or `"${get_terragrunt_dir()}/terragrunt.hcl"` — which
-      is wrong in any config; and
-    * an environment/root config (a non-stack `terragrunt.hcl`) that walks up for
-      its *own* filename via `find_in_parent_folders()` /
-      `find_in_parent_folders("terragrunt.hcl")`. It has no generated parent
-      boundary, so the walk resolves back to itself.
+    * an explicit same-directory self path — `path = "root.hcl"`,
+      `"./root.hcl"`, or `"${get_terragrunt_dir()}/root.hcl"` (or the equivalent
+      with `terragrunt.hcl`) — which is wrong in any config; and
+    * an environment root config (`environments/<env>/root.hcl`, or a legacy
+      non-stack `terragrunt.hcl`) that walks up for its *own* filename via
+      `find_in_parent_folders()` / `find_in_parent_folders("root.hcl")`. It has no
+      generated parent boundary, so the walk resolves back to itself — the root
+      config should hold `remote_state` directly with no `include` of its own.
 
-    A child stack using `find_in_parent_folders()` to include its real parent is
-    the normal pattern and is not flagged, and a walk for a *different* file
-    (`find_in_parent_folders("root.hcl")`) is a valid root include left to runtime.
+    A child stack using `find_in_parent_folders("root.hcl")` to include its real
+    parent root config is the normal pattern and is not flagged.
     """
     errors: list[str] = []
     for path, content in generated_files.items():
-        if not path.endswith("terragrunt.hcl"):
+        if not path.endswith(("terragrunt.hcl", "root.hcl")):
             continue
         basename = path.rsplit("/", 1)[-1]
         stripped = _strip_hcl_comments(content)
@@ -473,8 +473,9 @@ def _find_terragrunt_include_cycles(generated_files: dict[str, str]) -> list[str
             errors.append(
                 f"Terragrunt config `{path}` includes itself (its `include` block "
                 "resolves back to the same file). Terragrunt allows only one level of "
-                "includes; remove the self-include, or have child stack configs include "
-                "this parent via `find_in_parent_folders()` instead."
+                "includes; a root config (`root.hcl`) must hold `remote_state` directly "
+                "with no `include`, and child stacks include it via "
+                '`find_in_parent_folders("root.hcl")`.'
             )
     return errors
 

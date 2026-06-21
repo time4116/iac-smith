@@ -227,15 +227,14 @@ modules/
     versions.tf
     README.md
 
-live/
-  terragrunt.hcl
+environments/
   non-prod/
-    terragrunt.hcl
+    root.hcl                  # environment root config (NOT terragrunt.hcl)
     <generated-stack>/
       terragrunt.hcl
       README.md
   prod/
-    terragrunt.hcl
+    root.hcl
     <generated-stack>/
       terragrunt.hcl
       README.md
@@ -263,7 +262,7 @@ IaC Smith scans the target repo before generation and passes discovered conventi
 Current behavior:
 - scan existing structure,
 - detect Terraform/Terragrunt conventions,
-- capture representative `live/**/terragrunt.hcl`, `modules/**/*.tf`, and module README examples,
+- capture representative `environments/**/root.hcl`, `environments/**/terragrunt.hcl`, `modules/**/*.tf`, and module README examples,
 - follow existing naming/module/environment/backend patterns unless the issue explicitly says not to,
 - avoid stamping a new structure over an established repo,
 - disclose conflicts or assumptions in the PR.

@@ -102,7 +102,6 @@ def plan_changes(
         "README.md",
         ".github/workflows/terraform-pr-check.yml",
         ".github/workflows/terraform-apply.yml",
-        "environments/terragrunt.hcl",
     ]
     for env in environments:
         files.extend(
@@ -111,7 +110,10 @@ def plan_changes(
                 f"bootstrap/backend/{env}/variables.tf",
                 f"bootstrap/backend/{env}/outputs.tf",
                 f"bootstrap/backend/{env}/README.md",
-                f"environments/{env}/terragrunt.hcl",
+                # The environment root config is named root.hcl (not terragrunt.hcl):
+                # Terragrunt deprecated using terragrunt.hcl as an include root. Stacks
+                # include it via find_in_parent_folders("root.hcl").
+                f"environments/{env}/root.hcl",
                 f"environments/{env}/{stack_name}/terragrunt.hcl",
                 f"environments/{env}/{stack_name}/README.md",
             ]
