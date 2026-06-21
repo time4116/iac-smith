@@ -859,6 +859,102 @@ def _find_apprunner_non_ecr_image(generated_files: dict[str, str]) -> list[str]:
     return errors
 
 
+_AWS_KMS_KEY_RE = re.compile(r'\bresource\s+"aws_kms_key"\s+"([^"]+)"')
+_AWS_KMS_KEY_POLICY_RE = re.compile(r'\bresource\s+"aws_kms_key_policy"\s+"([^"]+)"')
+_AWS_CW_LOG_GROUP_RE = re.compile(r'\bresource\s+"aws_cloudwatch_log_group"\s+"([^"]+)"')
+_KMS_KEY_ID_REF_RE = re.compile(r"kms_key_id\s*=\s*aws_kms_key\.([A-Za-z0-9_]+)\.")
+_KMS_KEY_POLICY_TARGET_RE = re.compile(r"key_id\s*=\s*aws_kms_key\.([A-Za-z0-9_]+)\.")
+_POLICY_DATA_REF_RE = re.compile(
+    r"policy\s*=\s*data\.aws_iam_policy_document\.([A-Za-z0-9_]+)\.json"
+)
+_DATA_POLICY_DOC_RE = re.compile(r'\bdata\s+"aws_iam_policy_document"\s+"([^"]+)"')
+# Matches the CloudWatch Logs service principal, regional or not, including an
+# interpolated region (logs.${...}.amazonaws.com).
+_LOGS_PRINCIPAL_RE = re.compile(r"logs(\.[^\s\"']*?)?\.amazonaws\.com")
+
+
+def _kms_key_policy_text(key_name: str, content: str, data_docs: dict[str, str]) -> str:
+    """Concatenate every policy document attached to ``aws_kms_key.<key_name>``.
+
+    Covers the inline ``policy`` on the key, a referenced ``aws_iam_policy_document``
+    data source, and any ``aws_kms_key_policy`` resource targeting the key.
+    """
+    texts: list[str] = []
+    for km in _AWS_KMS_KEY_RE.finditer(content):
+        if km.group(1) != key_name:
+            continue
+        key_body = _extract_hcl_block_body(content, km.start()) or ""
+        texts.append(key_body)
+        doc = _POLICY_DATA_REF_RE.search(key_body)
+        if doc and doc.group(1) in data_docs:
+            texts.append(data_docs[doc.group(1)])
+    for pm in _AWS_KMS_KEY_POLICY_RE.finditer(content):
+        policy_body = _extract_hcl_block_body(content, pm.start()) or ""
+        target = _KMS_KEY_POLICY_TARGET_RE.search(policy_body)
+        if target and target.group(1) == key_name:
+            texts.append(policy_body)
+            doc = _POLICY_DATA_REF_RE.search(policy_body)
+            if doc and doc.group(1) in data_docs:
+                texts.append(data_docs[doc.group(1)])
+    return "\n".join(texts)
+
+
+def _find_cloudwatch_logs_kms_without_grant(generated_files: dict[str, str]) -> list[str]:
+    """Flag a CloudWatch Log Group encrypted with a CMK whose policy omits CloudWatch Logs.
+
+    CloudWatch Logs can only use a customer-managed KMS key when the key's *policy*
+    grants the ``logs.<region>.amazonaws.com`` service principal. A key left on the
+    default policy (or any policy without that grant) makes ``CreateLogGroup`` fail
+    with AccessDenied — but only at ``apply``: ``validate`` and ``plan`` pass
+    because the references are all valid. The local-state plan never creates the
+    log group, so this slips through to the real apply. Catch it deterministically.
+
+    Only same-module keys whose policy text is resolvable (inline, a referenced
+    ``aws_iam_policy_document``, or an ``aws_kms_key_policy`` resource) are judged;
+    a key referenced through a variable/data source is left alone to avoid false
+    positives.
+    """
+    by_module: dict[str, str] = {}
+    for path, content in generated_files.items():
+        root = _module_root(path)
+        if root and path.endswith(".tf"):
+            by_module[root] = by_module.get(root, "") + "\n" + _strip_hcl_comments(content)
+
+    findings: list[str] = []
+    for root, content in by_module.items():
+        kms_key_names = {m.group(1) for m in _AWS_KMS_KEY_RE.finditer(content)}
+        if not kms_key_names:
+            continue
+        data_docs = _extract_named_hcl_blocks(content, _DATA_POLICY_DOC_RE)
+
+        log_groups: dict[str, str] = {}
+        for m in _AWS_CW_LOG_GROUP_RE.finditer(content):
+            body = _extract_hcl_block_body(content, m.start()) or ""
+            ref = _KMS_KEY_ID_REF_RE.search(body)
+            if ref and ref.group(1) in kms_key_names:
+                log_groups[m.group(1)] = ref.group(1)
+        if not log_groups:
+            continue
+
+        flagged: set[str] = set()
+        for log_group_name, key_name in sorted(log_groups.items()):
+            if key_name in flagged:
+                continue
+            if not _LOGS_PRINCIPAL_RE.search(_kms_key_policy_text(key_name, content, data_docs)):
+                flagged.add(key_name)
+                findings.append(
+                    f"Module `{root}` encrypts `aws_cloudwatch_log_group.{log_group_name}` with "
+                    f"customer-managed `aws_kms_key.{key_name}`, but that key's policy does not "
+                    f"grant the CloudWatch Logs service principal "
+                    f"`logs.<region>.amazonaws.com` permission to use it. `terraform apply` will "
+                    f"fail with AccessDenied (validate/plan pass, so this is only caught at "
+                    f"apply). Add a key policy statement allowing `logs.<region>.amazonaws.com` "
+                    f"to kms:Encrypt*/Decrypt*/ReEncrypt*/GenerateDataKey*/Describe* (scope it "
+                    f"with `kms:EncryptionContext:aws:logs:arn`), or remove `kms_key_id`."
+                )
+    return findings
+
+
 def _find_hardcoded_secret_values(generated_files: dict[str, str]) -> list[str]:
     """Flag literal string values assigned to secret-named fields (advisory).
 
@@ -1054,6 +1150,9 @@ def static_review_generated_files(
     structural.extend(
         _find_terragrunt_dangling_dependencies(generated_files, known_stack_dirs or set())
     )
+    # Apply-time-only failure (validate/plan pass): a CloudWatch Log Group encrypted
+    # with a CMK whose policy does not grant CloudWatch Logs. Surface + autofix.
+    structural.extend(_find_cloudwatch_logs_kms_without_grant(generated_files))
 
     # Cross-module provider name collisions are not caught by module-level
     # terraform validate and can fail only at apply time, so they block PR
