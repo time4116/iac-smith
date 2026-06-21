@@ -285,7 +285,16 @@ _TG_INPUTS_HEADER_RE = re.compile(r"\binputs\s*=\s*\{")
 _TG_INCLUDE_BLOCK_RE = re.compile(r"^\s*include\s*(?:\"[^\"]+\"\s*)?\{", re.MULTILINE)
 _TG_LOCAL_REF_RE = re.compile(r"\blocal\.([A-Za-z0-9_]+)")
 _TG_SOURCE_RE = re.compile(r'source\s*=\s*"([^"]+)"')
-_TG_FIND_IN_PARENT_RE = re.compile(r"\bpath\s*=\s*find_in_parent_folders\s*\(\s*\)")
+_TG_FIND_IN_PARENT_CALL_RE = re.compile(
+    r'\bfind_in_parent_folders\s*\(\s*(?:"(?P<name>[^"]*)")?\s*\)'
+)
+# An include path that points back into the config's own directory:
+# `path = "terragrunt.hcl"`, `"./terragrunt.hcl"`, or
+# `"${get_terragrunt_dir()}/terragrunt.hcl"`. A genuine parent include uses a
+# `../` prefix or `find_in_parent_folders(...)`, so neither is matched here.
+_TG_INCLUDE_SELF_PATH_RE = re.compile(
+    r'\bpath\s*=\s*"(?:\$\{\s*get_terragrunt_dir\(\)\s*\}/|\./)?(?P<file>[A-Za-z0-9_.-]+\.hcl)"'
+)
 _REDACTED_PLACEHOLDER_RE = re.compile(r"\*{3}")
 _SINGLETON_RESOURCE_TYPES = frozenset({"aws_vpc"})
 _RESOURCE_TYPE_RE = re.compile(r'\bresource\s+"([^"]+)"')
@@ -426,24 +435,46 @@ def _is_stack_terragrunt(path: str) -> bool:
 def _find_terragrunt_include_cycles(generated_files: dict[str, str]) -> list[str]:
     """Flag generated Terragrunt configs that include themselves.
 
-    `find_in_parent_folders()` is appropriate for leaf stack configs, but an
-    environment/root config such as `environments/non-prod/terragrunt.hcl` has no
-    generated child boundary to include. Terragrunt resolves it back to the same
-    file and then fails with "includes itself / only one level of includes is
-    allowed" during plan. Catch the generic shape statically.
+    Terragrunt allows only one level of includes, so a config whose `include`
+    block resolves back to the same file fails at plan time with "includes itself
+    / only one level of includes is allowed". Two shapes are caught:
+
+    * an explicit same-directory self path — `path = "terragrunt.hcl"`,
+      `"./terragrunt.hcl"`, or `"${get_terragrunt_dir()}/terragrunt.hcl"` — which
+      is wrong in any config; and
+    * an environment/root config (a non-stack `terragrunt.hcl`) that walks up for
+      its *own* filename via `find_in_parent_folders()` /
+      `find_in_parent_folders("terragrunt.hcl")`. It has no generated parent
+      boundary, so the walk resolves back to itself.
+
+    A child stack using `find_in_parent_folders()` to include its real parent is
+    the normal pattern and is not flagged, and a walk for a *different* file
+    (`find_in_parent_folders("root.hcl")`) is a valid root include left to runtime.
     """
     errors: list[str] = []
     for path, content in generated_files.items():
         if not path.endswith("terragrunt.hcl"):
             continue
-        if _is_stack_terragrunt(path):
+        basename = path.rsplit("/", 1)[-1]
+        stripped = _strip_hcl_comments(content)
+        if not _TG_INCLUDE_BLOCK_RE.search(stripped):
             continue
-        if _TG_INCLUDE_BLOCK_RE.search(content) and _TG_FIND_IN_PARENT_RE.search(content):
+
+        self_include = any(
+            m.group("file") == basename for m in _TG_INCLUDE_SELF_PATH_RE.finditer(stripped)
+        )
+        if not self_include and not _is_stack_terragrunt(path):
+            self_include = any(
+                (m.group("name") or basename) == basename
+                for m in _TG_FIND_IN_PARENT_CALL_RE.finditer(stripped)
+            )
+
+        if self_include:
             errors.append(
-                f"Terragrunt config `{path}` includes itself via "
-                "`path = find_in_parent_folders()`. Root/environment Terragrunt "
-                "configs must not include themselves; remove the include block or "
-                "make child stack configs include this parent instead."
+                f"Terragrunt config `{path}` includes itself (its `include` block "
+                "resolves back to the same file). Terragrunt allows only one level of "
+                "includes; remove the self-include, or have child stack configs include "
+                "this parent via `find_in_parent_folders()` instead."
             )
     return errors
 
