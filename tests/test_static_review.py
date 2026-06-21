@@ -15,10 +15,12 @@ from iac_smith.nodes.static_review import (
     _find_cross_file_duplicates,
     _find_duplicate_named_resources,
     _find_hardcoded_secret_values,
+    _find_malformed_terraform_declarations,
     _find_redacted_placeholders,
     _find_singleton_resource_duplication,
     _find_terragrunt_dangling_dependencies,
     _find_terragrunt_dependency_output_mismatches,
+    _find_terragrunt_include_cycles,
     _find_terragrunt_missing_required_inputs,
     _find_terragrunt_orphaned_locals,
     _find_terragrunt_required_providers,
@@ -26,6 +28,55 @@ from iac_smith.nodes.static_review import (
     existing_stack_dirs,
     static_review_generated_files,
 )
+
+
+class TestMalformedTerraformDeclarations:
+    def test_flags_var_block_typo_in_tf_file(self) -> None:
+        files = {
+            "modules/dynamodb-table/variables.tf": (
+                'variable "table_name" { type = string }\nvar "aws_region" { type = string }\n'
+            )
+        }
+
+        errors = _find_malformed_terraform_declarations(files)
+
+        assert len(errors) == 1
+        assert 'var "aws_region"' in errors[0]
+        assert 'variable "aws_region"' in errors[0]
+
+    def test_valid_variable_block_not_flagged(self) -> None:
+        files = {"modules/dynamodb-table/variables.tf": 'variable "aws_region" { type = string }\n'}
+
+        assert _find_malformed_terraform_declarations(files) == []
+
+
+class TestTerragruntIncludeCycles:
+    def test_environment_root_must_not_include_itself_with_find_in_parent_folders(self) -> None:
+        files = {
+            "environments/non-prod/terragrunt.hcl": (
+                'include "root" {\n  path = find_in_parent_folders()\n}\n'
+            ),
+            "environments/non-prod/dynamodb-table/terragrunt.hcl": (
+                'include "root" {\n  path = find_in_parent_folders()\n}\n'
+            ),
+        }
+
+        errors = _find_terragrunt_include_cycles(files)
+
+        assert len(errors) == 1
+        assert "environments/non-prod/terragrunt.hcl" in errors[0]
+        assert "includes itself" in errors[0]
+
+    def test_stack_include_parent_with_find_in_parent_folders_is_allowed(self) -> None:
+        files = {
+            "environments/terragrunt.hcl": "locals { root = true }\n",
+            "environments/non-prod/terragrunt.hcl": 'locals { environment = "non-prod" }\n',
+            "environments/non-prod/dynamodb-table/terragrunt.hcl": (
+                'include "root" {\n  path = find_in_parent_folders()\n}\n'
+            ),
+        }
+
+        assert _find_terragrunt_include_cycles(files) == []
 
 
 class TestTerragruntRequiredProviders:

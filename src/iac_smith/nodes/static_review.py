@@ -123,6 +123,7 @@ def _find_undeclared_module_references(generated_files: dict[str, str]) -> list[
 
 
 _VAR_DECL_RE = re.compile(r'\bvariable\s+"([^"]+)"')
+_MALFORMED_VAR_BLOCK_RE = re.compile(r'(?<![A-Za-z0-9_])var\s+"([^"]+)"\s*\{')
 _OUTPUT_DECL_RE = re.compile(r'\boutput\s+"([^"]+)"')
 _REQUIRED_PROVIDERS_RE = re.compile(r"required_providers\s*{")
 
@@ -143,6 +144,27 @@ def _suggest_keep_file(locations: list[str], preferred: str) -> str:
     if remove:
         return f"Remove from {remove[0]}, keep in {keep}."
     return "Keep one declaration only."
+
+
+def _find_malformed_terraform_declarations(generated_files: dict[str, str]) -> list[str]:
+    """Flag common Terraform declaration typos that cause parser errors.
+
+    Runtime repair sometimes shortens ``variable`` to ``var`` when editing
+    ``variables.tf``. Terraform interprets that as an unknown block type and fails
+    before provider initialization. Catch it as a structural repair issue so the
+    model fixes the exact file before spending another runtime attempt.
+    """
+    errors: list[str] = []
+    for path, content in generated_files.items():
+        if not path.endswith(".tf"):
+            continue
+        for match in _MALFORMED_VAR_BLOCK_RE.finditer(_strip_hcl_comments(content)):
+            name = match.group(1)
+            errors.append(
+                f'Terraform file `{path}` uses malformed block `var "{name}"`. '
+                f'Terraform variable declarations must use `variable "{name}" {{ ... }}`.'
+            )
+    return errors
 
 
 def _find_cross_file_duplicates(generated_files: dict[str, str]) -> list[str]:
@@ -263,6 +285,7 @@ _TG_INPUTS_HEADER_RE = re.compile(r"\binputs\s*=\s*\{")
 _TG_INCLUDE_BLOCK_RE = re.compile(r"^\s*include\s*(?:\"[^\"]+\"\s*)?\{", re.MULTILINE)
 _TG_LOCAL_REF_RE = re.compile(r"\blocal\.([A-Za-z0-9_]+)")
 _TG_SOURCE_RE = re.compile(r'source\s*=\s*"([^"]+)"')
+_TG_FIND_IN_PARENT_RE = re.compile(r"\bpath\s*=\s*find_in_parent_folders\s*\(\s*\)")
 _REDACTED_PLACEHOLDER_RE = re.compile(r"\*{3}")
 _SINGLETON_RESOURCE_TYPES = frozenset({"aws_vpc"})
 _RESOURCE_TYPE_RE = re.compile(r'\bresource\s+"([^"]+)"')
@@ -398,6 +421,31 @@ def _module_name_from_tg_source(source: str) -> str | None:
 def _is_stack_terragrunt(path: str) -> bool:
     parts = path.split("/")
     return len(parts) >= 4 and parts[0] == "environments" and parts[-1] == "terragrunt.hcl"
+
+
+def _find_terragrunt_include_cycles(generated_files: dict[str, str]) -> list[str]:
+    """Flag generated Terragrunt configs that include themselves.
+
+    `find_in_parent_folders()` is appropriate for leaf stack configs, but an
+    environment/root config such as `environments/non-prod/terragrunt.hcl` has no
+    generated child boundary to include. Terragrunt resolves it back to the same
+    file and then fails with "includes itself / only one level of includes is
+    allowed" during plan. Catch the generic shape statically.
+    """
+    errors: list[str] = []
+    for path, content in generated_files.items():
+        if not path.endswith("terragrunt.hcl"):
+            continue
+        if _is_stack_terragrunt(path):
+            continue
+        if _TG_INCLUDE_BLOCK_RE.search(content) and _TG_FIND_IN_PARENT_RE.search(content):
+            errors.append(
+                f"Terragrunt config `{path}` includes itself via "
+                "`path = find_in_parent_folders()`. Root/environment Terragrunt "
+                "configs must not include themselves; remove the include block or "
+                "make child stack configs include this parent instead."
+            )
+    return errors
 
 
 def _find_redacted_placeholders(generated_files: dict[str, str]) -> list[str]:
@@ -864,9 +912,11 @@ def static_review_generated_files(
 
     # Structural/semantic — advisory + autofix, never blocking.
     structural.extend(_find_undeclared_module_references(generated_files))
+    structural.extend(_find_malformed_terraform_declarations(generated_files))
     structural.extend(_find_cross_file_duplicates(generated_files))
     structural.extend(_find_undeclared_variable_references(generated_files))
     structural.extend(_find_terragrunt_orphaned_locals(generated_files))
+    structural.extend(_find_terragrunt_include_cycles(generated_files))
     structural.extend(_find_terragrunt_missing_required_inputs(generated_files))
     structural.extend(_find_terragrunt_dependency_output_mismatches(generated_files))
     structural.extend(
