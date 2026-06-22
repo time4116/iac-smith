@@ -1338,7 +1338,8 @@ class BedrockTerraformGenerator:
         bedrock_runtime: BedrockRuntime | None = None,
         *,
         read_timeout_seconds: int = 180,
-        max_attempts: int = 3,
+        max_attempts: int = 2,
+        max_tokens: int = 4096,
         max_repair_attempts: int = 2,
         concurrency: int | None = None,
         logger: Callable[[str], None] | None = None,
@@ -1349,6 +1350,13 @@ class BedrockTerraformGenerator:
         self._bedrock_runtime = bedrock_runtime
         self.read_timeout_seconds = _int_env("IAC_SMITH_BEDROCK_READ_TIMEOUT", read_timeout_seconds)
         self.max_attempts = _int_env("IAC_SMITH_BEDROCK_MAX_ATTEMPTS", max_attempts)
+        # A single Terraform/HCL/YAML/Markdown file never needs 16k output tokens.
+        # The old 16384 cap let the model run away on one file; at observed Bedrock
+        # throughput (~40 tok/s) that generation exceeded the read timeout and
+        # read-timed out on every retry, stalling the whole run. A tight cap keeps
+        # generation comfortably under read_timeout. Truncation is recoverable —
+        # the parse-retry loop re-asks more concisely. Env-tunable for headroom.
+        self.max_tokens = _int_env("IAC_SMITH_BEDROCK_MAX_TOKENS", max_tokens)
         self.max_repair_attempts = max_repair_attempts
         configured_concurrency = concurrency or int(os.getenv("IAC_SMITH_BEDROCK_CONCURRENCY", "4"))
         self.concurrency = max(1, configured_concurrency)
@@ -1381,11 +1389,12 @@ class BedrockTerraformGenerator:
             )
         return self._bedrock_runtime
 
-    def _invoke_model_with_retries(self, **kwargs: Any) -> dict[str, Any]:
+    def _invoke_model_with_retries(self, context: str = "", **kwargs: Any) -> dict[str, Any]:
         # Single retry authority (botocore's own retries are disabled in the
         # client Config). Worst-case wall time is bounded to
-        # max_attempts * read_timeout, and every retry is logged so a slow/stalled
-        # Bedrock call shows up in the run output instead of looking like a hang.
+        # max_attempts * read_timeout, and every retry is logged (with the file it
+        # was generating) so a slow/stalled Bedrock call shows up in the run output
+        # — and names the culprit file — instead of looking like a hang.
         from botocore.exceptions import (
             ClientError,
             ConnectionClosedError,
@@ -1412,9 +1421,10 @@ class BedrockTerraformGenerator:
                     raise
                 last_error = exc
             if attempt < self.max_attempts:
+                where = f" for {context}" if context else ""
                 self._log(
-                    f"IaC Smith: Bedrock call failed ({type(last_error).__name__}); "
-                    f"retrying (attempt {attempt + 1}/{self.max_attempts})."
+                    f"IaC Smith: Bedrock call failed ({type(last_error).__name__})"
+                    f"{where}; retrying (attempt {attempt + 1}/{self.max_attempts})."
                 )
         assert last_error is not None
         raise last_error
@@ -1484,13 +1494,14 @@ class BedrockTerraformGenerator:
         last_error: Exception | None = None
         for attempt in range(3):
             response = self._invoke_model_with_retries(
+                context=path,
                 modelId=self.model_id,
                 contentType="application/json",
                 accept="application/json",
                 body=json.dumps(
                     {
                         "anthropic_version": "bedrock-2023-05-31",
-                        "max_tokens": 16384,
+                        "max_tokens": self.max_tokens,
                         "temperature": 0,
                         "messages": [{"role": "user", "content": prompt}],
                         "output_config": {
