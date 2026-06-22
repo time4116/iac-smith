@@ -21,6 +21,20 @@ from iac_smith.nodes.static_review import (
     static_review_generated_files,
 )
 
+_BEDROCK_THROTTLE_CODES = frozenset(
+    {"ThrottlingException", "TooManyRequestsException", "ServiceUnavailableException"}
+)
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if raw.lstrip("-").isdigit():
+        value = int(raw)
+        if value > 0:
+            return value
+    return default
+
+
 _ADD_VARIABLE_TO_RE = re.compile(r'Add variable "[^"]+" to (\S+)\.')
 
 _TG_LOCALS_HEADER_RE = re.compile(r"\blocals\s*\{")
@@ -1323,7 +1337,7 @@ class BedrockTerraformGenerator:
         model_id: str | None = None,
         bedrock_runtime: BedrockRuntime | None = None,
         *,
-        read_timeout_seconds: int = 240,
+        read_timeout_seconds: int = 180,
         max_attempts: int = 3,
         max_repair_attempts: int = 2,
         concurrency: int | None = None,
@@ -1333,8 +1347,8 @@ class BedrockTerraformGenerator:
         if not self.model_id:
             raise ValueError("BEDROCK_MODEL_ID must be set to generate Terraform with Bedrock.")
         self._bedrock_runtime = bedrock_runtime
-        self.read_timeout_seconds = read_timeout_seconds
-        self.max_attempts = max_attempts
+        self.read_timeout_seconds = _int_env("IAC_SMITH_BEDROCK_READ_TIMEOUT", read_timeout_seconds)
+        self.max_attempts = _int_env("IAC_SMITH_BEDROCK_MAX_ATTEMPTS", max_attempts)
         self.max_repair_attempts = max_repair_attempts
         configured_concurrency = concurrency or int(os.getenv("IAC_SMITH_BEDROCK_CONCURRENCY", "4"))
         self.concurrency = max(1, configured_concurrency)
@@ -1357,31 +1371,51 @@ class BedrockTerraformGenerator:
                 config=Config(
                     connect_timeout=10,
                     read_timeout=self.read_timeout_seconds,
-                    retries={"max_attempts": self.max_attempts, "mode": "standard"},
+                    # Disable botocore's own retries: _invoke_model_with_retries is
+                    # the single retry authority. Nesting an app-level loop inside
+                    # botocore's retries multiplied the worst-case wall time
+                    # (app_attempts * botocore_attempts * read_timeout) into tens of
+                    # minutes, so one stalled Bedrock call hung the whole run.
+                    retries={"max_attempts": 1, "mode": "standard"},
                 ),
             )
         return self._bedrock_runtime
 
     def _invoke_model_with_retries(self, **kwargs: Any) -> dict[str, Any]:
+        # Single retry authority (botocore's own retries are disabled in the
+        # client Config). Worst-case wall time is bounded to
+        # max_attempts * read_timeout, and every retry is logged so a slow/stalled
+        # Bedrock call shows up in the run output instead of looking like a hang.
         from botocore.exceptions import (
+            ClientError,
             ConnectionClosedError,
             ConnectTimeoutError,
             EndpointConnectionError,
             ReadTimeoutError,
         )
 
-        retryable_errors = (
+        transient = (
             ConnectionClosedError,
             ConnectTimeoutError,
             EndpointConnectionError,
             ReadTimeoutError,
         )
         last_error: Exception | None = None
-        for _attempt in range(1, self.max_attempts + 1):
+        for attempt in range(1, self.max_attempts + 1):
             try:
                 return self.bedrock_runtime.invoke_model(**kwargs)
-            except retryable_errors as exc:
+            except transient as exc:
                 last_error = exc
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                if code not in _BEDROCK_THROTTLE_CODES:
+                    raise
+                last_error = exc
+            if attempt < self.max_attempts:
+                self._log(
+                    f"IaC Smith: Bedrock call failed ({type(last_error).__name__}); "
+                    f"retrying (attempt {attempt + 1}/{self.max_attempts})."
+                )
         assert last_error is not None
         raise last_error
 

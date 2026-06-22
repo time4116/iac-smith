@@ -465,6 +465,67 @@ def test_bedrock_terraform_generator_retries_transient_read_timeouts():
     assert len(runtime.calls) == len(files) + 1
 
 
+def _client_error(code: str) -> botocore.exceptions.ClientError:
+    return botocore.exceptions.ClientError(
+        {"Error": {"Code": code, "Message": code}}, "InvokeModel"
+    )
+
+
+def test_invoke_model_retries_throttling_then_succeeds():
+    calls = []
+
+    class Client:
+        def invoke_model(self, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise _client_error("ThrottlingException")
+            return {"ok": True}
+
+    generator = BedrockTerraformGenerator(
+        model_id="anthropic.test-model", bedrock_runtime=Client(), max_attempts=3
+    )
+
+    assert generator._invoke_model_with_retries(modelId="anthropic.test-model") == {"ok": True}
+    assert len(calls) == 2
+
+
+def test_invoke_model_does_not_retry_non_throttle_client_error():
+    calls = []
+
+    class Client:
+        def invoke_model(self, **kwargs):
+            calls.append(1)
+            raise _client_error("AccessDeniedException")
+
+    generator = BedrockTerraformGenerator(
+        model_id="anthropic.test-model", bedrock_runtime=Client(), max_attempts=3
+    )
+
+    with pytest.raises(botocore.exceptions.ClientError):
+        generator._invoke_model_with_retries(modelId="anthropic.test-model")
+    assert len(calls) == 1
+
+
+def test_invoke_model_retries_are_bounded_by_max_attempts():
+    calls = []
+
+    class Client:
+        def invoke_model(self, **kwargs):
+            calls.append(1)
+            raise botocore.exceptions.ReadTimeoutError(
+                endpoint_url="https://example.invalid/model/test/invoke", error="timed out"
+            )
+
+    generator = BedrockTerraformGenerator(
+        model_id="anthropic.test-model", bedrock_runtime=Client(), max_attempts=2
+    )
+
+    with pytest.raises(botocore.exceptions.ReadTimeoutError):
+        generator._invoke_model_with_retries(modelId="anthropic.test-model")
+    # No nesting: exactly max_attempts calls, not max_attempts * botocore_attempts.
+    assert len(calls) == 2
+
+
 def test_bedrock_terraform_generator_repairs_file_after_static_review_failure():
     bad_terragrunt = 'remote_state { config = { key = "fixed.tfstate" } }\n'
     fixed_terragrunt = (
@@ -692,7 +753,10 @@ def test_bedrock_terraform_generator_uses_extended_bedrock_timeout(monkeypatch):
     assert service_name == "bedrock-runtime"
     assert kwargs["region_name"] == "us-west-2"
     assert kwargs["config"].read_timeout >= 180
-    assert kwargs["config"].retries["max_attempts"] >= 3
+    # botocore's own retries are disabled: _invoke_model_with_retries is the single
+    # retry authority, so they must not nest and multiply the worst-case wall time.
+    assert kwargs["config"].retries["max_attempts"] == 1
+    assert generator.max_attempts >= 2
 
 
 class TestRepairUnitKey:
