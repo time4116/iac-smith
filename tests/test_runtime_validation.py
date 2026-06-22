@@ -4,9 +4,41 @@ from pathlib import Path
 
 from iac_smith.runtime_validation import (
     _force_local_state,
+    _run_check,
     _strip_backend_config,
     validate_generated_iac,
 )
+
+
+def test_run_check_never_inherits_stdin_and_bounds_runtime(monkeypatch, tmp_path: Path):
+    # A hung terraform/terragrunt subprocess must not stall the whole run: stdin is
+    # closed so an unexpected prompt fails fast, and a timeout caps any other stall.
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("iac_smith.runtime_validation.subprocess.run", fake_run)
+
+    ok, _ = _run_check(["terraform", "plan"], tmp_path, {})
+
+    assert ok
+    assert seen["stdin"] is subprocess.DEVNULL
+    assert seen["timeout"] == 300
+
+
+def test_run_check_treats_timeout_as_failure(monkeypatch, tmp_path: Path):
+    def fake_run(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, kwargs.get("timeout", 0), output="partial")
+
+    monkeypatch.setattr("iac_smith.runtime_validation.subprocess.run", fake_run)
+
+    ok, output = _run_check(["terragrunt", "plan"], tmp_path, {"IAC_SMITH_CHECK_TIMEOUT": "45"})
+
+    assert not ok
+    assert "timed out after 45s" in output
+    assert "partial" in output
 
 
 def _scaffold_stack(tmp_path: Path) -> None:

@@ -22,15 +22,46 @@ class RuntimeValidationResult:
     contract_docs: dict[str, TerraformContract] = field(default_factory=dict)
 
 
+def _check_timeout(env: dict[str, str]) -> int:
+    """Per-command wall-clock cap for terraform/terragrunt subprocesses.
+
+    Without a bound, a single command that blocks on an interactive prompt or a
+    stalled network/AWS call hangs the whole run silently until the job is
+    cancelled. Overridable via ``IAC_SMITH_CHECK_TIMEOUT`` (seconds).
+    """
+    raw = (env.get("IAC_SMITH_CHECK_TIMEOUT") or "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    return 300
+
+
 def _run_check(command: list[str], cwd: Path, env: dict[str, str]) -> tuple[bool, str]:
-    completed = subprocess.run(
-        command,
-        cwd=cwd,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=cwd,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+            # Never inherit the parent's stdin: any unexpected prompt (e.g.
+            # terragrunt offering to create the state bucket, or a git credential
+            # prompt) gets EOF and fails fast instead of blocking forever.
+            stdin=subprocess.DEVNULL,
+            timeout=_check_timeout(env),
+        )
+    except subprocess.TimeoutExpired as exc:
+        captured = "\n".join(
+            part.decode() if isinstance(part, bytes) else part
+            for part in (exc.stdout, exc.stderr)
+            if part
+        ).strip()
+        timeout_note = (
+            f"`{' '.join(command)}` timed out after {_check_timeout(env)}s "
+            "(no output for the full window — likely an interactive prompt or a "
+            "stalled network/AWS call)."
+        )
+        return False, "\n".join(part for part in [timeout_note, captured] if part)
     output = "\n".join(part for part in [completed.stdout, completed.stderr] if part).strip()
     return completed.returncode == 0, output
 
