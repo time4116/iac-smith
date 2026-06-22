@@ -46,6 +46,10 @@ All configuration is via environment variables. There are no CLI flags.
 | `BEDROCK_MODEL_ID` | (required) | Primary Bedrock model/inference-profile for generation and repair |
 | `BEDROCK_ESCALATION_MODEL_ID` | unset | Stronger model used for one penultimate repair attempt (failing files only) when the primary is stuck; unset or equal to `BEDROCK_MODEL_ID` disables escalation |
 | `IAC_SMITH_BEDROCK_CONCURRENCY` | `4` | Parallel file generation threads |
+| `IAC_SMITH_BEDROCK_MAX_TOKENS` | `4096` | Max output tokens per generated file. Kept tight so one file's generation finishes well under the read timeout; truncation is recovered via the parse-retry "be more concise" path |
+| `IAC_SMITH_BEDROCK_READ_TIMEOUT` | `180` | Per-call Bedrock read timeout (seconds). `invoke_model` is non-streaming, so this bounds total server-side generation time for one file |
+| `IAC_SMITH_BEDROCK_MAX_ATTEMPTS` | `2` | Bedrock invoke attempts per call (single retry authority; botocore's own retries are disabled so they can't nest and multiply the wall time) |
+| `IAC_SMITH_CHECK_TIMEOUT` | `300` | Per-command timeout (seconds) for `terraform`/`terragrunt` runtime-validation subprocesses, so a stalled plan/init can't hang the run |
 
 ---
 
@@ -275,7 +279,7 @@ actually been resolved or learned (no boilerplate on the first pass).
 **Module:** `src/iac_smith/dynamic_terraform.py` (class `BedrockTerraformGenerator`)
 
 **Bedrock call per file:**
-- Max tokens: 16384, temperature 0
+- Max tokens: `IAC_SMITH_BEDROCK_MAX_TOKENS` (default 4096), temperature 0. `invoke_model` is non-streaming, so a runaway generation that exceeds the read timeout looks like a dead connection; the tight cap keeps each file well under `IAC_SMITH_BEDROCK_READ_TIMEOUT`
 - Output constrained to JSON schema: `{"path": str, "content": str, "assumptions": [], "warnings": []}`
 - JSON format enforced via `output_config.format.type = "json_schema"`
 
@@ -540,7 +544,7 @@ The workflow installs Python, uv, terraform, terragrunt, configures AWS OIDC cre
 
 ## Bedrock Hard-Failure Behavior
 
-Network-level errors (`ConnectionClosedError`, `ConnectTimeoutError`, `EndpointConnectionError`, `ReadTimeoutError`) are retried up to `max_attempts` times (default 3) before re-raising.
+Network-level errors (`ConnectionClosedError`, `ConnectTimeoutError`, `EndpointConnectionError`, `ReadTimeoutError`) and Bedrock throttling (`ThrottlingException`, `TooManyRequestsException`, `ServiceUnavailableException`) are retried up to `IAC_SMITH_BEDROCK_MAX_ATTEMPTS` times (default 2) before re-raising. This loop is the single retry authority — botocore's own `Config(retries=...)` is set to `max_attempts=1` so the two layers can't nest and multiply the worst-case wall time. Every retry is logged with the file it was generating, so a slow/stalled call is visible and pinpointed instead of looking like a hang. Non-throttle `ClientError`s (e.g. `AccessDeniedException`) are not retried.
 
 `ThrottlingException` (daily token quota exhausted) is caught in `cli.py` around both the graph invocation and the runtime repair loop, and returns a clean `IaCSmithRunResult(status="blocked", block_reason="Bedrock throttled: ...")` instead of a raw traceback.
 
