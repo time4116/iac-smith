@@ -217,6 +217,20 @@ environments/{env}/foundation/terragrunt.hcl
 environments/{env}/foundation/README.md
 ```
 
+**Foundation auto-scaffold (feedback-driven):** `requires_new_vpc` is the *up-front*
+signal, but it is often false for a workload that still turns out to need shared
+networking. So if the generated output itself declares a `dependency "foundation"`
+(or `baseline`/`vpc`/`vpc-foundation` — `FOUNDATION_STACK_NAMES`) pointing at a stack
+that is neither created by this change nor present in the target repo,
+`validation_runner` calls `add_foundation_stack(change_plan)` to add the foundation
+module + per-environment stack above and regenerates against the expanded plan. This
+is the model's own output proving the foundation is *truly needed*, rather than
+looping repair on an unfixable dangling-dependency finding (which would otherwise
+only surface at `terragrunt plan`). Scoped to foundation-style targets (an arbitrary
+missing stack is left to the dangling-dependency finding), guarded to run **at most
+once per run** (`state["foundation_added"]`), and detected by
+`static_review.missing_foundation_dependency_targets`.
+
 **If stack module does not exist yet:**
 ```
 modules/{stack_name}/main.tf

@@ -1,6 +1,6 @@
 from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
-from iac_smith.nodes.change_planner import plan_changes
+from iac_smith.nodes.change_planner import add_foundation_stack, plan_changes
 
 
 def _intent(resource_type: str = "eks_fargate") -> InfrastructureIntent:
@@ -173,6 +173,48 @@ def test_plan_strips_stack_suffix_from_resource_type():
     assert plan.stack_name == "ecs-fargate"
     assert "modules/ecs-fargate/main.tf" in plan.files_to_generate
     assert not any("ecs-fargate-stack" in p for p in plan.files_to_generate)
+
+
+def test_add_foundation_stack_adds_module_and_per_env_stack():
+    # A workload plan that did not schedule foundation (requires_new_vpc was false)
+    # gets the foundation module + per-environment stack added when generated output
+    # proves it is needed.
+    plan = plan_changes(
+        InfrastructureIntent(
+            raw_request="Aurora data platform",
+            resource_type="rds_aurora",
+            environment_scope=EnvironmentScope.NON_PROD_ONLY,
+            environments=["non-prod"],
+            region="us-west-2",
+            requires_new_vpc=False,
+            features=[],
+        ),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+    assert "modules/foundation/main.tf" not in plan.files_to_generate
+
+    expanded = add_foundation_stack(plan)
+
+    assert "modules/foundation/main.tf" in expanded.files_to_generate
+    assert "modules/foundation/variables.tf" in expanded.files_to_generate
+    assert "environments/non-prod/foundation/terragrunt.hcl" in expanded.files_to_generate
+    assert any("foundation module" in s for s in expanded.summary)
+    # The original workload files are preserved.
+    assert "modules/rds-aurora/main.tf" in expanded.files_to_generate
+
+
+def test_add_foundation_stack_is_idempotent():
+    plan = plan_changes(
+        _intent("ecs_fargate"),  # already includes foundation
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+    assert "modules/foundation/main.tf" in plan.files_to_generate
+
+    expanded = add_foundation_stack(plan)
+
+    # No duplicates; the plan is unchanged because foundation is already scheduled.
+    assert expanded.files_to_generate.count("modules/foundation/main.tf") == 1
+    assert expanded.files_to_generate == plan.files_to_generate
 
 
 def test_plan_existing_foundation_applies_to_arbitrary_workload_stack():

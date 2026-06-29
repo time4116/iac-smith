@@ -17,8 +17,56 @@ def _backend_resource(env: str, repo_slug: str) -> BackendResource:
     )
 
 
+# Stack names treated as a shared network/foundation layer. Single source of truth
+# so the dangling-dependency detector (static_review) and the planner agree on what
+# counts as "foundation" without keyword drift.
+FOUNDATION_STACK_NAMES = frozenset({"baseline", "foundation", "vpc", "vpc-foundation"})
+
+
 def _is_foundation_stack(stack_name: str) -> bool:
-    return stack_name in {"baseline", "foundation", "vpc", "vpc-foundation"}
+    return stack_name in FOUNDATION_STACK_NAMES
+
+
+def _foundation_files(environments: list[str]) -> list[str]:
+    """Every file the foundation module + per-environment foundation stack needs."""
+    files: list[str] = []
+    for env in environments:
+        files.append(f"environments/{env}/foundation/terragrunt.hcl")
+        files.append(f"environments/{env}/foundation/README.md")
+    files.extend(
+        [
+            "modules/foundation/main.tf",
+            "modules/foundation/variables.tf",
+            "modules/foundation/outputs.tf",
+            "modules/foundation/versions.tf",
+            "modules/foundation/README.md",
+        ]
+    )
+    return files
+
+
+def add_foundation_stack(change_plan: ChangePlan) -> ChangePlan:
+    """Return a plan with the foundation module + stack added, if not already present.
+
+    Used when generated output proves a foundation is truly needed (a workload stack
+    depends on one that was not planned) — see ``plan_changes`` for the up-front
+    decision. Idempotent: adds only the foundation files missing from the plan.
+    """
+    planned = set(change_plan.files_to_generate)
+    additions = [f for f in _foundation_files(change_plan.environments) if f not in planned]
+    if not additions:
+        return change_plan
+    note = (
+        "Generate foundation module for shared network dependencies "
+        "(a generated stack depends on it)"
+    )
+    summary = change_plan.summary if note in change_plan.summary else [*change_plan.summary, note]
+    return change_plan.model_copy(
+        update={
+            "files_to_generate": [*change_plan.files_to_generate, *additions],
+            "summary": summary,
+        }
+    )
 
 
 def _repo_has_foundation(repo_patterns: RepoPatterns | None) -> bool:
@@ -118,24 +166,9 @@ def plan_changes(
                 f"environments/{env}/{stack_name}/README.md",
             ]
         )
-        if _should_generate_foundation(stack_name, intent, repo_patterns):
-            files.extend(
-                [
-                    f"environments/{env}/foundation/terragrunt.hcl",
-                    f"environments/{env}/foundation/README.md",
-                ]
-            )
 
     if _should_generate_foundation(stack_name, intent, repo_patterns):
-        files.extend(
-            [
-                "modules/foundation/main.tf",
-                "modules/foundation/variables.tf",
-                "modules/foundation/outputs.tf",
-                "modules/foundation/versions.tf",
-                "modules/foundation/README.md",
-            ]
-        )
+        files.extend(_foundation_files(environments))
 
     # Only generate module scaffold if the repo doesn't already have one for this stack.
     if stack_name != "baseline" and not _module_already_exists(stack_name, repo_patterns):

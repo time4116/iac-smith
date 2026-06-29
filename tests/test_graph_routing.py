@@ -1,9 +1,31 @@
-from iac_smith.graph import build_graph, default_file_generator
+from iac_smith.graph import build_graph, default_file_generator, validation_runner
 from iac_smith.models.change_plan import BackendResource, ChangePlan
 from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
 from iac_smith.models.rules import Ruleset
 from iac_smith.state import IaCSmithState
+
+_VALID_REMOTE_STATE = (
+    'remote_state { config = { key = "${path_relative_to_include()}/terraform.tfstate" } }\n'
+)
+_FOUNDATION_DEPENDENCY = (
+    'dependency "foundation" {\n  config_path = "../foundation"\n'
+    '  mock_outputs = { vpc_id = "vpc-123" }\n}\n'
+)
+
+
+def _workload_intent_parser(issue_text: str) -> InfrastructureIntent:
+    # A workload that did NOT request a new VPC, so the planner does not schedule a
+    # foundation up front — exercising the feedback-driven scaffold.
+    return InfrastructureIntent(
+        raw_request=issue_text,
+        resource_type="rds_aurora",
+        environment_scope=EnvironmentScope.NON_PROD_ONLY,
+        environments=["non-prod"],
+        region="us-west-2",
+        requires_new_vpc=False,
+        features=[],
+    )
 
 
 def _fake_intent_parser(issue_text: str) -> InfrastructureIntent:
@@ -272,6 +294,100 @@ def test_graph_blocks_failed_static_review_before_pr_writer():
     assert "pr_body" not in result
     assert result["validation"].status.value == "failed"
     assert result["repair_attempts"] == 3
+
+
+def test_validation_runner_scaffolds_foundation_when_workload_depends_on_it():
+    plan = ChangePlan(
+        stack_name="rds-aurora",
+        environments=["non-prod"],
+        files_to_generate=[
+            "environments/non-prod/rds-aurora/terragrunt.hcl",
+            "modules/rds-aurora/main.tf",
+        ],
+        backend_resources={"non-prod": BackendResource(bucket="b", lock_table="l")},
+        summary=["Generate rds-aurora"],
+    )
+    state = IaCSmithState(
+        change_plan=plan,
+        generated_files={
+            "environments/non-prod/rds-aurora/terragrunt.hcl": (
+                _VALID_REMOTE_STATE + _FOUNDATION_DEPENDENCY
+            )
+        },
+    )
+
+    result = validation_runner(state)
+
+    assert result["status"] == "needs_repair"
+    assert result["foundation_added"] is True
+    assert "modules/foundation/main.tf" in result["change_plan"].files_to_generate
+    assert (
+        "environments/non-prod/foundation/terragrunt.hcl" in result["change_plan"].files_to_generate
+    )
+    # The structural expansion does not consume the repair budget.
+    assert "repair_attempts" not in result
+
+
+def test_validation_runner_scaffolds_foundation_only_once():
+    plan = ChangePlan(
+        stack_name="rds-aurora",
+        environments=["non-prod"],
+        files_to_generate=["environments/non-prod/rds-aurora/terragrunt.hcl"],
+        backend_resources={"non-prod": BackendResource(bucket="b", lock_table="l")},
+        summary=["Generate rds-aurora"],
+    )
+    state = IaCSmithState(
+        change_plan=plan,
+        foundation_added=True,
+        generated_files={
+            "environments/non-prod/rds-aurora/terragrunt.hcl": (
+                _VALID_REMOTE_STATE + _FOUNDATION_DEPENDENCY
+            )
+        },
+    )
+
+    result = validation_runner(state)
+
+    # Already expanded once: the scaffold check is skipped, so foundation is not added
+    # a second time — the plan is passed through untouched.
+    assert result["change_plan"] is plan
+    assert "modules/foundation/main.tf" not in result["change_plan"].files_to_generate
+
+
+def test_graph_recovers_by_scaffolding_foundation_then_reaching_pr_ready(tmp_path):
+    def generator(*args, **kwargs):
+        plan = kwargs["change_plan"]
+        files = {
+            "environments/non-prod/rds-aurora/terragrunt.hcl": (
+                _VALID_REMOTE_STATE + _FOUNDATION_DEPENDENCY
+            )
+        }
+        # Once foundation is scaffolded into the plan, the generator produces it,
+        # resolving the cross-stack dependency.
+        if "modules/foundation/main.tf" in plan.files_to_generate:
+            files["environments/non-prod/foundation/terragrunt.hcl"] = _VALID_REMOTE_STATE
+        return files
+
+    graph = build_graph(
+        intent_parser_fn=_workload_intent_parser,
+        file_generator_fn=generator,
+    )
+    result = graph.invoke(
+        IaCSmithState(
+            issue_number=20,
+            issue_title="Aurora data platform",
+            issue_body="Create a non-prod Aurora PostgreSQL data platform in us-west-2.",
+            issue_url="https://github.com/time4116/iac-smith/issues/20",
+            labels=["iac-smith"],
+            target_repo="time4116/iac-smith-demo-infra",
+            target_repo_path=str(tmp_path),
+        )
+    )
+
+    assert result["status"] == "pr_ready"
+    assert result["foundation_added"] is True
+    assert "modules/foundation/main.tf" in result["change_plan"].files_to_generate
+    assert "environments/non-prod/foundation/terragrunt.hcl" in result["generated_files"]
 
 
 def test_graph_validation_runner_successfully_repairs_transient_failure():
