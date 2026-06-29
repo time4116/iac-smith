@@ -28,8 +28,51 @@ from iac_smith.nodes.static_review import (
     _find_terragrunt_required_providers,
     _find_undeclared_variable_references,
     existing_stack_dirs,
+    missing_foundation_dependency_targets,
     static_review_generated_files,
 )
+
+
+class TestMissingFoundationDependencyTargets:
+    _WORKLOAD = (
+        'dependency "foundation" {\n  config_path = "../foundation"\n'
+        '  mock_outputs = { vpc_id = "vpc-123" }\n}\n'
+    )
+
+    def test_detects_foundation_dependency_with_no_target_stack(self) -> None:
+        files = {"environments/non-prod/rds-aurora/terragrunt.hcl": self._WORKLOAD}
+
+        targets = missing_foundation_dependency_targets(files, known_stack_dirs=set())
+
+        assert targets == {"environments/non-prod/foundation"}
+
+    def test_ignores_dependency_when_target_created_in_this_change(self) -> None:
+        files = {
+            "environments/non-prod/rds-aurora/terragrunt.hcl": self._WORKLOAD,
+            "environments/non-prod/foundation/terragrunt.hcl": "locals {}\n",
+        }
+
+        assert missing_foundation_dependency_targets(files, known_stack_dirs=set()) == set()
+
+    def test_ignores_dependency_on_pre_existing_repo_stack(self) -> None:
+        files = {"environments/non-prod/rds-aurora/terragrunt.hcl": self._WORKLOAD}
+
+        targets = missing_foundation_dependency_targets(
+            files, known_stack_dirs={"environments/non-prod/foundation"}
+        )
+
+        assert targets == set()
+
+    def test_does_not_auto_create_non_foundation_stacks(self) -> None:
+        # A dangling dependency on a non-foundation stack is left to the repair
+        # finding — we only know how to scaffold foundation.
+        files = {
+            "environments/non-prod/rds-aurora/terragrunt.hcl": (
+                'dependency "messaging" {\n  config_path = "../messaging"\n}\n'
+            )
+        }
+
+        assert missing_foundation_dependency_targets(files, known_stack_dirs=set()) == set()
 
 
 class TestMalformedTerraformDeclarations:
