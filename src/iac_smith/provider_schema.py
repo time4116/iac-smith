@@ -214,8 +214,16 @@ def build_schema_resolver(
     hallucinated resource type (a type whose provider is known but which the
     provider does not define), not only unsupported arguments. Returns an empty
     resolver (a no-op gate) when no providers are declared or harvesting fails.
+
+    Only ``versions.tf`` files are read for ``required_providers`` — that is the
+    sole authoritative location the generator allows them. Scanning every file
+    would let a placeholder provider in a generated README/example fail the harvest
+    ``init`` and silently disable the whole gate.
     """
-    requirements = extract_required_providers(generated_files.values())
+    versions_files = [
+        content for path, content in generated_files.items() if Path(path).name == "versions.tf"
+    ]
+    requirements = extract_required_providers(versions_files)
     schema = harvest_provider_schema(requirements, cache_dir=cache_dir, env=env)
     if not schema:
         return ContractResolver()

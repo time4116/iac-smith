@@ -148,3 +148,25 @@ def test_build_schema_resolver_empty_when_harvest_fails(monkeypatch):
     resolver = build_schema_resolver({"modules/s3/versions.tf": _VERSIONS_TF})
 
     assert resolver.provider_contracts == {}
+
+
+def test_build_schema_resolver_only_reads_versions_tf(monkeypatch):
+    # A required_providers block in a generated README/example must NOT reach the
+    # harvest — a placeholder provider there would fail `init` and silently disable
+    # the gate. Only real versions.tf files are authoritative.
+    readme = (
+        "# Module\n\n```hcl\nterraform {\n  required_providers {\n"
+        '    bad = { source = "example/bad", version = "1.0.0" }\n'
+        "  }\n}\n```\n"
+    )
+    captured: dict[str, str] = {}
+
+    def _capture(requirements, **kwargs):
+        captured.update(requirements)
+        return _schema()
+
+    monkeypatch.setattr(provider_schema, "harvest_provider_schema", _capture)
+
+    build_schema_resolver({"modules/s3/versions.tf": _VERSIONS_TF, "modules/s3/README.md": readme})
+
+    assert captured == {"hashicorp/aws": "~> 5.0"}
