@@ -88,6 +88,7 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_NON_PROD }}
           aws-region: us-west-2
           audience: sts.amazonaws.com
+          mask-aws-account-id: true
 
       - name: Terragrunt Plan
         if: steps.filter.outputs.changed == 'true'
