@@ -401,7 +401,7 @@ def test_bedrock_terraform_generator_returns_model_generated_files_without_rende
 
 
 def test_invoke_file_generation_stitches_truncated_response_via_continuation():
-    path = "modules/ecs-fargate/main.tf"
+    path = "modules/example/main.tf"
     full_doc = json.dumps(
         {"path": path, "content": 'resource "x" "y" {}\n', "assumptions": [], "warnings": []}
     )
@@ -452,7 +452,7 @@ def test_invoke_file_generation_stitches_truncated_response_via_continuation():
 
 
 def test_invoke_file_generation_single_call_when_not_truncated():
-    path = "modules/ecs-fargate/main.tf"
+    path = "modules/example/main.tf"
     full_doc = json.dumps(
         {"path": path, "content": 'resource "x" "y" {}\n', "assumptions": [], "warnings": []}
     )
