@@ -6,7 +6,6 @@ from typing import Protocol
 from langgraph.graph import END, StateGraph
 
 from iac_smith.blackboard import (
-    ContractResolver,
     RunBlackboard,
     build_blackboard,
     normalize_validation_findings,
@@ -24,6 +23,7 @@ from iac_smith.nodes.intent_parser import parse_intent
 from iac_smith.nodes.pr_writer import build_pr_body
 from iac_smith.nodes.ruleset_loader import load_ruleset
 from iac_smith.nodes.static_review import existing_stack_dirs, static_review_generated_files
+from iac_smith.provider_schema import build_schema_resolver
 from iac_smith.repo_scanner import scan_repo_patterns
 from iac_smith.state import IaCSmithState
 
@@ -176,10 +176,14 @@ def validation_runner(state: IaCSmithState) -> IaCSmithState:
             generated_files, known_stack_dirs=existing_stack_dirs(state.get("target_repo_path"))
         )
         if validation.status != ValidationStatus.FAILED:
-            # Resolve contracts for the resource types actually generated (generic;
-            # the resolver is the injection point for a future provider-schema or
-            # registry lookup). Empty until one is wired, so this is a no-op pass.
-            contract_docs = resolve_contracts_for_files(generated_files, ContractResolver())
+            # Harvest the real provider schema for the providers the generated files
+            # declare (generic across providers; clean-config harvest, so it is
+            # available even when the generated module itself is broken). Degrades to
+            # an empty resolver — a no-op gate — when harvesting is unavailable.
+            resolver = build_schema_resolver(generated_files)
+            # Blackboard/prompt injection stays scoped to the resource types actually
+            # generated, so the prompt does not carry a provider's full catalog.
+            contract_docs = resolve_contracts_for_files(generated_files, resolver)
             if blackboard and contract_docs:
                 blackboard = blackboard.model_copy(
                     update={
@@ -187,7 +191,13 @@ def validation_runner(state: IaCSmithState) -> IaCSmithState:
                         "selected_contracts": sorted(contract_docs),
                     }
                 )
-            contract_validation = validate_generated_contracts(generated_files, contract_docs)
+            # The deterministic gate gets the full schema: every type's allowed
+            # arguments plus the universe of valid types, so it catches both
+            # unsupported arguments and hallucinated resource types before Terraform.
+            known_types = set(resolver.provider_contracts) or None
+            contract_validation = validate_generated_contracts(
+                generated_files, resolver.provider_contracts, known_resource_types=known_types
+            )
             if contract_validation.status == ValidationStatus.FAILED:
                 validation = contract_validation
     else:
