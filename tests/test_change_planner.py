@@ -28,6 +28,19 @@ def test_plan_uses_root_hcl_for_the_environment_root_config():
     assert "environments/non-prod/eks-fargate/terragrunt.hcl" in plan.files_to_generate
 
 
+def test_workload_module_resources_split_across_concern_files():
+    # The workload module's resources are spread across generic concern files so no
+    # single file must be generated in one oversized model response (max_tokens
+    # truncation). foundation stays single-file.
+    plan = plan_changes(_intent("eks_fargate"), target_repo="time4116/iac-smith-demo-infra")
+
+    for name in ("main.tf", "iam.tf", "security.tf", "monitoring.tf"):
+        assert f"modules/eks-fargate/{name}" in plan.files_to_generate
+    # foundation is networking-only and is NOT split.
+    assert "modules/foundation/iam.tf" not in plan.files_to_generate
+    assert "modules/foundation/monitoring.tf" not in plan.files_to_generate
+
+
 def test_plan_derives_stack_name_from_resource_type():
     plan = plan_changes(_intent("eks_fargate"), target_repo="time4116/iac-smith-demo-infra")
 

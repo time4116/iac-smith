@@ -139,9 +139,17 @@ def plan_changes(
 
     # Only generate module scaffold if the repo doesn't already have one for this stack.
     if stack_name != "baseline" and not _module_already_exists(stack_name, repo_patterns):
+        # Split the workload module's resources across generic concern files so no
+        # single file has to be generated in one oversized model response (the
+        # cause of max_tokens truncation on large stacks). These are cross-cutting
+        # infra concerns, not service-specific files, so the split stays generic.
+        # foundation stays single-file — it is networking-only and stays small.
         files.extend(
             [
                 f"modules/{stack_name}/main.tf",
+                f"modules/{stack_name}/iam.tf",
+                f"modules/{stack_name}/security.tf",
+                f"modules/{stack_name}/monitoring.tf",
                 f"modules/{stack_name}/variables.tf",
                 f"modules/{stack_name}/outputs.tf",
                 f"modules/{stack_name}/versions.tf",

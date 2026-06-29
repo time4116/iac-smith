@@ -220,7 +220,19 @@ def _path_needs_repair(path: str, errors: list[str]) -> bool:
     return False
 
 
-_GEN_ORDER = {"main.tf": 0, "variables.tf": 1, "outputs.tf": 2, "versions.tf": 3}
+# main.tf first so the concern-split resource files (iam/security/monitoring) and
+# the variables/outputs contracts are generated with its resources as sibling
+# context. variables.tf/outputs.tf come after every resource file so they can
+# declare/expose everything referenced across the split.
+_GEN_ORDER = {
+    "main.tf": 0,
+    "iam.tf": 1,
+    "security.tf": 2,
+    "monitoring.tf": 3,
+    "variables.tf": 4,
+    "outputs.tf": 5,
+    "versions.tf": 6,
+}
 
 
 def _repair_unit_key(path: str) -> str:
@@ -309,6 +321,18 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("Terraform generation response must be a JSON object.")
     return value
+
+
+def _is_unsupported_prefill_error(exc: Exception) -> bool:
+    """True when a Bedrock model rejects an assistant-message prefill.
+
+    Some models / inference profiles (seen on cross-region escalation profiles)
+    refuse to continue a truncated assistant turn — "the conversation must end
+    with a user message". Detect that so continuation can fall back gracefully
+    instead of crashing the run.
+    """
+    msg = str(exc).lower()
+    return "prefill" in msg or "must end with a user message" in msg
 
 
 def _rules_payload(ruleset: Ruleset | None) -> list[dict[str, str]]:
@@ -783,6 +807,19 @@ Non-negotiable rules:
   If foundation genuinely must own a security group that several workloads
   share, declare it once in foundation, expose its id via an `output`, and have
   each workload consume that id — do not re-declare the group in any workload.
+* A workload module's resources are split across concern files so no single file
+  is huge. Generate ONLY the resources belonging to the file currently named in
+  `files_to_generate`, and never duplicate a resource across files — sibling file
+  content is provided so you can see what already exists:
+  - `main.tf`: the module's core/primary resources for its purpose (the compute,
+    database, queue, bucket, etc. the stack exists to provide). Do NOT put IAM,
+    security groups, KMS, log groups, alarms, or SNS here.
+  - `iam.tf`: IAM roles, policies, policy attachments, and instance profiles.
+  - `security.tf`: security groups and their rules, plus KMS keys/aliases/policies.
+  - `monitoring.tf`: CloudWatch log groups and metric alarms, and SNS alert topics.
+  If a module has no resources for one of these concerns, return that file with
+  only a short comment. Regardless of which file a `var.x` is referenced in, every
+  variable MUST be declared in `variables.tf` and every output in `outputs.tf`.
 * If a workload stack depends on foundation outputs for VPC/subnets/security
   groups, do not reference module.vpc unless that same module declares
   module "vpc". In Terragrunt, every `dependency.foundation.outputs.<name>`
@@ -1551,7 +1588,16 @@ class BedrockTerraformGenerator:
         output is incompatible with an assistant prefill, so continuation calls omit
         it and simply finish the JSON the model began. Each call stays capped at
         max_tokens, keeping every request under the read timeout.
+
+        Not every Bedrock model supports assistant-message prefill (e.g. some
+        escalation/cross-region inference profiles reject "conversation must end
+        with a user message"). When that happens we cannot continue the turn, so we
+        return the truncated document we have rather than crashing the run — the
+        caller's parse-retry handles the malformed result. Smaller generated files
+        (see the module file split) mean continuation is rarely needed at all.
         """
+        from botocore.exceptions import ClientError
+
         user_message = {"role": "user", "content": prompt}
         chunks: list[str] = []
         for continuation in range(self.max_continuations + 1):
@@ -1570,13 +1616,22 @@ class BedrockTerraformGenerator:
                     user_message,
                     {"role": "assistant", "content": "".join(chunks).rstrip()},
                 ]
-            response = self._invoke_model_with_retries(
-                context=path,
-                modelId=self.model_id,
-                contentType="application/json",
-                accept="application/json",
-                body=json.dumps(body),
-            )
+            try:
+                response = self._invoke_model_with_retries(
+                    context=path,
+                    modelId=self.model_id,
+                    contentType="application/json",
+                    accept="application/json",
+                    body=json.dumps(body),
+                )
+            except ClientError as exc:
+                if chunks and _is_unsupported_prefill_error(exc):
+                    self._log(
+                        f"IaC Smith: {path} model does not support prefill continuation; "
+                        "returning the truncated document for repair instead of failing."
+                    )
+                    break
+                raise
             payload = json.loads(response["body"].read().decode("utf-8"))
             chunks.append(_extract_text_from_bedrock_payload(payload))
             if payload.get("stop_reason") != "max_tokens":
