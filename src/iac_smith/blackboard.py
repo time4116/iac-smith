@@ -138,6 +138,14 @@ _RESOURCE_BLOCK_RE = re.compile(
 )
 _ARGUMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=")
 
+# Terraform core meta-arguments are valid on every resource but are NOT part of a
+# provider's schema (``terraform providers schema -json`` lists only provider
+# attributes/blocks), so they must be exempt from the unsupported-argument check or
+# the gate false-positives on virtually any real module. The block forms
+# (``lifecycle``/``provisioner``/``connection``) carry no ``=`` and so are never
+# seen by ``_top_level_arguments``; the argument forms below are.
+_TERRAFORM_META_ARGUMENTS = frozenset({"count", "for_each", "provider", "depends_on"})
+
 
 def _top_level_arguments(body: str) -> set[str]:
     """Return only the depth-0 argument names of a resource block.
@@ -322,6 +330,8 @@ def validate_generated_contracts(
                 continue
             allowed = set(contract.allowed_arguments)
             for argument in sorted(_top_level_arguments(match.group("body"))):
+                if argument in _TERRAFORM_META_ARGUMENTS:
+                    continue
                 if argument not in allowed:
                     errors.append(
                         f"`{path}` uses unsupported argument `{argument}` on `{resource_type}`. "
