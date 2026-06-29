@@ -557,6 +557,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_NON_PROD }}
           aws-region: us-west-2
+          mask-aws-account-id: true
       - name: Bootstrap state backend (idempotent)
         working-directory: bootstrap/backend/non-prod
         run: |
@@ -586,6 +587,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_NON_PROD }}
           aws-region: us-west-2
+          mask-aws-account-id: true
       - name: Apply foundation
         working-directory: environments/non-prod/foundation
         run: terragrunt apply --non-interactive --auto-approve
@@ -609,6 +611,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_NON_PROD }}
           aws-region: us-west-2
+          mask-aws-account-id: true
       - name: Apply <stack-name>
         working-directory: environments/non-prod/<stack-name>
         run: terragrunt apply --non-interactive --auto-approve
@@ -846,6 +849,10 @@ Non-negotiable rules:
   Use `aws-actions/configure-aws-credentials` with `role-to-assume` and set
   `permissions: id-token: write` on the job or workflow. Never emit
   `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` in any workflow step.
+* Every `aws-actions/configure-aws-credentials` step MUST set
+  `mask-aws-account-id: true`. The action does not mask the account ID by
+  default, so terraform's ARN output would otherwise print it in plaintext in
+  the run logs — undesirable if the repo is ever public.
 * Install terragrunt in CI via the authenticated `curl` pattern shown in the
   canonical workflow template. Never use `autero1/action-terragrunt` or any
   other third-party terragrunt installer action — the curl approach avoids
@@ -1002,7 +1009,8 @@ _AWS_CREDS_STEP = (
     "        uses: aws-actions/configure-aws-credentials@v4\n"
     "        with:\n"
     "          role-to-assume: ${{ secrets.AWS_ROLE_ARN_NON_PROD }}\n"
-    "          aws-region: us-west-2"
+    "          aws-region: us-west-2\n"
+    "          mask-aws-account-id: true"
 )
 
 # YAML block scalar for the bootstrap backend job's run step.

@@ -1190,6 +1190,11 @@ class TestBuildApplyWorkflow:
         assert "role-to-assume: ${{ secrets.AWS_ROLE_ARN_NON_PROD }}" in content
         assert "AWS_ACCESS_KEY_ID" not in content
         assert "AWS_SECRET_ACCESS_KEY" not in content
+        # Account ID must be masked in apply logs (the action does not mask by default).
+        assert content.count("mask-aws-account-id: true") == content.count(
+            "uses: aws-actions/configure-aws-credentials@v4"
+        )
+        assert "mask-aws-account-id: true" in content
 
     def test_apply_workflow_has_change_detect_job(self):
         plan = self._plan_with_foundation_and_stack("ecs-fargate")

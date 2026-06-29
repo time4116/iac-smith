@@ -303,6 +303,7 @@ After all files are generated in parallel:
 - Prefer private networking, encryption, least privilege
 - Follow all `error`-severity rules; follow `warning`/`preference` rules unless conflict
 - Generated workflows that require AWS access must use OIDC (`aws-actions/configure-aws-credentials` with `role-to-assume`); never emit `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY`
+- Every `aws-actions/configure-aws-credentials` step must set `mask-aws-account-id: true` — the action does not mask it by default, so terraform ARN output would otherwise leak the account ID into run logs
 - Install terragrunt via the authenticated `curl` pattern; never use `autero1/action-terragrunt`
 - `terraform-pr-check.yml` must use a single job named `validate`; never split into multiple jobs
 - `terraform-pr-check.yml` must not include `terragrunt validate` or `terragrunt plan` steps — those require a deployed S3 backend that does not exist for brand-new infrastructure
