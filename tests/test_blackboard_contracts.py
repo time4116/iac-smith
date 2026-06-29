@@ -127,6 +127,41 @@ def test_validate_generated_contracts_no_docs_is_pass():
     assert result.status.value == "passed"
 
 
+def test_validate_generated_contracts_rejects_hallucinated_resource_type():
+    # A type whose provider is known (shares the `aws_` prefix with real types) but
+    # which the provider does not define is flagged deterministically — the case the
+    # runtime harvest misses because the broken config won't even load its schema.
+    contracts = contracts_from_provider_schema(_provider_schema())
+    files = {
+        "modules/db/main.tf": ('resource "aws_db_proxy_target_group" "this" {\n  name = "x"\n}\n')
+    }
+
+    result = validate_generated_contracts(files, contracts, known_resource_types=set(contracts))
+
+    assert result.status.value == "failed"
+    assert "unsupported resource type `aws_db_proxy_target_group`" in result.errors[0]
+
+
+def test_validate_generated_contracts_ignores_unknown_provider_resource_type():
+    # A resource from a provider we did not harvest (no shared prefix) is not a
+    # hallucination we can judge — it must not produce a false positive.
+    contracts = contracts_from_provider_schema(_provider_schema())
+    files = {"modules/x/main.tf": 'resource "random_pet" "this" {\n  length = 2\n}\n'}
+
+    result = validate_generated_contracts(files, contracts, known_resource_types=set(contracts))
+
+    assert result.status.value == "passed"
+
+
+def test_validate_generated_contracts_allows_known_resource_type():
+    contracts = contracts_from_provider_schema(_provider_schema())
+    files = {"modules/s3/main.tf": 'resource "aws_s3_bucket" "this" {\n  bucket = "b"\n}\n'}
+
+    result = validate_generated_contracts(files, contracts, known_resource_types=set(contracts))
+
+    assert result.status.value == "passed"
+
+
 def test_blackboard_prompt_section_emits_contracts_and_negative_patterns():
     blackboard = RunBlackboard(
         selected_contracts=["aws_elastic_beanstalk_environment"],

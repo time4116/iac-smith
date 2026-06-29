@@ -271,22 +271,48 @@ _INVALID_VAR_VALUE_RE = re.compile(
 
 
 def validate_generated_contracts(
-    generated_files: dict[str, str], contract_docs: dict[str, TerraformContract]
+    generated_files: dict[str, str],
+    contract_docs: dict[str, TerraformContract],
+    known_resource_types: set[str] | None = None,
 ) -> ValidationResult:
     """Check generated resources against resolved contract docs.
 
-    ``contract_docs`` is the dynamically resolved set (see
-    ``resolve_contracts_for_files``). When empty — the default in production until
-    a schema/registry resolver is wired — this is a no-op pass.
+    ``contract_docs`` is the resolved schema set (see ``resolve_contracts_for_files``
+    / ``provider_schema.build_schema_resolver``). When empty — e.g. when schema
+    harvesting is unavailable — this is a no-op pass.
+
+    ``known_resource_types`` is the full set of resource types the declared
+    providers expose. When given, a generated resource type whose provider is known
+    (it shares a name prefix with a known type) but which the provider does not
+    define is flagged as a hallucinated/unsupported type — the deterministic
+    equivalent of Terraform's "does not support resource type" error, caught before
+    Terraform runs. The check is skipped for providers not present in the set, so
+    resources from a provider we could not harvest never produce false positives.
     """
     if not contract_docs:
         return ValidationResult(
             status=ValidationStatus.PASSED, checks=["No contract docs available."]
         )
+    known_prefixes = (
+        {rtype.split("_", 1)[0] for rtype in known_resource_types}
+        if known_resource_types
+        else set()
+    )
     errors: list[str] = []
     for path, content in generated_files.items():
         for match in _RESOURCE_BLOCK_RE.finditer(content):
             resource_type = match.group("type")
+            if (
+                known_resource_types is not None
+                and resource_type not in known_resource_types
+                and resource_type.split("_", 1)[0] in known_prefixes
+            ):
+                errors.append(
+                    f"`{path}` declares unsupported resource type `{resource_type}` — "
+                    f"the provider does not define it. Use a resource type the provider "
+                    f"actually supports."
+                )
+                continue
             contract = contract_docs.get(resource_type)
             if (
                 not contract

@@ -50,6 +50,8 @@ All configuration is via environment variables. There are no CLI flags.
 | `IAC_SMITH_BEDROCK_READ_TIMEOUT` | `180` | Bedrock read timeout (seconds). Generation streams, so this applies *between* events (a stall), not to total generation time — a long file no longer races it |
 | `IAC_SMITH_BEDROCK_MAX_ATTEMPTS` | `2` | Bedrock invoke attempts per call (single retry authority; botocore's own retries are disabled so they can't nest and multiply the wall time) |
 | `IAC_SMITH_CHECK_TIMEOUT` | `300` | Per-command timeout (seconds) for `terraform`/`terragrunt` runtime-validation subprocesses, so a stalled plan/init can't hang the run |
+| `IAC_SMITH_SCHEMA_CACHE_DIR` | System temp (`iac-smith-provider-schema/`) | Where the generation-time provider-schema harvest caches the per-provider-version schema JSON (and shares a Terraform plugin cache). Point this at a persisted/`actions/cache` path in CI so the `terraform init` cost is paid once across runs |
+| `IAC_SMITH_SCHEMA_HARVEST` | unset | Set to `0` to disable the generation-time provider-schema harvest (the contract gate then degrades to runtime-only schema, as before) |
 
 ---
 
@@ -239,23 +241,41 @@ dynamically:
 - **`resolve_contracts_for_files(files, resolver)`** derives candidate contracts
   from the resource types that actually appear in the generated Terraform — not
   from keywords. `ContractResolver` is the generic injection point: tests inject
-  fixture contracts, and in production the authoritative ones are harvested from
-  the real provider schema (see below). Pre-disk (in `validation_runner`) the
-  resolver is still empty, so that early contract check is a no-op until schema is
-  available.
+  fixture contracts, and in production it is populated by
+  `provider_schema.build_schema_resolver` (see below).
+- **`provider_schema.build_schema_resolver(files)`** (`src/iac_smith/provider_schema.py`)
+  is what makes the generation-time gate real. It reads the providers the
+  generated `versions.tf` files declare, then harvests the **full** provider
+  schema from a *clean throwaway config* — declaring only those providers,
+  `terraform init`, `terraform providers schema -json` — rather than from the
+  module under generation. This matters: the runtime harvest (below) runs the
+  schema command inside the generated module, which fails to load exactly when the
+  module is most broken (an invalid resource type), returning `{}` precisely when
+  the backstop is needed. The clean-config harvest is independent of however
+  broken the module is. It is disk-cached by provider source+version
+  (`IAC_SMITH_SCHEMA_CACHE_DIR`) so the `init` cost is paid at most once per
+  provider set, shares a `TF_PLUGIN_CACHE_DIR`, and is best-effort: no terraform,
+  no network, or any failure degrades to an empty resolver (the gate becomes a
+  no-op pass, the prior behaviour). Disable with `IAC_SMITH_SCHEMA_HARVEST=0`.
 - **`contracts_from_provider_schema(schema, resource_types=...)`** parses
   `terraform providers schema -json` into `TerraformContract`s (allowed arguments
   = top-level attributes + nested block names; required = schema-required
   attributes). Fully generic across providers — no per-resource knowledge.
-  Runtime validation (`runtime_validation.py`) harvests this after each module's
-  `terraform init` succeeds (providers are installed by then), scoped to the
-  resource types that module actually declares, and returns it on
-  `RuntimeValidationResult.contract_docs`.
-- **`validate_generated_contracts(files, contract_docs)`** checks generated
-  resources against resolved docs, tracking brace depth so only top-level
-  (depth-0) arguments are validated (nested `setting {}` / `tag {}` keys are not
-  mistaken for unsupported arguments). Runs in `validation_runner` after static
-  review.
+  Runtime validation (`runtime_validation.py`) also harvests this after each
+  module's `terraform init` succeeds, scoped to the resource types that module
+  declares, and returns it on `RuntimeValidationResult.contract_docs`.
+- **`validate_generated_contracts(files, contract_docs, known_resource_types=...)`**
+  checks generated resources against resolved docs, tracking brace depth so only
+  top-level (depth-0) arguments are validated (nested `setting {}` / `tag {}` keys
+  are not mistaken for unsupported arguments). When `known_resource_types` (the
+  full set of types the declared providers expose) is supplied, it also rejects a
+  **hallucinated resource type** — a type whose provider is known (shares a name
+  prefix with a real type) but which the provider does not define, e.g.
+  `aws_db_proxy_target_group` — deterministically, the equivalent of Terraform's
+  "does not support resource type" but caught before Terraform runs. Resources
+  from providers that weren't harvested are skipped, so no false positives. Runs
+  in `validation_runner` after static review: the blackboard gets the scoped docs
+  (so prompt injection stays small), and the gate gets the full schema.
 - **`normalize_validation_findings(errors)`** turns `terraform`/`terragrunt
   validate`/`plan` failures into negative patterns; `RunBlackboard.with_findings`
   merges them. Recognized error classes: unsupported argument, unsupported block
