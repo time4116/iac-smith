@@ -451,6 +451,58 @@ def test_invoke_file_generation_stitches_truncated_response_via_continuation():
     assert cont_body["messages"][-1]["role"] == "assistant"
 
 
+def test_invoke_file_generation_falls_back_when_model_rejects_prefill():
+    path = "modules/example/main.tf"
+    full_doc = json.dumps(
+        {"path": path, "content": 'resource "x" "y" {}\n', "assumptions": [], "warnings": []}
+    )
+    head = full_doc[: len(full_doc) // 2]
+
+    class NoPrefillRuntime:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def invoke_model(self, **kwargs):
+            self.calls.append(kwargs)
+            messages = json.loads(kwargs["body"])["messages"]
+            if len(messages) == 1:
+                return {
+                    "body": FakeBody(
+                        json.dumps(
+                            {
+                                "content": [{"type": "text", "text": head}],
+                                "stop_reason": "max_tokens",
+                            }
+                        ).encode()
+                    )
+                }
+            # Continuation prefills an assistant message; this model rejects that.
+            raise botocore.exceptions.ClientError(
+                {
+                    "Error": {
+                        "Code": "ValidationException",
+                        "Message": (
+                            "This model does not support assistant message prefill. "
+                            "The conversation must end with a user message."
+                        ),
+                    }
+                },
+                "InvokeModel",
+            )
+
+    runtime = NoPrefillRuntime()
+    generator = BedrockTerraformGenerator(
+        model_id="anthropic.test-model",
+        bedrock_runtime=runtime,
+    )
+
+    # Must not crash — returns the truncated document for the caller's parse-retry.
+    document = generator._invoke_file_generation(prompt="PROMPT", path=path)
+
+    assert document == head
+    assert len(runtime.calls) == 2
+
+
 def test_invoke_file_generation_single_call_when_not_truncated():
     path = "modules/example/main.tf"
     full_doc = json.dumps(

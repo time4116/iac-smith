@@ -231,11 +231,12 @@ _VAR_REF_RE = re.compile(r"\bvar\.([A-Za-z0-9_-]+)\b")
 def _find_undeclared_variable_references(generated_files: dict[str, str]) -> list[str]:
     """Detect ``var.xxx`` references in module files that lack a ``variable "xxx"`` declaration.
 
-    Bedrock sometimes references variables in ``main.tf`` without declaring them in
+    Bedrock sometimes references variables in a resource file (``main.tf``,
+    ``iam.tf``, ``security.tf``, ``monitoring.tf``, …) without declaring them in
     ``variables.tf``.  When a module has a ``variables.tf``, only declarations in
-    that file count as valid — declarations in ``main.tf`` alone are treated as
+    that file count as valid — declarations in a resource file alone are treated as
     undeclared because they violate module file-organization rules and get removed
-    when ``main.tf`` is repaired.  For modules without a ``variables.tf``, all
+    when that file is repaired.  For modules without a ``variables.tf``, all
     declaration sites are accepted.
     """
     refs_by_root: dict[str, dict[str, list[str]]] = {}

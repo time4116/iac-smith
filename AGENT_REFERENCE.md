@@ -218,12 +218,22 @@ environments/{env}/foundation/README.md
 
 **If stack module does not exist yet:**
 ```
-modules/{stack_name}/main.tf
+modules/{stack_name}/main.tf          # core/primary resources only
+modules/{stack_name}/iam.tf           # IAM roles, policies, attachments
+modules/{stack_name}/security.tf      # security groups + KMS keys/aliases/policies
+modules/{stack_name}/monitoring.tf    # CloudWatch log groups + alarms, SNS topics
 modules/{stack_name}/variables.tf
 modules/{stack_name}/outputs.tf
 modules/{stack_name}/versions.tf
 modules/{stack_name}/README.md
 ```
+The workload module's resources are split across generic concern files so no single
+file must be generated in one oversized model response (the cause of `max_tokens`
+truncation on large stacks). These are cross-cutting infra concerns, not
+service-specific files, so the split stays generic; a module with no resources for a
+concern emits that file with only a comment. `foundation` is networking-only and
+stays single-file. `main.tf` is generated first so the concern files and the
+`variables.tf`/`outputs.tf` contracts get its resources as sibling context.
 
 ---
 
@@ -283,7 +293,8 @@ actually been resolved or learned (no boilerplate on the first pass).
 - Max tokens: `IAC_SMITH_BEDROCK_MAX_TOKENS` (default 4096), temperature 0. `invoke_model` is non-streaming, so a runaway generation that exceeds the read timeout looks like a dead connection; the tight cap keeps each call well under `IAC_SMITH_BEDROCK_READ_TIMEOUT`
 - Output constrained to JSON schema: `{"path": str, "content": str, "assumptions": [], "warnings": []}`
 - JSON format enforced via `output_config.format.type = "json_schema"` on the first call
-- **Truncation stitching:** if a response stops with `stop_reason == "max_tokens"`, the document is cut mid-object and won't parse. Rather than re-asking (which truncates at the same wall), the assistant's own truncated turn is continued and the chunks are concatenated, up to `IAC_SMITH_BEDROCK_MAX_CONTINUATIONS` times. Continuation calls prefill the assistant message, which is incompatible with structured output, so they drop `output_config` and simply finish the JSON. This lets a genuinely large file (e.g. a data-platform `main.tf`) exceed one token budget while every call stays under the read timeout
+- **Truncation stitching:** if a response stops with `stop_reason == "max_tokens"`, the document is cut mid-object and won't parse. Rather than re-asking (which truncates at the same wall), the assistant's own truncated turn is continued and the chunks are concatenated, up to `IAC_SMITH_BEDROCK_MAX_CONTINUATIONS` times. Continuation calls prefill the assistant message, which is incompatible with structured output, so they drop `output_config` and simply finish the JSON. This lets a genuinely large file exceed one token budget while every call stays under the read timeout. The concern-file split (above) keeps most files within one budget, so continuation is the exception, not the rule
+- **Prefill fallback:** not every model supports assistant-message prefill — some cross-region/escalation inference profiles reject "the conversation must end with a user message". When a continuation call hits that, the truncated document is returned for the caller's parse-retry instead of crashing the run (`_is_unsupported_prefill_error`). Combined with the file split, a prefill-incapable escalation model rarely needs to continue at all
 
 **Concurrency:** `IAC_SMITH_BEDROCK_CONCURRENCY` threads (default 4), one file per thread
 
@@ -295,7 +306,7 @@ After all files are generated in parallel:
 
 **Prompt non-negotiables injected:**
 - Return only JSON
-- File organization rules: `variables.tf` = variables only, `outputs.tf` = outputs only, `versions.tf` = terraform block + required_providers only, `main.tf` = resources + data sources only
+- File organization rules: `variables.tf` = variables only, `outputs.tf` = outputs only, `versions.tf` = terraform block + required_providers only. Resources are split by concern: `main.tf` = core/primary resources + data sources, `iam.tf` = IAM, `security.tf` = security groups + KMS, `monitoring.tf` = log groups + alarms + SNS. Generate only the file in `files_to_generate`; never duplicate a resource across them
 - No duplicate declarations across files in a module
 - No hardcoded credentials
 - Apply workflows must never trigger on `pull_request`; `terraform-apply.yml` must trigger only on push to `main` — never `master`, never both
