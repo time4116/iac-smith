@@ -400,6 +400,89 @@ def test_bedrock_terraform_generator_returns_model_generated_files_without_rende
     ]
 
 
+def test_invoke_file_generation_stitches_truncated_response_via_continuation():
+    path = "modules/ecs-fargate/main.tf"
+    full_doc = json.dumps(
+        {"path": path, "content": 'resource "x" "y" {}\n', "assumptions": [], "warnings": []}
+    )
+    half = len(full_doc) // 2
+    head, tail = full_doc[:half], full_doc[half:]
+
+    def _resp(text: str, stop_reason: str) -> dict:
+        return {
+            "body": FakeBody(
+                json.dumps(
+                    {"content": [{"type": "text", "text": text}], "stop_reason": stop_reason}
+                ).encode()
+            )
+        }
+
+    class TruncatingRuntime:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def invoke_model(self, **kwargs):
+            self.calls.append(kwargs)
+            messages = json.loads(kwargs["body"])["messages"]
+            if len(messages) == 1:
+                # First call is cut off at the token cap — JSON document is partial.
+                return _resp(head, "max_tokens")
+            assert messages[-1]["role"] == "assistant"
+            return _resp(tail, "end_turn")
+
+    runtime = TruncatingRuntime()
+    generator = BedrockTerraformGenerator(
+        model_id="anthropic.test-model",
+        bedrock_runtime=runtime,
+    )
+
+    document = generator._invoke_file_generation(prompt="PROMPT", path=path)
+
+    # The truncated head + continuation tail reassemble into the full JSON document.
+    assert document == full_doc
+    assert len(runtime.calls) == 2
+    first_body = json.loads(runtime.calls[0]["body"])
+    cont_body = json.loads(runtime.calls[1]["body"])
+    assert first_body["output_config"]["format"]["type"] == "json_schema"
+    assert first_body["messages"][-1]["role"] == "user"
+    # Continuation prefills the assistant turn, which is incompatible with
+    # structured-output formatting, so it must be dropped on the continuation call.
+    assert "output_config" not in cont_body
+    assert cont_body["messages"][-1]["role"] == "assistant"
+
+
+def test_invoke_file_generation_single_call_when_not_truncated():
+    path = "modules/ecs-fargate/main.tf"
+    full_doc = json.dumps(
+        {"path": path, "content": 'resource "x" "y" {}\n', "assumptions": [], "warnings": []}
+    )
+
+    class CompleteRuntime:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def invoke_model(self, **kwargs):
+            self.calls.append(kwargs)
+            return {
+                "body": FakeBody(
+                    json.dumps(
+                        {"content": [{"type": "text", "text": full_doc}], "stop_reason": "end_turn"}
+                    ).encode()
+                )
+            }
+
+    runtime = CompleteRuntime()
+    generator = BedrockTerraformGenerator(
+        model_id="anthropic.test-model",
+        bedrock_runtime=runtime,
+    )
+
+    document = generator._invoke_file_generation(prompt="PROMPT", path=path)
+
+    assert document == full_doc
+    assert len(runtime.calls) == 1
+
+
 def test_bedrock_terraform_generator_generates_files_with_bounded_parallelism():
     files = {
         "modules/ecs-fargate/main.tf": (

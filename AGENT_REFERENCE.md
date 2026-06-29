@@ -46,8 +46,9 @@ All configuration is via environment variables. There are no CLI flags.
 | `BEDROCK_MODEL_ID` | (required) | Primary Bedrock model/inference-profile for generation and repair |
 | `BEDROCK_ESCALATION_MODEL_ID` | unset | Stronger model used for one penultimate repair attempt (failing files only) when the primary is stuck; unset or equal to `BEDROCK_MODEL_ID` disables escalation |
 | `IAC_SMITH_BEDROCK_CONCURRENCY` | `4` | Parallel file generation threads |
-| `IAC_SMITH_BEDROCK_MAX_TOKENS` | `4096` | Max output tokens per generated file. Kept tight so one file's generation finishes well under the read timeout; truncation is recovered via the parse-retry "be more concise" path |
-| `IAC_SMITH_BEDROCK_READ_TIMEOUT` | `180` | Per-call Bedrock read timeout (seconds). `invoke_model` is non-streaming, so this bounds total server-side generation time for one file |
+| `IAC_SMITH_BEDROCK_MAX_TOKENS` | `4096` | Max output tokens **per call**. Kept tight so each call finishes well under the read timeout; a file larger than one budget is completed by stitching continuations rather than by raising this |
+| `IAC_SMITH_BEDROCK_MAX_CONTINUATIONS` | `3` | Max times a single file's response may be continued after a `stop_reason == "max_tokens"` truncation. The assistant's own truncated turn is continued and the chunks are stitched, so a file can exceed one `MAX_TOKENS` budget while every call stays under the read timeout. `0` disables continuation |
+| `IAC_SMITH_BEDROCK_READ_TIMEOUT` | `180` | Per-call Bedrock read timeout (seconds). `invoke_model` is non-streaming, so this bounds total server-side generation time for one call |
 | `IAC_SMITH_BEDROCK_MAX_ATTEMPTS` | `2` | Bedrock invoke attempts per call (single retry authority; botocore's own retries are disabled so they can't nest and multiply the wall time) |
 | `IAC_SMITH_CHECK_TIMEOUT` | `300` | Per-command timeout (seconds) for `terraform`/`terragrunt` runtime-validation subprocesses, so a stalled plan/init can't hang the run |
 
@@ -279,9 +280,10 @@ actually been resolved or learned (no boilerplate on the first pass).
 **Module:** `src/iac_smith/dynamic_terraform.py` (class `BedrockTerraformGenerator`)
 
 **Bedrock call per file:**
-- Max tokens: `IAC_SMITH_BEDROCK_MAX_TOKENS` (default 4096), temperature 0. `invoke_model` is non-streaming, so a runaway generation that exceeds the read timeout looks like a dead connection; the tight cap keeps each file well under `IAC_SMITH_BEDROCK_READ_TIMEOUT`
+- Max tokens: `IAC_SMITH_BEDROCK_MAX_TOKENS` (default 4096), temperature 0. `invoke_model` is non-streaming, so a runaway generation that exceeds the read timeout looks like a dead connection; the tight cap keeps each call well under `IAC_SMITH_BEDROCK_READ_TIMEOUT`
 - Output constrained to JSON schema: `{"path": str, "content": str, "assumptions": [], "warnings": []}`
-- JSON format enforced via `output_config.format.type = "json_schema"`
+- JSON format enforced via `output_config.format.type = "json_schema"` on the first call
+- **Truncation stitching:** if a response stops with `stop_reason == "max_tokens"`, the document is cut mid-object and won't parse. Rather than re-asking (which truncates at the same wall), the assistant's own truncated turn is continued and the chunks are concatenated, up to `IAC_SMITH_BEDROCK_MAX_CONTINUATIONS` times. Continuation calls prefill the assistant message, which is incompatible with structured output, so they drop `output_config` and simply finish the JSON. This lets a genuinely large file (e.g. a data-platform `main.tf`) exceed one token budget while every call stays under the read timeout
 
 **Concurrency:** `IAC_SMITH_BEDROCK_CONCURRENCY` threads (default 4), one file per thread
 
