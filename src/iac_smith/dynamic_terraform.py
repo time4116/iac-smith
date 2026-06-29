@@ -939,17 +939,28 @@ def parse_generation_payload(raw_payload: str, allowed_paths: list[str]) -> Gene
     return generated
 
 
-def parse_single_file_generation_payload(
-    raw_payload: str, *, expected_path: str
+def validate_single_file_document(
+    document_text: str, *, expected_path: str
 ) -> GeneratedTerraformFile:
-    payload = _extract_json_object(raw_payload)
-    text = _extract_text_from_bedrock_payload(payload)
-    generated = GeneratedTerraformFile.model_validate(_extract_json_object(text))
+    """Validate the inner JSON document (the model's `{path, content, ...}`) for one file.
+
+    Separate from the Bedrock-envelope extraction so callers that stitch a
+    continued/truncated response can validate the reassembled document directly.
+    """
+    generated = GeneratedTerraformFile.model_validate(_extract_json_object(document_text))
     if generated.path != expected_path:
         raise ValueError(f"Terraform generation returned unplanned file path `{generated.path}`.")
     if generated.path.startswith("/") or ".." in generated.path.split("/"):
         raise ValueError(f"Terraform generation returned unsafe file path `{generated.path}`.")
     return generated
+
+
+def parse_single_file_generation_payload(
+    raw_payload: str, *, expected_path: str
+) -> GeneratedTerraformFile:
+    payload = _extract_json_object(raw_payload)
+    text = _extract_text_from_bedrock_payload(payload)
+    return validate_single_file_document(text, expected_path=expected_path)
 
 
 _WORKFLOW_PATHS = frozenset(
@@ -1348,6 +1359,7 @@ class BedrockTerraformGenerator:
         read_timeout_seconds: int = 180,
         max_attempts: int = 2,
         max_tokens: int = 4096,
+        max_continuations: int = 3,
         max_repair_attempts: int = 2,
         concurrency: int | None = None,
         logger: Callable[[str], None] | None = None,
@@ -1358,13 +1370,21 @@ class BedrockTerraformGenerator:
         self._bedrock_runtime = bedrock_runtime
         self.read_timeout_seconds = _int_env("IAC_SMITH_BEDROCK_READ_TIMEOUT", read_timeout_seconds)
         self.max_attempts = _int_env("IAC_SMITH_BEDROCK_MAX_ATTEMPTS", max_attempts)
-        # A single Terraform/HCL/YAML/Markdown file never needs 16k output tokens.
-        # The old 16384 cap let the model run away on one file; at observed Bedrock
-        # throughput (~40 tok/s) that generation exceeded the read timeout and
-        # read-timed out on every retry, stalling the whole run. A tight cap keeps
-        # generation comfortably under read_timeout. Truncation is recoverable —
-        # the parse-retry loop re-asks more concisely. Env-tunable for headroom.
+        # Per-call output cap. The old 16384 cap let the model run away on one
+        # file; at observed Bedrock throughput (~40 tok/s) that exceeded the read
+        # timeout and read-timed out on every retry, stalling the whole run. A
+        # tight cap keeps each call comfortably under read_timeout. Env-tunable.
         self.max_tokens = _int_env("IAC_SMITH_BEDROCK_MAX_TOKENS", max_tokens)
+        # A genuinely large file (e.g. a data-platform module's main.tf) can need
+        # more than one max_tokens budget. When a response comes back truncated
+        # (stop_reason == "max_tokens") the JSON document is cut mid-object and
+        # cannot parse; re-asking from scratch just truncates at the same wall.
+        # Instead we continue the assistant's own turn and stitch the chunks, so
+        # each call still stays under the per-call cap (and the read timeout) while
+        # the file as a whole can exceed it. Env-tunable.
+        self.max_continuations = max(
+            0, _int_env("IAC_SMITH_BEDROCK_MAX_CONTINUATIONS", max_continuations)
+        )
         self.max_repair_attempts = max_repair_attempts
         configured_concurrency = concurrency or int(os.getenv("IAC_SMITH_BEDROCK_CONCURRENCY", "4"))
         self.concurrency = max(1, configured_concurrency)
@@ -1501,46 +1521,71 @@ class BedrockTerraformGenerator:
         )
         last_error: Exception | None = None
         for attempt in range(3):
-            response = self._invoke_model_with_retries(
-                context=path,
-                modelId=self.model_id,
-                contentType="application/json",
-                accept="application/json",
-                body=json.dumps(
-                    {
-                        "anthropic_version": "bedrock-2023-05-31",
-                        "max_tokens": self.max_tokens,
-                        "temperature": 0,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "output_config": {
-                            "format": {
-                                "type": "json_schema",
-                                "schema": TERRAFORM_FILE_SCHEMA,
-                            }
-                        },
-                    }
-                ),
-            )
-            raw_body = response["body"].read().decode("utf-8")
+            document = self._invoke_file_generation(prompt=prompt, path=path)
             try:
-                generated = parse_single_file_generation_payload(raw_body, expected_path=path)
+                generated = validate_single_file_document(document, expected_path=path)
                 return generated.content
             except (ValueError, json.JSONDecodeError) as exc:
                 last_error = exc
                 self._log(
                     f"IaC Smith: JSON parse failed for {path} (attempt {attempt + 1}/3): "
-                    f"{len(raw_body)} chars received, error: {exc}"
+                    f"{len(document)} chars received, error: {exc}"
                 )
-                # Truncation often means the content is too complex — ask the model
-                # to be more concise on retry by appending a hint to the prompt
+                # A stitched document that still won't parse is genuinely malformed
+                # (bad escaping), not mere truncation — nudge the model on retry.
                 if attempt == 0:
                     prompt += (
-                        "\n\nYour previous response was truncated or contained invalid JSON. "
-                        "Be more concise. Focus on essential resources only."
+                        "\n\nYour previous response contained invalid JSON. Return only the "
+                        "JSON object for this one file, with valid string escaping."
                     )
         raise ValueError(
             f"Failed to generate valid JSON for `{path}` after 3 attempts: {last_error}"
         )
+
+    def _invoke_file_generation(self, *, prompt: str, path: str) -> str:
+        """Generate one file's JSON document, continuing the turn if it truncates.
+
+        The first call uses the json_schema output format. When Bedrock stops with
+        `stop_reason == "max_tokens"` the document is cut mid-object, so we continue
+        the assistant's own truncated turn and concatenate the chunks. Structured
+        output is incompatible with an assistant prefill, so continuation calls omit
+        it and simply finish the JSON the model began. Each call stays capped at
+        max_tokens, keeping every request under the read timeout.
+        """
+        user_message = {"role": "user", "content": prompt}
+        chunks: list[str] = []
+        for continuation in range(self.max_continuations + 1):
+            body: dict[str, Any] = {
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": self.max_tokens,
+                "temperature": 0,
+            }
+            if not chunks:
+                body["messages"] = [user_message]
+                body["output_config"] = {
+                    "format": {"type": "json_schema", "schema": TERRAFORM_FILE_SCHEMA}
+                }
+            else:
+                body["messages"] = [
+                    user_message,
+                    {"role": "assistant", "content": "".join(chunks).rstrip()},
+                ]
+            response = self._invoke_model_with_retries(
+                context=path,
+                modelId=self.model_id,
+                contentType="application/json",
+                accept="application/json",
+                body=json.dumps(body),
+            )
+            payload = json.loads(response["body"].read().decode("utf-8"))
+            chunks.append(_extract_text_from_bedrock_payload(payload))
+            if payload.get("stop_reason") != "max_tokens":
+                break
+            self._log(
+                f"IaC Smith: {path} truncated at max_tokens; continuing the document "
+                f"(continuation {continuation + 1}/{self.max_continuations})."
+            )
+        return "".join(chunks)
 
     def generate_files(
         self,
