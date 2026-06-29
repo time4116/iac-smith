@@ -1640,6 +1640,9 @@ class BedrockTerraformGenerator:
         the retry boundary must wrap the whole invoke + read, not just the call.
         A fresh invoke restarts the stream (a consumed stream can't be resumed);
         non-transient failures (e.g. validationException) propagate immediately.
+
+        The transient set includes urllib3's own read/protocol errors because
+        botocore does not wrap them during EventStream iteration (see below).
         """
         from botocore.exceptions import (
             ClientError,
@@ -1650,12 +1653,28 @@ class BedrockTerraformGenerator:
             ReadTimeoutError,
         )
 
+        # botocore's EventStream iteration does NOT wrap urllib3-level read failures:
+        # a mid-stream stall surfaces as urllib3.exceptions.ReadTimeoutError (and a
+        # broken connection as ProtocolError), not the botocore ReadTimeoutError. They
+        # must be caught here or they escape the retry boundary and crash the run.
+        try:
+            from urllib3.exceptions import ProtocolError
+            from urllib3.exceptions import ReadTimeoutError as Urllib3ReadTimeoutError
+
+            urllib3_stream_errors: tuple[type[BaseException], ...] = (
+                Urllib3ReadTimeoutError,
+                ProtocolError,
+            )
+        except ImportError:  # pragma: no cover - urllib3 ships with botocore
+            urllib3_stream_errors = ()
+
         transient = (
             ConnectionClosedError,
             ConnectTimeoutError,
             EndpointConnectionError,
             EventStreamError,
             ReadTimeoutError,
+            *urllib3_stream_errors,
         )
         last_error: Exception | None = None
         for attempt in range(1, self.max_attempts + 1):
