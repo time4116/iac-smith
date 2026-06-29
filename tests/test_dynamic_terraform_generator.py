@@ -102,9 +102,7 @@ class FakeBedrockRuntime:
         response = self.invoke_model(**kwargs)
         payload = json.loads(response["body"].read().decode("utf-8"))
         text = "".join(
-            block.get("text", "")
-            for block in payload.get("content", [])
-            if isinstance(block, dict)
+            block.get("text", "") for block in payload.get("content", []) if isinstance(block, dict)
         )
         return {"body": _stream_events(text)}
 

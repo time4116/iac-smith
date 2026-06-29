@@ -1587,9 +1587,7 @@ class BedrockTerraformGenerator:
             "max_tokens": self.max_tokens,
             "temperature": 0,
             "messages": [{"role": "user", "content": prompt}],
-            "output_config": {
-                "format": {"type": "json_schema", "schema": TERRAFORM_FILE_SCHEMA}
-            },
+            "output_config": {"format": {"type": "json_schema", "schema": TERRAFORM_FILE_SCHEMA}},
         }
         response = self._invoke_model_with_retries(
             context=path,
