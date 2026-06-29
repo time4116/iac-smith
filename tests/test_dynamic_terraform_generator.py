@@ -495,6 +495,124 @@ def test_invoke_file_generation_logs_when_response_hits_max_tokens():
     assert any("max_tokens" in line for line in logs)
 
 
+def _chunk_event(obj: dict) -> dict:
+    return {"chunk": {"bytes": json.dumps(obj).encode()}}
+
+
+def test_read_stream_document_raises_on_bedrock_exception_member():
+    from iac_smith.dynamic_terraform import BedrockStreamError, _read_stream_document
+
+    response = {
+        "body": [
+            _chunk_event({"type": "content_block_delta", "delta": {"text": '{"path":'}}),
+            {"throttlingException": {"message": "slow down"}},
+        ]
+    }
+    with pytest.raises(BedrockStreamError) as exc_info:
+        _read_stream_document(response)
+    assert exc_info.value.member == "throttlingException"
+    assert exc_info.value.transient is True
+
+
+def test_invoke_file_generation_retries_on_transient_stream_error_member():
+    path = "modules/example/main.tf"
+    full_doc = json.dumps(
+        {"path": path, "content": 'resource "x" "y" {}\n', "assumptions": [], "warnings": []}
+    )
+
+    class FlakyStreamRuntime:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def invoke_model_with_response_stream(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                # A mid-stream timeout must drive the transient retry path, not be
+                # dropped as a short document that burns the parse-retry budget.
+                return {"body": [{"modelTimeoutException": {"message": "timed out"}}]}
+            return {
+                "body": [
+                    _chunk_event({"type": "content_block_delta", "delta": {"text": full_doc}}),
+                    _chunk_event({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+                ]
+            }
+
+    runtime = FlakyStreamRuntime()
+    generator = BedrockTerraformGenerator(
+        model_id="anthropic.test-model",
+        bedrock_runtime=runtime,
+    )
+
+    document = generator._invoke_file_generation(prompt="PROMPT", path=path)
+
+    assert document == full_doc
+    assert runtime.calls == 2
+
+
+def test_invoke_file_generation_does_not_retry_non_transient_stream_error():
+    from iac_smith.dynamic_terraform import BedrockStreamError
+
+    class ValidationStreamRuntime:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def invoke_model_with_response_stream(self, **kwargs):
+            self.calls += 1
+            return {"body": [{"validationException": {"message": "bad input"}}]}
+
+    runtime = ValidationStreamRuntime()
+    generator = BedrockTerraformGenerator(
+        model_id="anthropic.test-model",
+        bedrock_runtime=runtime,
+    )
+
+    with pytest.raises(BedrockStreamError) as exc_info:
+        generator._invoke_file_generation(prompt="PROMPT", path="modules/example/main.tf")
+    assert exc_info.value.member == "validationException"
+    assert runtime.calls == 1
+
+
+def test_invoke_file_generation_retries_when_stream_iteration_raises():
+    path = "modules/example/main.tf"
+    full_doc = json.dumps(
+        {"path": path, "content": 'resource "x" "y" {}\n', "assumptions": [], "warnings": []}
+    )
+
+    class _RaisingStream:
+        def __iter__(self):
+            raise botocore.exceptions.ReadTimeoutError(
+                endpoint_url="https://example.invalid/model/test/invoke-with-response-stream",
+                error="timed out",
+            )
+
+    class StreamReadFailsRuntime:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def invoke_model_with_response_stream(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                # Error raised while CONSUMING the stream — after the call returned.
+                return {"body": _RaisingStream()}
+            return {
+                "body": [
+                    _chunk_event({"type": "content_block_delta", "delta": {"text": full_doc}}),
+                    _chunk_event({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+                ]
+            }
+
+    runtime = StreamReadFailsRuntime()
+    generator = BedrockTerraformGenerator(
+        model_id="anthropic.test-model",
+        bedrock_runtime=runtime,
+    )
+
+    document = generator._invoke_file_generation(prompt="PROMPT", path=path)
+
+    assert document == full_doc
+    assert runtime.calls == 2
+
+
 def test_bedrock_terraform_generator_generates_files_with_bounded_parallelism():
     files = {
         "modules/ecs-fargate/main.tf": (

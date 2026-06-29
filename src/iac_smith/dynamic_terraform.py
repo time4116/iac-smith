@@ -312,6 +312,32 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     return value
 
 
+# Exception members of the Bedrock InvokeModelWithResponseStream response shape.
+# botocore can surface a mid-stream service error as one of these member events
+# (a dict keyed by the member name) instead of a `chunk`; they must NOT be treated
+# like a benign end-of-stream. All but `validationException` are transient and
+# should drive the same retry path as a throttle/timeout on the initial call.
+_BEDROCK_STREAM_TRANSIENT_MEMBERS = frozenset(
+    {
+        "internalServerException",
+        "modelStreamErrorException",
+        "throttlingException",
+        "modelTimeoutException",
+        "serviceUnavailableException",
+    }
+)
+_BEDROCK_STREAM_ERROR_MEMBERS = _BEDROCK_STREAM_TRANSIENT_MEMBERS | {"validationException"}
+
+
+class BedrockStreamError(RuntimeError):
+    """A modeled exception member arrived mid-stream (not a content chunk)."""
+
+    def __init__(self, member: str, message: str = "") -> None:
+        self.member = member
+        self.transient = member in _BEDROCK_STREAM_TRANSIENT_MEMBERS
+        super().__init__(f"Bedrock stream error `{member}`: {message}".strip())
+
+
 def _read_stream_document(response: dict[str, Any]) -> tuple[str, str | None]:
     """Accumulate text from a Bedrock InvokeModelWithResponseStream response.
 
@@ -321,12 +347,23 @@ def _read_stream_document(response: dict[str, Any]) -> tuple[str, str | None]:
     removes the truncation/continuation problem that forced a tight cap before.
     Returns the concatenated assistant text and the final ``stop_reason`` (so the
     caller can warn if the model still hit ``max_tokens``).
+
+    Raises ``BedrockStreamError`` on a modeled exception-member event so a
+    mid-stream service error is retried/surfaced rather than silently dropped as a
+    short document.
     """
     parts: list[str] = []
     stop_reason: str | None = None
     for event in response["body"]:
-        chunk = event.get("chunk") if isinstance(event, dict) else None
-        if not chunk:
+        if not isinstance(event, dict):
+            continue
+        chunk = event.get("chunk")
+        if chunk is None:
+            for member in _BEDROCK_STREAM_ERROR_MEMBERS:
+                detail = event.get(member)
+                if detail is not None:
+                    message = detail.get("message", "") if isinstance(detail, dict) else ""
+                    raise BedrockStreamError(member, message)
             continue
         data = json.loads(chunk["bytes"].decode("utf-8"))
         etype = data.get("type")
@@ -1438,9 +1475,7 @@ class BedrockTerraformGenerator:
             )
         return self._bedrock_runtime
 
-    def _invoke_model_with_retries(
-        self, context: str = "", *, stream: bool = False, **kwargs: Any
-    ) -> dict[str, Any]:
+    def _invoke_model_with_retries(self, context: str = "", **kwargs: Any) -> dict[str, Any]:
         # Single retry authority (botocore's own retries are disabled in the
         # client Config). Worst-case wall time is bounded to
         # max_attempts * read_timeout, and every retry is logged (with the file it
@@ -1460,15 +1495,10 @@ class BedrockTerraformGenerator:
             EndpointConnectionError,
             ReadTimeoutError,
         )
-        invoke = (
-            self.bedrock_runtime.invoke_model_with_response_stream
-            if stream
-            else self.bedrock_runtime.invoke_model
-        )
         last_error: Exception | None = None
         for attempt in range(1, self.max_attempts + 1):
             try:
-                return invoke(**kwargs)
+                return self.bedrock_runtime.invoke_model(**kwargs)
             except transient as exc:
                 last_error = exc
             except ClientError as exc:
@@ -1582,28 +1612,79 @@ class BedrockTerraformGenerator:
         the caller's parse-retry catches the malformed JSON; raise
         `IAC_SMITH_BEDROCK_MAX_TOKENS` if a real file is being clipped.
         """
-        body = {
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": self.max_tokens,
-            "temperature": 0,
-            "messages": [{"role": "user", "content": prompt}],
-            "output_config": {"format": {"type": "json_schema", "schema": TERRAFORM_FILE_SCHEMA}},
-        }
-        response = self._invoke_model_with_retries(
-            context=path,
-            stream=True,
-            modelId=self.model_id,
-            contentType="application/json",
-            accept="application/json",
-            body=json.dumps(body),
+        body = json.dumps(
+            {
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": self.max_tokens,
+                "temperature": 0,
+                "messages": [{"role": "user", "content": prompt}],
+                "output_config": {
+                    "format": {"type": "json_schema", "schema": TERRAFORM_FILE_SCHEMA}
+                },
+            }
         )
-        document, stop_reason = _read_stream_document(response)
+        document, stop_reason = self._stream_file_with_retries(body=body, path=path)
         if stop_reason == "max_tokens":
             self._log(
                 f"IaC Smith: {path} response hit max_tokens and may be clipped; "
                 "raise IAC_SMITH_BEDROCK_MAX_TOKENS if generation is incomplete."
             )
         return document
+
+    def _stream_file_with_retries(self, *, body: str, path: str) -> tuple[str, str | None]:
+        """Invoke the streaming endpoint and consume the stream as one retryable unit.
+
+        Mid-stream service errors (throttle/timeout/internal) surface either while
+        iterating the EventStream or as a modeled exception-member event, both of
+        which happen during consumption — i.e. AFTER the initial call returns. So
+        the retry boundary must wrap the whole invoke + read, not just the call.
+        A fresh invoke restarts the stream (a consumed stream can't be resumed);
+        non-transient failures (e.g. validationException) propagate immediately.
+        """
+        from botocore.exceptions import (
+            ClientError,
+            ConnectionClosedError,
+            ConnectTimeoutError,
+            EndpointConnectionError,
+            EventStreamError,
+            ReadTimeoutError,
+        )
+
+        transient = (
+            ConnectionClosedError,
+            ConnectTimeoutError,
+            EndpointConnectionError,
+            EventStreamError,
+            ReadTimeoutError,
+        )
+        last_error: Exception | None = None
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                response = self.bedrock_runtime.invoke_model_with_response_stream(
+                    modelId=self.model_id,
+                    contentType="application/json",
+                    accept="application/json",
+                    body=body,
+                )
+                return _read_stream_document(response)
+            except transient as exc:
+                last_error = exc
+            except BedrockStreamError as exc:
+                if not exc.transient:
+                    raise
+                last_error = exc
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                if code not in _BEDROCK_THROTTLE_CODES:
+                    raise
+                last_error = exc
+            if attempt < self.max_attempts:
+                self._log(
+                    f"IaC Smith: Bedrock stream failed ({type(last_error).__name__}) "
+                    f"for {path}; retrying (attempt {attempt + 1}/{self.max_attempts})."
+                )
+        assert last_error is not None
+        raise last_error
 
     def generate_files(
         self,
