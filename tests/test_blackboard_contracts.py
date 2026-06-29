@@ -122,6 +122,25 @@ def test_validate_generated_contracts_ignores_nested_block_arguments():
     assert result.status.value == "passed"
 
 
+def test_validate_generated_contracts_allows_terraform_meta_arguments():
+    # Core meta-arguments (depends_on, count, for_each, provider) are valid on every
+    # resource but are absent from the provider schema, so they must not be flagged.
+    contracts = contracts_from_provider_schema(_provider_schema())
+    files = {
+        "modules/net/main.tf": (
+            'resource "aws_security_group" "this" {\n'
+            "  count       = 2\n"
+            "  vpc_id      = var.vpc_id\n"
+            "  depends_on  = [aws_vpc.main]\n"
+            "}\n"
+        )
+    }
+
+    result = validate_generated_contracts(files, contracts, known_resource_types=set(contracts))
+
+    assert result.status.value == "passed"
+
+
 def test_validate_generated_contracts_no_docs_is_pass():
     result = validate_generated_contracts({"modules/a/main.tf": 'resource "x" "y" {}'}, {})
     assert result.status.value == "passed"
