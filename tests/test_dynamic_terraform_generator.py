@@ -613,6 +613,50 @@ def test_invoke_file_generation_retries_when_stream_iteration_raises():
     assert runtime.calls == 2
 
 
+def test_invoke_file_generation_retries_when_stream_raises_urllib3_read_timeout():
+    # Regression: a mid-stream stall surfaces as urllib3.exceptions.ReadTimeoutError,
+    # which botocore does NOT wrap during EventStream iteration. It must be retried,
+    # not allowed to escape and crash the run.
+    import urllib3.exceptions
+
+    path = "modules/example/main.tf"
+    full_doc = json.dumps(
+        {"path": path, "content": 'resource "x" "y" {}\n', "assumptions": [], "warnings": []}
+    )
+
+    class _RaisingStream:
+        def __iter__(self):
+            raise urllib3.exceptions.ReadTimeoutError(
+                None, "https://example.invalid", "Read timed out."
+            )
+
+    class StreamReadFailsRuntime:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def invoke_model_with_response_stream(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return {"body": _RaisingStream()}
+            return {
+                "body": [
+                    _chunk_event({"type": "content_block_delta", "delta": {"text": full_doc}}),
+                    _chunk_event({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+                ]
+            }
+
+    runtime = StreamReadFailsRuntime()
+    generator = BedrockTerraformGenerator(
+        model_id="anthropic.test-model",
+        bedrock_runtime=runtime,
+    )
+
+    document = generator._invoke_file_generation(prompt="PROMPT", path=path)
+
+    assert document == full_doc
+    assert runtime.calls == 2
+
+
 def test_bedrock_terraform_generator_generates_files_with_bounded_parallelism():
     files = {
         "modules/ecs-fargate/main.tf": (
