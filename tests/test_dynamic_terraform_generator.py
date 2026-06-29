@@ -31,6 +31,19 @@ class FakeBody:
         return self.data
 
 
+def _stream_events(text: str, stop_reason: str = "end_turn") -> list[dict]:
+    """Wrap a full document into Bedrock InvokeModelWithResponseStream events."""
+
+    def _ev(obj: dict) -> dict:
+        return {"chunk": {"bytes": json.dumps(obj).encode()}}
+
+    return [
+        _ev({"type": "content_block_delta", "delta": {"type": "text_delta", "text": text}}),
+        _ev({"type": "message_delta", "delta": {"stop_reason": stop_reason}}),
+        _ev({"type": "message_stop"}),
+    ]
+
+
 class FakeBedrockRuntime:
     def __init__(
         self,
@@ -81,6 +94,17 @@ class FakeBedrockRuntime:
                 ).encode()
             )
         }
+
+    def invoke_model_with_response_stream(self, **kwargs):
+        # File generation streams; reuse the non-streaming logic (call tracking,
+        # failures_before_success, repairs) and wrap its text as stream events so
+        # subclasses overriding invoke_model keep working unchanged.
+        response = self.invoke_model(**kwargs)
+        payload = json.loads(response["body"].read().decode("utf-8"))
+        text = "".join(
+            block.get("text", "") for block in payload.get("content", []) if isinstance(block, dict)
+        )
+        return {"body": _stream_events(text)}
 
 
 class BlockingBedrockRuntime(FakeBedrockRuntime):
@@ -400,130 +424,34 @@ def test_bedrock_terraform_generator_returns_model_generated_files_without_rende
     ]
 
 
-def test_invoke_file_generation_stitches_truncated_response_via_continuation():
+def test_invoke_file_generation_streams_and_concatenates_text_deltas():
     path = "modules/example/main.tf"
     full_doc = json.dumps(
         {"path": path, "content": 'resource "x" "y" {}\n', "assumptions": [], "warnings": []}
     )
-    half = len(full_doc) // 2
-    head, tail = full_doc[:half], full_doc[half:]
+    # The document arrives as several text_delta events that must be concatenated.
+    first, second = full_doc[: len(full_doc) // 2], full_doc[len(full_doc) // 2 :]
 
-    def _resp(text: str, stop_reason: str) -> dict:
-        return {
-            "body": FakeBody(
-                json.dumps(
-                    {"content": [{"type": "text", "text": text}], "stop_reason": stop_reason}
-                ).encode()
-            )
-        }
-
-    class TruncatingRuntime:
+    class StreamingRuntime:
         def __init__(self) -> None:
             self.calls: list[dict] = []
 
-        def invoke_model(self, **kwargs):
+        def invoke_model_with_response_stream(self, **kwargs):
             self.calls.append(kwargs)
-            messages = json.loads(kwargs["body"])["messages"]
-            if len(messages) == 1:
-                # First call is cut off at the token cap — JSON document is partial.
-                return _resp(head, "max_tokens")
-            assert messages[-1]["role"] == "assistant"
-            return _resp(tail, "end_turn")
 
-    runtime = TruncatingRuntime()
-    generator = BedrockTerraformGenerator(
-        model_id="anthropic.test-model",
-        bedrock_runtime=runtime,
-    )
+            def _ev(obj: dict) -> dict:
+                return {"chunk": {"bytes": json.dumps(obj).encode()}}
 
-    document = generator._invoke_file_generation(prompt="PROMPT", path=path)
-
-    # The truncated head + continuation tail reassemble into the full JSON document.
-    assert document == full_doc
-    assert len(runtime.calls) == 2
-    first_body = json.loads(runtime.calls[0]["body"])
-    cont_body = json.loads(runtime.calls[1]["body"])
-    assert first_body["output_config"]["format"]["type"] == "json_schema"
-    assert first_body["messages"][-1]["role"] == "user"
-    # Continuation prefills the assistant turn, which is incompatible with
-    # structured-output formatting, so it must be dropped on the continuation call.
-    assert "output_config" not in cont_body
-    assert cont_body["messages"][-1]["role"] == "assistant"
-
-
-def test_invoke_file_generation_falls_back_when_model_rejects_prefill():
-    path = "modules/example/main.tf"
-    full_doc = json.dumps(
-        {"path": path, "content": 'resource "x" "y" {}\n', "assumptions": [], "warnings": []}
-    )
-    head = full_doc[: len(full_doc) // 2]
-
-    class NoPrefillRuntime:
-        def __init__(self) -> None:
-            self.calls: list[dict] = []
-
-        def invoke_model(self, **kwargs):
-            self.calls.append(kwargs)
-            messages = json.loads(kwargs["body"])["messages"]
-            if len(messages) == 1:
-                return {
-                    "body": FakeBody(
-                        json.dumps(
-                            {
-                                "content": [{"type": "text", "text": head}],
-                                "stop_reason": "max_tokens",
-                            }
-                        ).encode()
-                    )
-                }
-            # Continuation prefills an assistant message; this model rejects that.
-            raise botocore.exceptions.ClientError(
-                {
-                    "Error": {
-                        "Code": "ValidationException",
-                        "Message": (
-                            "This model does not support assistant message prefill. "
-                            "The conversation must end with a user message."
-                        ),
-                    }
-                },
-                "InvokeModel",
-            )
-
-    runtime = NoPrefillRuntime()
-    generator = BedrockTerraformGenerator(
-        model_id="anthropic.test-model",
-        bedrock_runtime=runtime,
-    )
-
-    # Must not crash — returns the truncated document for the caller's parse-retry.
-    document = generator._invoke_file_generation(prompt="PROMPT", path=path)
-
-    assert document == head
-    assert len(runtime.calls) == 2
-
-
-def test_invoke_file_generation_single_call_when_not_truncated():
-    path = "modules/example/main.tf"
-    full_doc = json.dumps(
-        {"path": path, "content": 'resource "x" "y" {}\n', "assumptions": [], "warnings": []}
-    )
-
-    class CompleteRuntime:
-        def __init__(self) -> None:
-            self.calls: list[dict] = []
-
-        def invoke_model(self, **kwargs):
-            self.calls.append(kwargs)
             return {
-                "body": FakeBody(
-                    json.dumps(
-                        {"content": [{"type": "text", "text": full_doc}], "stop_reason": "end_turn"}
-                    ).encode()
-                )
+                "body": [
+                    _ev({"type": "content_block_delta", "delta": {"text": first}}),
+                    _ev({"type": "content_block_delta", "delta": {"text": second}}),
+                    _ev({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+                    _ev({"type": "message_stop"}),
+                ]
             }
 
-    runtime = CompleteRuntime()
+    runtime = StreamingRuntime()
     generator = BedrockTerraformGenerator(
         model_id="anthropic.test-model",
         bedrock_runtime=runtime,
@@ -533,6 +461,156 @@ def test_invoke_file_generation_single_call_when_not_truncated():
 
     assert document == full_doc
     assert len(runtime.calls) == 1
+    body = json.loads(runtime.calls[0]["body"])
+    # Streaming requests still use structured output and a single user turn.
+    assert body["output_config"]["format"]["type"] == "json_schema"
+    assert body["messages"][-1]["role"] == "user"
+
+
+def test_invoke_file_generation_logs_when_response_hits_max_tokens():
+    path = "modules/example/main.tf"
+
+    class TruncatedStreamRuntime:
+        def invoke_model_with_response_stream(self, **kwargs):
+            def _ev(obj: dict) -> dict:
+                return {"chunk": {"bytes": json.dumps(obj).encode()}}
+
+            return {
+                "body": [
+                    _ev({"type": "content_block_delta", "delta": {"text": '{"path":'}}),
+                    _ev({"type": "message_delta", "delta": {"stop_reason": "max_tokens"}}),
+                ]
+            }
+
+    logs: list[str] = []
+    generator = BedrockTerraformGenerator(
+        model_id="anthropic.test-model",
+        bedrock_runtime=TruncatedStreamRuntime(),
+        logger=logs.append,
+    )
+
+    document = generator._invoke_file_generation(prompt="PROMPT", path=path)
+
+    assert document == '{"path":'
+    assert any("max_tokens" in line for line in logs)
+
+
+def _chunk_event(obj: dict) -> dict:
+    return {"chunk": {"bytes": json.dumps(obj).encode()}}
+
+
+def test_read_stream_document_raises_on_bedrock_exception_member():
+    from iac_smith.dynamic_terraform import BedrockStreamError, _read_stream_document
+
+    response = {
+        "body": [
+            _chunk_event({"type": "content_block_delta", "delta": {"text": '{"path":'}}),
+            {"throttlingException": {"message": "slow down"}},
+        ]
+    }
+    with pytest.raises(BedrockStreamError) as exc_info:
+        _read_stream_document(response)
+    assert exc_info.value.member == "throttlingException"
+    assert exc_info.value.transient is True
+
+
+def test_invoke_file_generation_retries_on_transient_stream_error_member():
+    path = "modules/example/main.tf"
+    full_doc = json.dumps(
+        {"path": path, "content": 'resource "x" "y" {}\n', "assumptions": [], "warnings": []}
+    )
+
+    class FlakyStreamRuntime:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def invoke_model_with_response_stream(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                # A mid-stream timeout must drive the transient retry path, not be
+                # dropped as a short document that burns the parse-retry budget.
+                return {"body": [{"modelTimeoutException": {"message": "timed out"}}]}
+            return {
+                "body": [
+                    _chunk_event({"type": "content_block_delta", "delta": {"text": full_doc}}),
+                    _chunk_event({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+                ]
+            }
+
+    runtime = FlakyStreamRuntime()
+    generator = BedrockTerraformGenerator(
+        model_id="anthropic.test-model",
+        bedrock_runtime=runtime,
+    )
+
+    document = generator._invoke_file_generation(prompt="PROMPT", path=path)
+
+    assert document == full_doc
+    assert runtime.calls == 2
+
+
+def test_invoke_file_generation_does_not_retry_non_transient_stream_error():
+    from iac_smith.dynamic_terraform import BedrockStreamError
+
+    class ValidationStreamRuntime:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def invoke_model_with_response_stream(self, **kwargs):
+            self.calls += 1
+            return {"body": [{"validationException": {"message": "bad input"}}]}
+
+    runtime = ValidationStreamRuntime()
+    generator = BedrockTerraformGenerator(
+        model_id="anthropic.test-model",
+        bedrock_runtime=runtime,
+    )
+
+    with pytest.raises(BedrockStreamError) as exc_info:
+        generator._invoke_file_generation(prompt="PROMPT", path="modules/example/main.tf")
+    assert exc_info.value.member == "validationException"
+    assert runtime.calls == 1
+
+
+def test_invoke_file_generation_retries_when_stream_iteration_raises():
+    path = "modules/example/main.tf"
+    full_doc = json.dumps(
+        {"path": path, "content": 'resource "x" "y" {}\n', "assumptions": [], "warnings": []}
+    )
+
+    class _RaisingStream:
+        def __iter__(self):
+            raise botocore.exceptions.ReadTimeoutError(
+                endpoint_url="https://example.invalid/model/test/invoke-with-response-stream",
+                error="timed out",
+            )
+
+    class StreamReadFailsRuntime:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def invoke_model_with_response_stream(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                # Error raised while CONSUMING the stream — after the call returned.
+                return {"body": _RaisingStream()}
+            return {
+                "body": [
+                    _chunk_event({"type": "content_block_delta", "delta": {"text": full_doc}}),
+                    _chunk_event({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+                ]
+            }
+
+    runtime = StreamReadFailsRuntime()
+    generator = BedrockTerraformGenerator(
+        model_id="anthropic.test-model",
+        bedrock_runtime=runtime,
+    )
+
+    document = generator._invoke_file_generation(prompt="PROMPT", path=path)
+
+    assert document == full_doc
+    assert runtime.calls == 2
 
 
 def test_bedrock_terraform_generator_generates_files_with_bounded_parallelism():
@@ -1143,6 +1221,10 @@ def test_variables_tf_not_repaired_when_only_main_tf_has_duplicate_declarations(
                     ).encode()
                 )
             }
+
+        def invoke_model_with_response_stream(self, **kwargs):
+            text = self.invoke_model(**kwargs)["body"].read().decode("utf-8")
+            return {"body": _stream_events(text)}
 
     runtime = TrackingBedrockRuntime()
     plan = ChangePlan(

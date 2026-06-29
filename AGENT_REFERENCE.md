@@ -46,9 +46,8 @@ All configuration is via environment variables. There are no CLI flags.
 | `BEDROCK_MODEL_ID` | (required) | Primary Bedrock model/inference-profile for generation and repair |
 | `BEDROCK_ESCALATION_MODEL_ID` | unset | Stronger model used for one penultimate repair attempt (failing files only) when the primary is stuck; unset or equal to `BEDROCK_MODEL_ID` disables escalation |
 | `IAC_SMITH_BEDROCK_CONCURRENCY` | `4` | Parallel file generation threads |
-| `IAC_SMITH_BEDROCK_MAX_TOKENS` | `4096` | Max output tokens **per call**. Kept tight so each call finishes well under the read timeout; a file larger than one budget is completed by stitching continuations rather than by raising this |
-| `IAC_SMITH_BEDROCK_MAX_CONTINUATIONS` | `3` | Max times a single file's response may be continued after a `stop_reason == "max_tokens"` truncation. The assistant's own truncated turn is continued and the chunks are stitched, so a file can exceed one `MAX_TOKENS` budget while every call stays under the read timeout. `0` disables continuation |
-| `IAC_SMITH_BEDROCK_READ_TIMEOUT` | `180` | Per-call Bedrock read timeout (seconds). `invoke_model` is non-streaming, so this bounds total server-side generation time for one call |
+| `IAC_SMITH_BEDROCK_MAX_TOKENS` | `16384` | Max output tokens for one file. Generation streams, so this can be generous enough to fit even a big module's `main.tf` in a single response without truncation; temperature 0 means the model stops at `end_turn`, so the cap bounds worst case, not typical cost |
+| `IAC_SMITH_BEDROCK_READ_TIMEOUT` | `180` | Bedrock read timeout (seconds). Generation streams, so this applies *between* events (a stall), not to total generation time — a long file no longer races it |
 | `IAC_SMITH_BEDROCK_MAX_ATTEMPTS` | `2` | Bedrock invoke attempts per call (single retry authority; botocore's own retries are disabled so they can't nest and multiply the wall time) |
 | `IAC_SMITH_CHECK_TIMEOUT` | `300` | Per-command timeout (seconds) for `terraform`/`terragrunt` runtime-validation subprocesses, so a stalled plan/init can't hang the run |
 
@@ -218,22 +217,12 @@ environments/{env}/foundation/README.md
 
 **If stack module does not exist yet:**
 ```
-modules/{stack_name}/main.tf          # core/primary resources only
-modules/{stack_name}/iam.tf           # IAM roles, policies, attachments
-modules/{stack_name}/security.tf      # security groups + KMS keys/aliases/policies
-modules/{stack_name}/monitoring.tf    # CloudWatch log groups + alarms, SNS topics
+modules/{stack_name}/main.tf
 modules/{stack_name}/variables.tf
 modules/{stack_name}/outputs.tf
 modules/{stack_name}/versions.tf
 modules/{stack_name}/README.md
 ```
-The workload module's resources are split across generic concern files so no single
-file must be generated in one oversized model response (the cause of `max_tokens`
-truncation on large stacks). These are cross-cutting infra concerns, not
-service-specific files, so the split stays generic; a module with no resources for a
-concern emits that file with only a comment. `foundation` is networking-only and
-stays single-file. `main.tf` is generated first so the concern files and the
-`variables.tf`/`outputs.tf` contracts get its resources as sibling context.
 
 ---
 
@@ -293,8 +282,7 @@ actually been resolved or learned (no boilerplate on the first pass).
 - Max tokens: `IAC_SMITH_BEDROCK_MAX_TOKENS` (default 4096), temperature 0. `invoke_model` is non-streaming, so a runaway generation that exceeds the read timeout looks like a dead connection; the tight cap keeps each call well under `IAC_SMITH_BEDROCK_READ_TIMEOUT`
 - Output constrained to JSON schema: `{"path": str, "content": str, "assumptions": [], "warnings": []}`
 - JSON format enforced via `output_config.format.type = "json_schema"` on the first call
-- **Truncation stitching:** if a response stops with `stop_reason == "max_tokens"`, the document is cut mid-object and won't parse. Rather than re-asking (which truncates at the same wall), the assistant's own truncated turn is continued and the chunks are concatenated, up to `IAC_SMITH_BEDROCK_MAX_CONTINUATIONS` times. Continuation calls prefill the assistant message, which is incompatible with structured output, so they drop `output_config` and simply finish the JSON. This lets a genuinely large file exceed one token budget while every call stays under the read timeout. The concern-file split (above) keeps most files within one budget, so continuation is the exception, not the rule
-- **Prefill fallback:** not every model supports assistant-message prefill — some cross-region/escalation inference profiles reject "the conversation must end with a user message". When a continuation call hits that, the truncated document is returned for the caller's parse-retry instead of crashing the run (`_is_unsupported_prefill_error`). Combined with the file split, a prefill-incapable escalation model rarely needs to continue at all
+- **Streaming generation:** file generation uses `invoke_model_with_response_stream` (`_invoke_file_generation` → `_read_stream_document`), accumulating `content_block_delta` text and tracking the final `stop_reason`. Streaming keeps the connection alive between events, so the read timeout applies per-event rather than to total generation time. That decouples a large file's generation length from the timeout and lets `IAC_SMITH_BEDROCK_MAX_TOKENS` be generous enough to fit a big `main.tf` in one response — no mid-document truncation, no continuation/prefill stitching (which models can't always do). If the model still reports `stop_reason == "max_tokens"`, the document may be clipped: the caller's parse-retry catches the malformed JSON and the log says to raise `IAC_SMITH_BEDROCK_MAX_TOKENS`
 
 **Concurrency:** `IAC_SMITH_BEDROCK_CONCURRENCY` threads (default 4), one file per thread
 
@@ -306,7 +294,7 @@ After all files are generated in parallel:
 
 **Prompt non-negotiables injected:**
 - Return only JSON
-- File organization rules: `variables.tf` = variables only, `outputs.tf` = outputs only, `versions.tf` = terraform block + required_providers only. Resources are split by concern: `main.tf` = core/primary resources + data sources, `iam.tf` = IAM, `security.tf` = security groups + KMS, `monitoring.tf` = log groups + alarms + SNS. Generate only the file in `files_to_generate`; never duplicate a resource across them
+- File organization rules: `variables.tf` = variables only, `outputs.tf` = outputs only, `versions.tf` = terraform block + required_providers only, `main.tf` = resources + data sources only
 - No duplicate declarations across files in a module
 - No hardcoded credentials
 - Apply workflows must never trigger on `pull_request`; `terraform-apply.yml` must trigger only on push to `main` — never `master`, never both
@@ -559,6 +547,8 @@ The workflow installs Python, uv, terraform, terragrunt, configures AWS OIDC cre
 ## Bedrock Hard-Failure Behavior
 
 Network-level errors (`ConnectionClosedError`, `ConnectTimeoutError`, `EndpointConnectionError`, `ReadTimeoutError`) and Bedrock throttling (`ThrottlingException`, `TooManyRequestsException`, `ServiceUnavailableException`) are retried up to `IAC_SMITH_BEDROCK_MAX_ATTEMPTS` times (default 2) before re-raising. This loop is the single retry authority — botocore's own `Config(retries=...)` is set to `max_attempts=1` so the two layers can't nest and multiply the worst-case wall time. Every retry is logged with the file it was generating, so a slow/stalled call is visible and pinpointed instead of looking like a hang. Non-throttle `ClientError`s (e.g. `AccessDeniedException`) are not retried.
+
+For **streamed** file generation, the failure surface is during *consumption*, not just the initial call: a mid-stream service error arrives either as a raised `EventStreamError` or as a modeled exception-member event (`throttlingException`, `modelTimeoutException`, `internalServerException`, `modelStreamErrorException`, `serviceUnavailableException`, `validationException`). `_read_stream_document` raises `BedrockStreamError` on a member event so it is never silently dropped as a short document, and `_stream_file_with_retries` wraps the whole invoke + stream-read as one retryable unit — a fresh invoke restarts the stream (a consumed stream can't be resumed). Transient members and stream/connection errors retry up to `IAC_SMITH_BEDROCK_MAX_ATTEMPTS`; `validationException` (non-transient) propagates immediately rather than burning the parse-retry budget.
 
 `ThrottlingException` (daily token quota exhausted) is caught in `cli.py` around both the graph invocation and the runtime repair loop, and returns a clean `IaCSmithRunResult(status="blocked", block_reason="Bedrock throttled: ...")` instead of a raw traceback.
 
