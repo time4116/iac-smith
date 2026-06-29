@@ -256,6 +256,15 @@ _UNSUPPORTED_BLOCK_RE = re.compile(
     r'Blocks of type "(?P<block>[^"]+)" are not expected here\.',
     re.MULTILINE,
 )
+# The proactive contract gate (``validate_generated_contracts``) phrases its own
+# rejections differently from Terraform. Recognize them so a schema error caught
+# *before* Terraform runs becomes the same persistent negative pattern — otherwise
+# each repair attempt rediscovers the schema and can regress (fix one bad argument,
+# introduce another).
+_CONTRACT_GATE_ARG_RE = re.compile(
+    r"uses unsupported argument `(?P<arg>[^`]+)` on `(?P<scope>[^`]+)`"
+)
+_CONTRACT_GATE_RESOURCE_RE = re.compile(r"declares unsupported resource type `(?P<scope>[^`]+)`")
 # Plan-time provider value constraints — these only surface at `terraform plan`,
 # not `terraform validate`, so they reach the runtime repair loop as raw text.
 _VALUE_REGEX_RE = re.compile(
@@ -389,6 +398,24 @@ def normalize_validation_findings(
                     ),
                 )
             )
+        for match in _CONTRACT_GATE_ARG_RE.finditer(error):
+            scope = match.group("scope")
+            arg = match.group("arg")
+            key = (scope, arg)
+            if key in seen:
+                continue
+            seen.add(key)
+            findings.append(
+                ValidationFinding(
+                    scope=scope,
+                    finding=f"Unsupported argument {arg}",
+                    source="contract gate",
+                    negative_pattern=(
+                        f"Do not use argument `{arg}` with `{scope}`; it is not in that contract."
+                        + _allowed_arguments_hint(scope, contract_docs)
+                    ),
+                )
+            )
         for match in _UNSUPPORTED_BLOCK_RE.finditer(error):
             scope = match.group("scope")
             block = match.group("block")
@@ -418,6 +445,20 @@ def normalize_validation_findings(
                     scope=scope,
                     finding="Unsupported resource type",
                     source="terraform validation",
+                    negative_pattern=f"Do not use unsupported Terraform resource type `{scope}`.",
+                )
+            )
+        for match in _CONTRACT_GATE_RESOURCE_RE.finditer(error):
+            scope = match.group("scope")
+            key = (scope, "resource_type")
+            if key in seen:
+                continue
+            seen.add(key)
+            findings.append(
+                ValidationFinding(
+                    scope=scope,
+                    finding="Unsupported resource type",
+                    source="contract gate",
                     negative_pattern=f"Do not use unsupported Terraform resource type `{scope}`.",
                 )
             )

@@ -176,6 +176,10 @@ def validation_runner(state: IaCSmithState) -> IaCSmithState:
     generated_files = state.get("generated_files", {})
     blackboard = state.get("blackboard")
     known_stack_dirs = existing_stack_dirs(state.get("target_repo_path"))
+    # Authoritative contracts for the resources actually generated, captured so a
+    # contract-gate failure can be turned into a negative pattern carrying the real
+    # allowed arguments (see normalize_validation_findings below).
+    contract_docs: dict = {}
     if generated_files:
         validation = static_review_generated_files(
             generated_files, known_stack_dirs=known_stack_dirs
@@ -244,7 +248,9 @@ def validation_runner(state: IaCSmithState) -> IaCSmithState:
         status = "blocked" if repair_attempts >= 3 else "needs_repair"
 
     if validation.status == ValidationStatus.FAILED and blackboard:
-        blackboard = blackboard.with_findings(normalize_validation_findings(validation.errors))
+        blackboard = blackboard.with_findings(
+            normalize_validation_findings(validation.errors, contract_docs=contract_docs or None)
+        )
 
     return {
         **state,

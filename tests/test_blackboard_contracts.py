@@ -282,6 +282,63 @@ def test_normalize_validation_findings_extracts_negative_schema_patterns():
     ]
 
 
+def test_normalize_validation_findings_recognizes_contract_gate_argument_error():
+    # The proactive contract gate phrases rejections in its own words; they must
+    # still become a persistent negative pattern so repair does not regress.
+    errors = [
+        "`modules/db/main.tf` uses unsupported argument `final_snapshot_identifier_prefix` "
+        "on `aws_rds_cluster`. Allowed arguments from terraform providers schema -json "
+        "(hashicorp/aws): cluster_identifier, final_snapshot_identifier."
+    ]
+
+    findings = normalize_validation_findings(errors)
+
+    assert len(findings) == 1
+    assert findings[0].scope == "aws_rds_cluster"
+    assert findings[0].source == "contract gate"
+    assert (
+        "Do not use argument `final_snapshot_identifier_prefix` with `aws_rds_cluster`"
+        in findings[0].negative_pattern
+    )
+
+
+def test_normalize_contract_gate_argument_error_carries_allowed_arguments():
+    errors = [
+        "`modules/db/main.tf` uses unsupported argument `final_snapshot_identifier_prefix` "
+        "on `aws_rds_cluster`. Allowed arguments from x: a, b."
+    ]
+    contract_docs = {
+        "aws_rds_cluster": TerraformContract(
+            kind="provider_resource",
+            name="aws_rds_cluster",
+            allowed_arguments=["cluster_identifier", "final_snapshot_identifier"],
+            source="terraform providers schema -json (hashicorp/aws)",
+        )
+    }
+
+    findings = normalize_validation_findings(errors, contract_docs=contract_docs)
+
+    pattern = findings[0].negative_pattern
+    assert "The valid arguments and blocks for `aws_rds_cluster` are:" in pattern
+    assert "final_snapshot_identifier" in pattern
+
+
+def test_normalize_validation_findings_recognizes_contract_gate_resource_type_error():
+    errors = [
+        "`modules/db/main.tf` declares unsupported resource type `aws_db_proxy_target_group` "
+        "— the provider does not define it. Use a resource type the provider actually supports."
+    ]
+
+    findings = normalize_validation_findings(errors)
+
+    assert len(findings) == 1
+    assert findings[0].scope == "aws_db_proxy_target_group"
+    assert findings[0].source == "contract gate"
+    assert "Do not use unsupported Terraform resource type `aws_db_proxy_target_group`" in (
+        findings[0].negative_pattern
+    )
+
+
 def test_normalize_validation_findings_extracts_value_regex_constraint():
     errors = [
         "terragrunt plan environments/non-prod/app-runner failed:\n"
