@@ -469,7 +469,10 @@ def test_invoke_file_generation_falls_back_when_model_rejects_prefill():
                 return {
                     "body": FakeBody(
                         json.dumps(
-                            {"content": [{"type": "text", "text": head}], "stop_reason": "max_tokens"}
+                            {
+                                "content": [{"type": "text", "text": head}],
+                                "stop_reason": "max_tokens",
+                            }
                         ).encode()
                     )
                 }
