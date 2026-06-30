@@ -27,6 +27,7 @@ from iac_smith.nodes.static_review import (
     missing_foundation_dependency_targets,
     static_review_generated_files,
 )
+from iac_smith.provider_lock import ensure_terraform_gitignore, generate_provider_locks
 from iac_smith.runtime_validation import validate_generated_iac
 from iac_smith.services.github import (
     GitHubIssue,
@@ -726,6 +727,14 @@ def _run_iac_smith_core(
             runtime_checks=runtime_validation.checks,
         )
 
+        if env.get("IAC_SMITH_GENERATE_LOCKFILE") != "0":
+            _log("IaC Smith: generating provider lockfiles.")
+            locks = generate_provider_locks(repo_path, env=version_env, log=_log)
+            if locks:
+                _log(f"IaC Smith: wrote {len(locks)} provider lockfile(s).")
+
+    if ensure_terraform_gitignore(repo_path):
+        _log("IaC Smith: added a Terraform .gitignore for the generated repo.")
     commit_message = _descriptive_title(result)
     _log("IaC Smith: committing generated files.")
     committed = commit_generated_files(repo_path, commit_message)

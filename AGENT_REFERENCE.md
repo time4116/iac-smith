@@ -54,6 +54,7 @@ All configuration is via environment variables. There are no CLI flags.
 | `IAC_SMITH_RUN_TIMEOUT` | `360` | Hard wall-clock budget (seconds) for the entire run. `IAC_SMITH_CHECK_TIMEOUT` bounds a single subprocess; this bounds the whole accumulation of generation/repair/plan/scaffold cycles. On expiry the run is hard-stopped (SIGALRM interrupts even a blocked subprocess) and returns `blocked` without opening a PR. `0` disables it |
 | `IAC_SMITH_SCHEMA_CACHE_DIR` | System temp (`iac-smith-provider-schema/`) | Where the generation-time provider-schema harvest caches the per-provider-version schema JSON (and shares a Terraform plugin cache). Point this at a persisted/`actions/cache` path in CI so the `terraform init` cost is paid once across runs |
 | `IAC_SMITH_SCHEMA_HARVEST` | unset | Set to `0` to disable the generation-time provider-schema harvest (the contract gate then degrades to runtime-only schema, as before) |
+| `IAC_SMITH_GENERATE_LOCKFILE` | `1` | After runtime validation passes, write a multi-platform `.terraform.lock.hcl` (pinned provider versions + checksums) in each generated `modules/<x>/` and commit it. Set to `0` to skip. Best-effort and parallel — needs `terraform` on PATH (skips otherwise), and a module that fails to lock is logged and skipped, never blocking the PR. A Terraform `.gitignore` is also written when the target repo has none |
 
 ---
 
