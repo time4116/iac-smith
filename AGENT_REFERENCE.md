@@ -47,6 +47,7 @@ All configuration is via environment variables. There are no CLI flags.
 | `BEDROCK_ESCALATION_MODEL_ID` | unset | Stronger model used for one penultimate repair attempt (failing files only) when the primary is stuck; unset or equal to `BEDROCK_MODEL_ID` disables escalation |
 | `IAC_SMITH_BEDROCK_CONCURRENCY` | `4` | Parallel file generation threads |
 | `IAC_SMITH_BEDROCK_MAX_TOKENS` | `16384` | Max output tokens for one file. Generation streams, so this can be generous enough to fit even a big module's `main.tf` in a single response without truncation; temperature 0 means the model stops at `end_turn`, so the cap bounds worst case, not typical cost |
+| `IAC_SMITH_INTENT_MAX_TOKENS` | `4096` | Max output tokens for intent parsing. Intent also streams under the structured-output contract; a verbose intent that exceeds the cap is truncated to unclosed JSON, so the run fails with an explicit "truncated at max_tokens" message telling you to raise this |
 | `IAC_SMITH_BEDROCK_READ_TIMEOUT` | `180` | Bedrock read timeout (seconds). Generation streams, so this applies *between* events (a stall), not to total generation time — a long file no longer races it |
 | `IAC_SMITH_BEDROCK_MAX_ATTEMPTS` | `2` | Bedrock invoke attempts per call (single retry authority; botocore's own retries are disabled so they can't nest and multiply the wall time) |
 | `IAC_SMITH_CHECK_TIMEOUT` | `300` | Per-command timeout (seconds) for `terraform`/`terragrunt` runtime-validation subprocesses, so a stalled plan/init can't hang the run |
@@ -224,8 +225,12 @@ networking. So if the generated output itself declares a `dependency "foundation
 (or `baseline`/`vpc`/`vpc-foundation` — `FOUNDATION_STACK_NAMES`) pointing at a stack
 that is neither created by this change nor present in the target repo,
 `validation_runner` calls `add_foundation_stack(change_plan)` to add the foundation
-module + per-environment stack above and regenerates against the expanded plan. This
-is the model's own output proving the foundation is *truly needed*, rather than
+module + per-environment stack above. The already-generated workload files are kept;
+`code_generator` regenerates **only the newly-planned foundation files** (the plan
+delta) and merges them, rather than re-running every file through the model — adding a
+foundation stack does not change the existing files, and a full regeneration roughly
+doubles the slowest part of the run. This is the model's own output proving the
+foundation is *truly needed*, rather than
 looping repair on an unfixable dangling-dependency finding (which would otherwise
 only surface at `terragrunt plan`). Scoped to foundation-style targets (an arbitrary
 missing stack is left to the dangling-dependency finding), guarded to run **at most
