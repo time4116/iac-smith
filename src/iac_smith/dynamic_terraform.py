@@ -1486,15 +1486,123 @@ def _render_root_hcl(*, environment: str, aws_region: str, bucket: str, lock_tab
     )
 
 
+# The foundation stack is fully invariant — shared networking (a VPC with public
+# and private subnets across AZs). Rather than have the model hand-author the VPC
+# resource graph (historically a source of repair oscillation), source the
+# battle-tested community module. The module version is pinned to a major line;
+# `terraform init`/`plan` resolves and validates it, and the lockfile pins
+# providers. The outputs match the names workloads consume via
+# `dependency.foundation.outputs.*` (`vpc_id`, `private_subnet_ids`,
+# `public_subnet_ids`, `vpc_cidr`).
+_FOUNDATION_MODULE_FILES: dict[str, str] = {
+    "modules/foundation/main.tf": """data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "~> 5.0"
+
+  name = "${var.environment}-vpc"
+  cidr = var.vpc_cidr
+
+  azs             = slice(data.aws_availability_zones.available.names, 0, 2)
+  private_subnets = var.private_subnet_cidrs
+  public_subnets  = var.public_subnet_cidrs
+
+  enable_nat_gateway   = true
+  single_nat_gateway   = true
+  enable_dns_hostnames = true
+
+  tags = {
+    Environment = var.environment
+    ManagedBy   = "terraform"
+  }
+}
+""",
+    "modules/foundation/variables.tf": """variable "environment" {
+  description = "Deployment environment name"
+  type        = string
+}
+
+variable "vpc_cidr" {
+  description = "CIDR block for the VPC"
+  type        = string
+  default     = "10.0.0.0/16"
+}
+
+variable "private_subnet_cidrs" {
+  description = "CIDR blocks for the private subnets"
+  type        = list(string)
+  default     = ["10.0.1.0/24", "10.0.2.0/24"]
+}
+
+variable "public_subnet_cidrs" {
+  description = "CIDR blocks for the public subnets"
+  type        = list(string)
+  default     = ["10.0.101.0/24", "10.0.102.0/24"]
+}
+""",
+    "modules/foundation/outputs.tf": """output "vpc_id" {
+  description = "ID of the VPC"
+  value       = module.vpc.vpc_id
+}
+
+output "private_subnet_ids" {
+  description = "IDs of the private subnets"
+  value       = module.vpc.private_subnets
+}
+
+output "public_subnet_ids" {
+  description = "IDs of the public subnets"
+  value       = module.vpc.public_subnets
+}
+
+output "vpc_cidr" {
+  description = "CIDR block of the VPC"
+  value       = module.vpc.vpc_cidr_block
+}
+""",
+    "modules/foundation/versions.tf": """terraform {
+  required_version = ">= 1.5"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+""",
+}
+
+
+def _render_foundation_stack_terragrunt() -> str:
+    """Render the foundation stack's terragrunt.hcl (the `include`/`locals` envelope
+    is normalized in deterministically later; emit only source + inputs here)."""
+    return (
+        'include "root" {\n'
+        '  path = find_in_parent_folders("root.hcl")\n'
+        "}\n\n"
+        "terraform {\n"
+        '  source = "../../../modules/foundation"\n'
+        "}\n\n"
+        "inputs = {\n"
+        "  environment = local.environment\n"
+        "}\n"
+    )
+
+
 def _deterministic_envelope_files(
     intent: InfrastructureIntent, change_plan: ChangePlan
 ) -> dict[str, str]:
     """Return the structural-envelope files rendered deterministically, by path.
 
     These are whole files with no per-request content — the model never sees them,
-    so it cannot drop a `locals` block, mangle a comment, or hallucinate a backend.
-    Currently covers `environments/<env>/root.hcl`; Terraform/Terragrunt validate
-    and plan remain the authoritative correctness gate.
+    so it cannot drop a `locals` block, mangle a comment, hallucinate a backend, or
+    misauthor the shared-networking foundation. Covers `environments/<env>/root.hcl`,
+    the foundation module (sourced from `terraform-aws-modules/vpc`), and the
+    foundation stack config. Terraform/Terragrunt validate and plan remain the
+    authoritative correctness gate.
     """
     files: dict[str, str] = {}
     planned = set(change_plan.files_to_generate)
@@ -1508,6 +1616,12 @@ def _deterministic_envelope_files(
                 bucket=backend.bucket,
                 lock_table=backend.lock_table,
             )
+        foundation_stack = f"environments/{env}/foundation/terragrunt.hcl"
+        if foundation_stack in planned:
+            files[foundation_stack] = _render_foundation_stack_terragrunt()
+    for path, content in _FOUNDATION_MODULE_FILES.items():
+        if path in planned:
+            files[path] = content
     return files
 
 
