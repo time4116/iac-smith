@@ -59,44 +59,35 @@ INTENT_JSON_SCHEMA: dict[str, Any] = {
 
 
 class BedrockRuntime(Protocol):
-    def invoke_model(self, **kwargs: Any) -> dict[str, Any]: ...
-
-
-def _extract_text_from_bedrock_payload(payload: dict[str, Any]) -> str:
-    if isinstance(payload.get("content"), list):
-        parts = []
-        for block in payload["content"]:
-            if isinstance(block, dict) and isinstance(block.get("text"), str):
-                parts.append(block["text"])
-        if parts:
-            return "\n".join(parts)
-    if isinstance(payload.get("outputText"), str):
-        return payload["outputText"]
-    if isinstance(payload.get("completion"), str):
-        return payload["completion"]
-    return json.dumps(payload)
+    def invoke_model_with_response_stream(self, **kwargs: Any) -> dict[str, Any]: ...
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
+    # On failure include a snippet of what the model actually returned: a
+    # silently-ignored structured-output contract surfaces here as prose, and the
+    # raw text is the only thing that tells us which model/profile misbehaved.
+    snippet = text.strip()[:300]
     try:
         value = json.loads(text)
     except json.JSONDecodeError:
         start = text.find("{")
         end = text.rfind("}")
         if start == -1 or end == -1 or end <= start:
-            raise ValueError("Bedrock intent response must contain a valid JSON object.") from None
+            raise ValueError(
+                f"Bedrock intent response must contain a valid JSON object; got: {snippet!r}"
+            ) from None
         try:
             value = json.loads(text[start : end + 1])
         except json.JSONDecodeError as exc:
-            raise ValueError("Bedrock intent response must contain a valid JSON object.") from exc
+            raise ValueError(
+                f"Bedrock intent response must contain a valid JSON object; got: {snippet!r}"
+            ) from exc
     if not isinstance(value, dict):
         raise ValueError("Bedrock intent response must be a JSON object.")
     return value
 
 
-def parse_bedrock_intent_payload(raw_payload: str) -> InfrastructureIntent:
-    payload = _extract_json_object(raw_payload)
-    text = _extract_text_from_bedrock_payload(payload)
+def parse_bedrock_intent_text(text: str) -> InfrastructureIntent:
     intent_payload = _extract_json_object(text)
     if "raw_request" not in intent_payload:
         intent_payload["raw_request"] = ""
@@ -126,8 +117,14 @@ class BedrockIntentClient:
         return self._bedrock_runtime
 
     def parse_issue(self, issue_text: str) -> InfrastructureIntent:
+        # Stream the response: the Sonnet global inference profile honours the
+        # output_config structured-output contract over the streaming endpoint
+        # but silently ignores it on non-streaming InvokeModel (returning prose),
+        # so intent must use the same streamed path that file generation does.
+        from iac_smith.dynamic_terraform import _read_stream_document
+
         prompt = build_intent_prompt(issue_text)
-        response = self.bedrock_runtime.invoke_model(
+        response = self.bedrock_runtime.invoke_model_with_response_stream(
             modelId=self.model_id,
             contentType="application/json",
             accept="application/json",
@@ -136,20 +133,15 @@ class BedrockIntentClient:
                     "anthropic_version": "bedrock-2023-05-31",
                     "max_tokens": 1200,
                     "temperature": 0,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": prompt,
-                        }
-                    ],
+                    "messages": [{"role": "user", "content": prompt}],
                     "output_config": {
                         "format": {"type": "json_schema", "schema": INTENT_JSON_SCHEMA}
                     },
                 }
             ),
         )
-        raw_body = response["body"].read().decode("utf-8")
-        intent = parse_bedrock_intent_payload(raw_body)
+        text, _stop_reason = _read_stream_document(response)
+        intent = parse_bedrock_intent_text(text)
         return intent.model_copy(update={"raw_request": issue_text})
 
 
