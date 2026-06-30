@@ -94,17 +94,25 @@ def parse_bedrock_intent_text(text: str) -> InfrastructureIntent:
     return InfrastructureIntent.model_validate(intent_payload)
 
 
+_DEFAULT_INTENT_MAX_TOKENS = 4096
+
+
 class BedrockIntentClient:
     def __init__(
         self,
         model_id: str | None = None,
         bedrock_runtime: BedrockRuntime | None = None,
+        *,
+        max_tokens: int | None = None,
     ) -> None:
         self.model_id = model_id or os.getenv("BEDROCK_MODEL_ID", "")
         if not self.model_id:
             raise ValueError(
                 "BEDROCK_MODEL_ID must be set to a Bedrock model ID or inference profile ARN"
             )
+        self.max_tokens = max_tokens or int(
+            os.getenv("IAC_SMITH_INTENT_MAX_TOKENS", str(_DEFAULT_INTENT_MAX_TOKENS))
+        )
         self._bedrock_runtime = bedrock_runtime
 
     @property
@@ -131,7 +139,7 @@ class BedrockIntentClient:
             body=json.dumps(
                 {
                     "anthropic_version": "bedrock-2023-05-31",
-                    "max_tokens": 1200,
+                    "max_tokens": self.max_tokens,
                     "temperature": 0,
                     "messages": [{"role": "user", "content": prompt}],
                     "output_config": {
@@ -140,7 +148,14 @@ class BedrockIntentClient:
                 }
             ),
         )
-        text, _stop_reason = _read_stream_document(response)
+        text, stop_reason = _read_stream_document(response)
+        if stop_reason == "max_tokens":
+            # A truncated structured-output response is unclosed JSON; say so
+            # plainly instead of surfacing a confusing "invalid JSON object".
+            raise ValueError(
+                "Bedrock intent response was truncated at max_tokens "
+                f"({self.max_tokens}); raise IAC_SMITH_INTENT_MAX_TOKENS."
+            )
         intent = parse_bedrock_intent_text(text)
         return intent.model_copy(update={"raw_request": issue_text})
 

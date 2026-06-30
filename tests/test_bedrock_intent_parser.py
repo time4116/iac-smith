@@ -33,13 +33,14 @@ def _stream_response(text: str, stop_reason: str = "end_turn") -> dict:
 
 
 class FakeBedrockRuntime:
-    def __init__(self, text: str):
+    def __init__(self, text: str, stop_reason: str = "end_turn"):
         self.text = text
+        self.stop_reason = stop_reason
         self.calls = []
 
     def invoke_model_with_response_stream(self, **kwargs):
         self.calls.append(kwargs)
-        return _stream_response(self.text)
+        return _stream_response(self.text, self.stop_reason)
 
 
 def _intent_text(**overrides) -> str:
@@ -131,6 +132,35 @@ def test_bedrock_client_invokes_configured_model_without_hardcoded_model_id():
     body = json.loads(runtime.calls[0]["body"])
     assert body["anthropic_version"] == "bedrock-2023-05-31"
     assert "Return only JSON" in body["messages"][0]["content"]
+
+
+def test_bedrock_client_defaults_to_generous_max_tokens():
+    runtime = FakeBedrockRuntime(_intent_text())
+    client = BedrockIntentClient(model_id="anthropic.test-model", bedrock_runtime=runtime)
+    client.parse_issue("Create an Aurora platform")
+
+    body = json.loads(runtime.calls[0]["body"])
+    assert body["max_tokens"] == 4096
+
+
+def test_bedrock_client_max_tokens_env_override(monkeypatch):
+    monkeypatch.setenv("IAC_SMITH_INTENT_MAX_TOKENS", "9000")
+    runtime = FakeBedrockRuntime(_intent_text())
+    client = BedrockIntentClient(model_id="anthropic.test-model", bedrock_runtime=runtime)
+    client.parse_issue("Create an Aurora platform")
+
+    body = json.loads(runtime.calls[0]["body"])
+    assert body["max_tokens"] == 9000
+
+
+def test_bedrock_client_rejects_truncated_response():
+    # A response cut off at max_tokens is unclosed JSON; surface that, not a
+    # confusing "invalid JSON object" error.
+    runtime = FakeBedrockRuntime(_intent_text()[:120], stop_reason="max_tokens")
+    client = BedrockIntentClient(model_id="anthropic.test-model", bedrock_runtime=runtime)
+
+    with pytest.raises(ValueError, match="truncated at max_tokens"):
+        client.parse_issue("Create an Aurora platform")
 
 
 def test_bedrock_client_streams_with_structured_json_output():
