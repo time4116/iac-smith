@@ -81,7 +81,7 @@ jobs:
           IAC_SMITH_ISSUE_NUMBER: ${{ inputs.issue_number || github.event.issue.number }}
           BEDROCK_MODEL_ID: ${{ secrets.BEDROCK_MODEL_ID }}
           # Stronger model used ONLY for the final runtime repair attempt, on the
-          # failing files, when the primary (Haiku) model cannot self-correct a
+          # failing files, when the primary model cannot self-correct a
           # provider-schema error. Unset/equal to BEDROCK_MODEL_ID disables it.
           BEDROCK_ESCALATION_MODEL_ID: ${{ vars.BEDROCK_ESCALATION_MODEL_ID || 'global.anthropic.claude-sonnet-4-6' }}
           IAC_SMITH_TARGET_REPO: time4116/iac-smith-demo-infra
@@ -89,5 +89,9 @@ jobs:
           # for dependencies). Requires the assumed AWS role to have read/describe
           # permissions for the providers being planned.
           IAC_SMITH_RUNTIME_PLAN: "1"
+          # Hard wall-clock budget for the whole run. The code default is 360s;
+          # Sonnet as the primary model is slower per file, so allow more headroom
+          # here (tune via the IAC_SMITH_RUN_TIMEOUT repo variable).
+          IAC_SMITH_RUN_TIMEOUT: ${{ vars.IAC_SMITH_RUN_TIMEOUT || '600' }}
           AWS_REGION: ${{ vars.AWS_REGION || 'us-west-2' }}
         run: uv run python -m iac_smith.cli
