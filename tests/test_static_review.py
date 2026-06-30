@@ -18,6 +18,7 @@ from iac_smith.nodes.static_review import (
     _find_duplicate_named_resources,
     _find_hardcoded_secret_values,
     _find_malformed_terraform_declarations,
+    _find_placeholder_input_values,
     _find_redacted_placeholders,
     _find_singleton_resource_duplication,
     _find_terragrunt_dangling_dependencies,
@@ -31,6 +32,58 @@ from iac_smith.nodes.static_review import (
     missing_foundation_dependency_targets,
     static_review_generated_files,
 )
+
+
+class TestPlaceholderInputValues:
+    def test_flags_placeholder_vpc_and_subnet_ids(self) -> None:
+        # The exact false-green from issue #59 PR #60: placeholder ids pass plan but
+        # fail at apply.
+        files = {
+            "environments/non-prod/rds-aurora/terragrunt.hcl": (
+                "inputs = {\n"
+                '  vpc_id             = "vpc-placeholder"\n'
+                '  private_subnet_ids = ["subnet-placeholder-1", "subnet-placeholder-2"]\n'
+                "}\n"
+            )
+        }
+
+        errors = _find_placeholder_input_values(files)
+
+        assert any("vpc-placeholder" in e for e in errors)
+        assert any("subnet-placeholder-1" in e for e in errors)
+
+    def test_flags_replace_with_token(self) -> None:
+        files = {"modules/x/main.tf": 'cidr = "REPLACE_WITH_VPC_CIDR"\n'}
+        assert _find_placeholder_input_values(files)
+
+    def test_ignores_comment_telling_user_to_replace(self) -> None:
+        # A "# Replace with the real VPC id" comment must not itself be flagged.
+        files = {
+            "environments/non-prod/rds-aurora/terragrunt.hcl": (
+                "inputs = {\n  vpc_id = data.aws_vpc.main.id # Replace with real id\n}\n"
+            )
+        }
+        assert _find_placeholder_input_values(files) == []
+
+    def test_ignores_real_values(self) -> None:
+        files = {
+            "environments/non-prod/rds-aurora/terragrunt.hcl": (
+                'inputs = {\n  vpc_id = "vpc-0a1b2c3d4e5f"\n  vpc_cidr = "10.0.0.0/16"\n}\n'
+            )
+        }
+        assert _find_placeholder_input_values(files) == []
+
+    def test_placeholder_fails_full_static_review(self) -> None:
+        files = {
+            "environments/non-prod/rds-aurora/terragrunt.hcl": (
+                'inputs = {\n  vpc_id = "vpc-placeholder"\n}\n'
+            )
+        }
+
+        result = static_review_generated_files(files)
+
+        assert result.status == ValidationStatus.FAILED
+        assert any("placeholder value" in e for e in result.errors)
 
 
 class TestMissingFoundationDependencyTargets:
