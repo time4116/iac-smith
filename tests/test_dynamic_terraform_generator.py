@@ -481,6 +481,54 @@ def test_generate_files_renders_root_hcl_deterministically():
     assert len(runtime.calls) == len(files)
 
 
+def test_generate_files_renders_foundation_from_registry_module():
+    from iac_smith.nodes.static_review import static_review_generated_files
+
+    plan = ChangePlan(
+        stack_name="foundation",
+        environments=["non-prod"],
+        files_to_generate=[
+            "environments/non-prod/root.hcl",
+            "environments/non-prod/foundation/terragrunt.hcl",
+            "modules/foundation/main.tf",
+            "modules/foundation/variables.tf",
+            "modules/foundation/outputs.tf",
+            "modules/foundation/versions.tf",
+        ],
+        backend_resources={"non-prod": BackendResource(bucket="b", lock_table="l")},
+        summary=["foundation"],
+    )
+    # Every planned file is deterministic envelope — the model is never called.
+    runtime = FakeBedrockRuntime({})
+    generator = BedrockTerraformGenerator(model_id="anthropic.test-model", bedrock_runtime=runtime)
+
+    result = generator.generate_files(
+        intent=_intent(),
+        change_plan=plan,
+        repo_patterns=RepoPatterns(),
+        ruleset=_ruleset(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+
+    assert runtime.calls == []
+    main = result["modules/foundation/main.tf"]
+    assert 'source  = "terraform-aws-modules/vpc/aws"' in main
+    assert 'version = "~> 5.0"' in main
+    outputs = result["modules/foundation/outputs.tf"]
+    # Outputs match the names workloads consume via dependency.foundation.outputs.*
+    assert "value       = module.vpc.vpc_id" in outputs
+    assert "value       = module.vpc.private_subnets" in outputs
+    assert "value       = module.vpc.public_subnets" in outputs
+    assert "value       = module.vpc.vpc_cidr_block" in outputs
+    # The foundation stack carries the deterministic source and a normalized envelope.
+    stack = result["environments/non-prod/foundation/terragrunt.hcl"]
+    assert 'source = "../../../modules/foundation"' in stack
+    assert 'include "root" {' in stack
+    assert 'environment = "non-prod"' in stack
+    # The deterministic foundation passes static review on its own.
+    assert static_review_generated_files(result).errors == []
+
+
 def test_render_root_hcl_emits_locals_remote_state_and_provider():
     from iac_smith.dynamic_terraform import _render_root_hcl
 
@@ -1309,9 +1357,9 @@ def test_variables_tf_not_repaired_when_only_main_tf_has_duplicate_declarations(
     )
 
     files = {
-        "modules/foundation/main.tf": main_tf_bad,
-        "modules/foundation/variables.tf": variables_tf,
-        "modules/foundation/outputs.tf": 'output "vpc_id" { value = aws_vpc.this.id }\n',
+        "modules/networking/main.tf": main_tf_bad,
+        "modules/networking/variables.tf": variables_tf,
+        "modules/networking/outputs.tf": 'output "vpc_id" { value = aws_vpc.this.id }\n',
     }
 
     call_count_by_path: dict[str, int] = {}
@@ -1330,7 +1378,7 @@ def test_variables_tf_not_repaired_when_only_main_tf_has_duplicate_declarations(
             in_repair = "Static review failures:" in prompt
             content = (
                 main_tf_fixed
-                if (in_repair and path == "modules/foundation/main.tf")
+                if (in_repair and path == "modules/networking/main.tf")
                 else files[path]
             )
             return {
@@ -1347,11 +1395,11 @@ def test_variables_tf_not_repaired_when_only_main_tf_has_duplicate_declarations(
 
     runtime = TrackingBedrockRuntime()
     plan = ChangePlan(
-        stack_name="foundation",
+        stack_name="networking",
         environments=["non-prod"],
         files_to_generate=list(files),
         backend_resources={},
-        summary=["foundation module"],
+        summary=["networking module"],
     )
     generator = BedrockTerraformGenerator(
         model_id="anthropic.test-model",
@@ -1366,10 +1414,10 @@ def test_variables_tf_not_repaired_when_only_main_tf_has_duplicate_declarations(
         target_repo="time4116/iac-smith-demo-infra",
     )
 
-    assert result["modules/foundation/main.tf"] == main_tf_fixed
-    assert result["modules/foundation/variables.tf"] == variables_tf
-    assert call_count_by_path.get("modules/foundation/main.tf", 0) == 2
-    assert call_count_by_path.get("modules/foundation/variables.tf", 0) == 1
+    assert result["modules/networking/main.tf"] == main_tf_fixed
+    assert result["modules/networking/variables.tf"] == variables_tf
+    assert call_count_by_path.get("modules/networking/main.tf", 0) == 2
+    assert call_count_by_path.get("modules/networking/variables.tf", 0) == 1
 
 
 class TestExtractModuleNames:
