@@ -16,8 +16,6 @@ from iac_smith.models.repo_patterns import RepoPatterns
 from iac_smith.models.rules import Ruleset
 from iac_smith.nodes.static_review import (
     _extract_hcl_block_body,
-    _extract_hcl_block_keys,
-    _strip_hcl_comments,
     static_review_generated_files,
 )
 
@@ -43,7 +41,6 @@ _ADD_VARIABLE_TO_RE = re.compile(r'Add variable "[^"]+" to (\S+)\.')
 # assignments into the comment and produce invalid HCL (`= "x"} block.`).
 _TG_LOCALS_HEADER_RE = re.compile(r"^[ \t]*locals\s*\{", re.MULTILINE)
 _TG_INCLUDE_RE = re.compile(r'^\s*include\s*(?:"[^"]+"\s*)?\{', re.MULTILINE)
-_TG_LOCAL_REF_RE = re.compile(r"\blocal\.([A-Za-z0-9_]+)")
 _SIMPLE_LOCAL_ASSIGN_RE = re.compile(r"^([A-Za-z0-9_]+)\s*=\s*(.+?)\s*$")
 
 
@@ -86,42 +83,75 @@ def _parse_simple_locals(content: str) -> dict[str, str]:
     return result
 
 
-def _inject_missing_child_locals(generated_files: dict[str, str]) -> None:
-    """Declare root-derived locals that child Terragrunt stacks reference but drop.
+def _remove_hcl_block(content: str, header_re: re.Pattern[str]) -> str:
+    """Remove the first brace-balanced HCL block whose header matches `header_re`.
 
-    Terragrunt does not expose a parent config's locals as `local.*` in a child,
-    so a stack that references `local.environment`/`local.aws_region` without its
-    own `locals {}` declaration fails at init with "Unsupported attribute". The
-    model drops this block unreliably and the repair loop oscillates on it, so fix
-    it deterministically: copy each referenced-but-undeclared local from the
-    environment root config into the child's `locals {}` block.
+    Naive brace counting is sufficient for the `include`/`locals` blocks this is
+    used on — their bodies hold only paths and scalar assignments, never literal
+    `{`/`}` in strings.
     """
-    root_locals: dict[str, str] = {}
-    for path in sorted(generated_files, key=lambda p: p.count("/")):
-        if _is_root_terragrunt(path):
-            root_locals.update(_parse_simple_locals(generated_files[path]))
-    if not root_locals:
-        return
+    m = header_re.search(content)
+    if not m:
+        return content
+    try:
+        brace = content.index("{", m.start())
+    except ValueError:
+        return content
+    depth = 0
+    for i in range(brace, len(content)):
+        if content[i] == "{":
+            depth += 1
+        elif content[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return content[: m.start()] + content[i + 1 :].lstrip("\n")
+    return content
+
+
+def _child_envelope_header(root_locals: dict[str, str]) -> str:
+    """Render the deterministic `include "root"` + `locals` header for a child stack."""
+    lines = [
+        'include "root" {',
+        '  path = find_in_parent_folders("root.hcl")',
+        "}",
+        "",
+        "locals {",
+        *[f"  {name} = {value}" for name, value in root_locals.items()],
+        "}",
+        "",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _normalize_child_terragrunt(generated_files: dict[str, str]) -> None:
+    """Rewrite each child stack's structural envelope deterministically.
+
+    Terragrunt does not expose a parent's locals as `local.*` in a child, so a
+    child must redeclare `environment`/`aws_region` itself or fail at init. Rather
+    than coaxing the model and patching what it drops, replace each child's
+    `include` and `locals` blocks with deterministic ones derived from the
+    (deterministic) environment root config, leaving the model's
+    `terraform`/`dependency`/`inputs` blocks untouched. This guarantees a correct,
+    parseable envelope regardless of what the model emitted for it.
+    """
+    root_locals_by_env: dict[str, dict[str, str]] = {}
+    for path, content in generated_files.items():
+        parts = path.split("/")
+        if _is_root_terragrunt(path) and len(parts) == 3:  # environments/<env>/root.hcl
+            root_locals_by_env[parts[1]] = _parse_simple_locals(content)
 
     for path, content in list(generated_files.items()):
         if not path.endswith("terragrunt.hcl") or _is_root_terragrunt(path):
             continue
-        if not _TG_INCLUDE_RE.search(content):
+        parts = path.split("/")
+        if len(parts) < 4 or parts[0] != "environments":
             continue
-        declared = _extract_hcl_block_keys(content, _TG_LOCALS_HEADER_RE)
-        referenced = set(_TG_LOCAL_REF_RE.findall(_strip_hcl_comments(content)))
-        missing = [n for n in sorted(referenced - declared) if n in root_locals]
-        if not missing:
+        root_locals = root_locals_by_env.get(parts[1])
+        if not root_locals:
             continue
-        inject = "".join(f"  {n} = {root_locals[n]}\n" for n in missing)
-        header = _TG_LOCALS_HEADER_RE.search(content)
-        if header:
-            brace = content.index("{", header.start())
-            generated_files[path] = (
-                content[: brace + 1] + "\n" + inject.rstrip("\n") + content[brace + 1 :]
-            )
-        else:
-            generated_files[path] = f"locals {{\n{inject}}}\n\n" + content
+        body = _remove_hcl_block(content, _TG_LOCALS_HEADER_RE)
+        body = _remove_hcl_block(body, _TG_INCLUDE_RE)
+        generated_files[path] = _child_envelope_header(root_locals) + body.lstrip("\n")
 
 
 _SOURCE_PINPOINT_RE = re.compile(r"\bon\s+(?P<file>[^\s,]+)\s+line\s+\d+")
@@ -1876,9 +1906,9 @@ class BedrockTerraformGenerator:
 
         seen_issue_sets: list[frozenset[str]] = []
         for repair_attempt in range(self.max_repair_attempts + 1):
-            # Deterministically declare root-derived locals the model dropped, so
-            # the orphaned-locals check stops the repair loop oscillating on them.
-            _inject_missing_child_locals(generated_files)
+            # Rewrite each child stack's include/locals envelope deterministically so
+            # the model can neither drop nor mangle it (the rest of the file is its own).
+            _normalize_child_terragrunt(generated_files)
             validation = static_review_generated_files(generated_files)
             # Autofix both security errors and structural issues; advisory
             # warnings (public ingress, docs markers) are surfaced for review,
@@ -2064,5 +2094,5 @@ class BedrockTerraformGenerator:
                 for path, content in future.result():
                     repaired_files[path] = content
 
-        _inject_missing_child_locals(repaired_files)
+        _normalize_child_terragrunt(repaired_files)
         return {path: repaired_files[path] for path in change_plan.files_to_generate}

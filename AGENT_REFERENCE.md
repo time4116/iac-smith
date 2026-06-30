@@ -369,6 +369,7 @@ Some planned files are pure **structural envelope** — invariant apart from env
 
 - **Workflows** (`.github/workflows/*.yml`) — model-generated then overwritten via `_apply_workflow_overrides` (`_build_pr_check_workflow` / `_build_apply_workflow`).
 - **`environments/<env>/root.hcl`** — rendered by `_render_root_hcl` (via `_deterministic_envelope_files`) and excluded from both generation and the repair loop. Guarantees the root `locals` (`environment`, `aws_region`) always exist, which child stacks redeclare. This is the canonical home for new envelope files as more of the layout becomes deterministic.
+- **Child stack `terragrunt.hcl` envelope** — `_normalize_child_terragrunt` rewrites every child stack's `include` and `locals` blocks deterministically from the env's root locals (before static review and before each disk write), leaving the model's `terraform`/`dependency`/`inputs` untouched. The child always gets a correct, parseable `include "root"` + `locals { environment, aws_region }` regardless of what the model emitted — so a missing/dropped/mangled envelope is structurally impossible. This replaced the additive `_inject_missing_child_locals` patcher; the orphaned-locals static check remains only as a backstop for trees assembled without a root config.
 
 ---
 
