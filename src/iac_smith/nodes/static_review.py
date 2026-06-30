@@ -481,6 +481,46 @@ def _find_terragrunt_include_cycles(generated_files: dict[str, str]) -> list[str
     return errors
 
 
+# A quoted string value that is obviously a stand-in, not a real value:
+# `vpc-placeholder`, `subnet-placeholder-1`, `REPLACE_WITH_VPC_CIDR`, `changeme`,
+# `<your-vpc-id>`. Keyed on placeholder tokens, never on a specific argument name,
+# so it stays generic across providers/resources.
+_PLACEHOLDER_VALUE_RE = re.compile(
+    r'"[^"\n]*(?:placeholder|replace[_-]?with|change[_-]?me|to[_-]be[_-]replaced|<[^">\n]+>)[^"\n]*"',
+    re.IGNORECASE,
+)
+
+
+def _find_placeholder_input_values(generated_files: dict[str, str]) -> list[str]:
+    """Flag literal placeholder values in generated Terraform/Terragrunt.
+
+    Values like ``vpc-placeholder``, ``subnet-placeholder-1`` or
+    ``REPLACE_WITH_VPC_CIDR`` pass ``terraform plan`` — resource ids are not
+    resolved until apply — but fail at apply, a false green. The model reaches for
+    them when a required value (often a VPC or subnet id) has no real source. The
+    fix is a real value, a Terragrunt ``dependency`` output, or creating the
+    resource (e.g. a foundation stack) that produces it. Comments are stripped so a
+    "replace with the real id" note is not itself flagged.
+    """
+    errors: list[str] = []
+    for path, content in generated_files.items():
+        if not path.endswith((".tf", ".hcl")):
+            continue
+        seen: set[str] = set()
+        for match in _PLACEHOLDER_VALUE_RE.finditer(_strip_hcl_comments(content)):
+            value = match.group(0)
+            if value in seen:
+                continue
+            seen.add(value)
+            errors.append(
+                f"`{path}` uses placeholder value {value}. Placeholder values pass "
+                "`terraform plan` but fail at apply — supply a real value, wire it from a "
+                "Terragrunt `dependency` output, or create the resource (e.g. a foundation "
+                "stack) that produces it."
+            )
+    return errors
+
+
 def _find_redacted_placeholders(generated_files: dict[str, str]) -> list[str]:
     """Flag `***` redaction artifacts in generated workflow YAML files.
 
@@ -1170,6 +1210,7 @@ def static_review_generated_files(
 
     # Security/safety — blocking.
     errors.extend(_find_redacted_placeholders(generated_files))
+    errors.extend(_find_placeholder_input_values(generated_files))
 
     # Structural/semantic — advisory + autofix, never blocking.
     structural.extend(_find_undeclared_module_references(generated_files))
