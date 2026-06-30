@@ -147,12 +147,40 @@ def make_code_generator(file_generator_fn: FileGenerator):
         if validation and validation.status == ValidationStatus.FAILED:
             validation_errors = validation.errors
 
-        # If we are already validated or have no errors but files exist, return.
-        if state.get("generated_files") and not validation_errors:
+        raw_repo_path = state.get("target_repo_path")
+        repo_path = Path(raw_repo_path) if raw_repo_path else None
+        existing = state.get("generated_files") or {}
+        plan_files = state["change_plan"].files_to_generate
+        missing = [path for path in plan_files if path not in existing]
+
+        # Everything planned is generated and nothing failed validation: reuse.
+        if existing and not missing and not validation_errors:
             return {**state, "status": "generated"}
 
-        # Perform Bedrock generation or recovery attempt
-        raw_repo_path = state.get("target_repo_path")
+        # The plan grew (a foundation stack was scaffolded) but the existing files
+        # are fine — generate only the newly-planned files and keep the rest, rather
+        # than re-running every file through the model.
+        if existing and missing and not validation_errors:
+            delta_plan = state["change_plan"].model_copy(
+                update={"files_to_generate": missing}
+            )
+            new_files = _call_file_generator(
+                file_generator_fn,
+                intent=state["intent"],
+                change_plan=delta_plan,
+                repo_patterns=state["repo_patterns"],
+                ruleset=state.get("ruleset"),
+                target_repo=state["target_repo"],
+                repo_path=repo_path,
+                blackboard=state.get("blackboard"),
+            )
+            return {
+                **state,
+                "generated_files": {**existing, **new_files},
+                "status": "generated",
+            }
+
+        # First pass, or a repair with validation errors: full (re)generation.
         generated_files = _call_file_generator(
             file_generator_fn,
             intent=state["intent"],
@@ -160,7 +188,7 @@ def make_code_generator(file_generator_fn: FileGenerator):
             repo_patterns=state["repo_patterns"],
             ruleset=state.get("ruleset"),
             target_repo=state["target_repo"],
-            repo_path=Path(raw_repo_path) if raw_repo_path else None,
+            repo_path=repo_path,
             blackboard=state.get("blackboard"),
         )
         return {
@@ -199,11 +227,12 @@ def validation_runner(state: IaCSmithState) -> IaCSmithState:
                     **state,
                     "change_plan": add_foundation_stack(state["change_plan"]),
                     "foundation_added": True,
-                    # Drop the current output so code_generator regenerates against the
-                    # expanded plan (it reuses existing files when validation has no
-                    # errors, and the foundation dependency may not itself fail review).
-                    "generated_files": {},
-                    "validation": validation,
+                    # Keep the already-generated workload files — they don't change
+                    # when a foundation stack is added. code_generator regenerates only
+                    # the newly-planned foundation files (the delta) and merges them,
+                    # instead of re-running every file through the model again. Clear
+                    # validation so that delta path is taken rather than a full repair.
+                    "validation": None,
                     "blackboard": blackboard,
                     "status": "needs_repair",
                 }

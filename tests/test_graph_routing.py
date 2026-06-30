@@ -1,4 +1,9 @@
-from iac_smith.graph import build_graph, default_file_generator, validation_runner
+from iac_smith.graph import (
+    build_graph,
+    default_file_generator,
+    make_code_generator,
+    validation_runner,
+)
 from iac_smith.models.change_plan import BackendResource, ChangePlan
 from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
@@ -326,6 +331,56 @@ def test_validation_runner_scaffolds_foundation_when_workload_depends_on_it():
     )
     # The structural expansion does not consume the repair budget.
     assert "repair_attempts" not in result
+
+
+def test_code_generator_regenerates_only_new_files_after_plan_expands():
+    # After a foundation scaffold expands the plan, the already-generated workload
+    # files must be preserved and only the newly-planned files generated — not the
+    # whole plan re-run through the model.
+    requested: list[list[str]] = []
+
+    def generator(*args, **kwargs):
+        paths = kwargs["change_plan"].files_to_generate
+        requested.append(list(paths))
+        return {path: f"# generated {path}" for path in paths}
+
+    plan = ChangePlan(
+        stack_name="rds-aurora",
+        environments=["non-prod"],
+        files_to_generate=[
+            "environments/non-prod/rds-aurora/terragrunt.hcl",
+            "environments/non-prod/foundation/terragrunt.hcl",
+            "modules/foundation/main.tf",
+        ],
+        backend_resources={"non-prod": BackendResource(bucket="b", lock_table="l")},
+        summary=["Generate rds-aurora"],
+    )
+    node = make_code_generator(generator)
+    state = IaCSmithState(
+        intent=_workload_intent_parser("Create rds-aurora"),
+        repo_patterns=RepoPatterns(),
+        target_repo="time4116/iac-smith-demo-infra",
+        change_plan=plan,
+        foundation_added=True,
+        generated_files={
+            "environments/non-prod/rds-aurora/terragrunt.hcl": "# existing workload"
+        },
+    )
+
+    result = node(state)
+
+    assert requested == [
+        [
+            "environments/non-prod/foundation/terragrunt.hcl",
+            "modules/foundation/main.tf",
+        ]
+    ]
+    # Existing workload file is preserved untouched; only the delta is added.
+    assert (
+        result["generated_files"]["environments/non-prod/rds-aurora/terragrunt.hcl"]
+        == "# existing workload"
+    )
+    assert "modules/foundation/main.tf" in result["generated_files"]
 
 
 def test_validation_runner_scaffolds_foundation_only_once():
