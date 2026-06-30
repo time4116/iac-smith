@@ -161,9 +161,7 @@ def make_code_generator(file_generator_fn: FileGenerator):
         # are fine — generate only the newly-planned files and keep the rest, rather
         # than re-running every file through the model.
         if existing and missing and not validation_errors:
-            delta_plan = state["change_plan"].model_copy(
-                update={"files_to_generate": missing}
-            )
+            delta_plan = state["change_plan"].model_copy(update={"files_to_generate": missing})
             new_files = _call_file_generator(
                 file_generator_fn,
                 intent=state["intent"],

@@ -362,9 +362,7 @@ def test_code_generator_regenerates_only_new_files_after_plan_expands():
         target_repo="time4116/iac-smith-demo-infra",
         change_plan=plan,
         foundation_added=True,
-        generated_files={
-            "environments/non-prod/rds-aurora/terragrunt.hcl": "# existing workload"
-        },
+        generated_files={"environments/non-prod/rds-aurora/terragrunt.hcl": "# existing workload"},
     )
 
     result = node(state)
