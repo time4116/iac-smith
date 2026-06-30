@@ -1,8 +1,11 @@
 import os
 import re
+import signal
 import subprocess
 import tempfile
-from collections.abc import Callable, Mapping
+import threading
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
@@ -437,6 +440,60 @@ def _maybe_comment_on_block(
         _log(f"IaC Smith: could not post block summary to the issue: {exc}")
 
 
+_DEFAULT_RUN_TIMEOUT = 360  # 6 minutes
+
+
+def _run_timeout(env: Mapping[str, str]) -> int:
+    """Wall-clock budget for one run, in seconds (``IAC_SMITH_RUN_TIMEOUT``).
+
+    The per-command terraform/terragrunt timeouts bound a single subprocess, but a
+    run can still accumulate many generation/repair/plan cycles. This is the hard
+    ceiling on the whole thing. ``0`` (or a bad value) disables it.
+    """
+    raw = env.get("IAC_SMITH_RUN_TIMEOUT")
+    if raw is None:
+        return _DEFAULT_RUN_TIMEOUT
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return _DEFAULT_RUN_TIMEOUT
+
+
+class _RunTimeout(Exception):
+    """Raised when a run exceeds its wall-clock budget."""
+
+
+@contextmanager
+def _run_deadline(seconds: int) -> Iterator[None]:
+    """Hard-stop the enclosed work after ``seconds`` via SIGALRM.
+
+    SIGALRM interrupts even a blocked terraform/terragrunt subprocess: the syscall
+    returns EINTR, the handler raises ``_RunTimeout``, and ``subprocess.run`` kills
+    its child as it unwinds. Best-effort — silently a no-op where SIGALRM is missing
+    (non-Unix) or we are not on the main thread (e.g. tests), since per-command
+    timeouts still bound individual operations there.
+    """
+    can_arm = (
+        seconds > 0
+        and hasattr(signal, "SIGALRM")
+        and threading.current_thread() is threading.main_thread()
+    )
+    if not can_arm:
+        yield
+        return
+
+    def _handler(signum: int, frame: object) -> None:
+        raise _RunTimeout
+
+    previous = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 def run_iac_smith(
     env: Mapping[str, str],
     issue_client: IssueClient,
@@ -446,13 +503,25 @@ def run_iac_smith(
     comment_client: IssueCommentClient | None = None,
     summarizer: Callable[[str], str] | None = None,
 ) -> IaCSmithRunResult:
-    result = _run_iac_smith_core(
-        env,
-        issue_client=issue_client,
-        pr_client=pr_client,
-        intent_parser_fn=intent_parser_fn,
-        file_generator_fn=file_generator_fn,
-    )
+    timeout = _run_timeout(env)
+    try:
+        with _run_deadline(timeout):
+            result = _run_iac_smith_core(
+                env,
+                issue_client=issue_client,
+                pr_client=pr_client,
+                intent_parser_fn=intent_parser_fn,
+                file_generator_fn=file_generator_fn,
+            )
+    except _RunTimeout:
+        _log(f"IaC Smith: run exceeded the {timeout}s time budget; hard-failing.")
+        result = IaCSmithRunResult(
+            status="blocked",
+            block_reason=(
+                f"Run exceeded the {timeout}s wall-clock budget (IAC_SMITH_RUN_TIMEOUT) "
+                "and was hard-stopped before opening a pull request."
+            ),
+        )
     _maybe_comment_on_block(
         env=env, comment_client=comment_client, summarizer=summarizer, result=result
     )
