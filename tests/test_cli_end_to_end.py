@@ -5,6 +5,7 @@ from iac_smith import cli
 from iac_smith.blackboard import TerraformContract
 from iac_smith.cli import (
     IaCSmithRunResult,
+    _apply_with_child_locals,
     _build_escalation_repairer,
     _descriptive_title,
     _maybe_comment_on_block,
@@ -232,6 +233,31 @@ def _fake_file_generator(
         "modules/vpc-foundation/versions.tf": "",
         "modules/vpc-foundation/README.md": readme,
     }
+
+
+def test_apply_with_child_locals_injects_across_full_tree(tmp_path: Path):
+    # A child stack generated in isolation (e.g. the foundation delta) never shares
+    # a batch with root.hcl, so its local.* references are undeclared. Writing the
+    # full tree must inject them from the root before terragrunt parses the files.
+    result = {
+        "generated_files": {
+            "environments/non-prod/root.hcl": (
+                'locals {\n  environment = "non-prod"\n  aws_region  = "us-east-1"\n}\n'
+            ),
+            "environments/non-prod/foundation/terragrunt.hcl": (
+                'include "root" { path = find_in_parent_folders("root.hcl") }\n'
+                'terraform { source = "../../../modules/foundation" }\n'
+                "inputs = {\n  environment = local.environment\n"
+                "  region = local.aws_region\n}\n"
+            ),
+        }
+    }
+
+    _apply_with_child_locals(tmp_path, result)
+
+    child = (tmp_path / "environments/non-prod/foundation/terragrunt.hcl").read_text()
+    assert 'environment = "non-prod"' in child
+    assert 'aws_region = "us-east-1"' in child
 
 
 def test_run_iac_smith_generates_commits_and_opens_pr(tmp_path: Path):

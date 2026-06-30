@@ -37,7 +37,11 @@ def _int_env(name: str, default: int) -> int:
 
 _ADD_VARIABLE_TO_RE = re.compile(r'Add variable "[^"]+" to (\S+)\.')
 
-_TG_LOCALS_HEADER_RE = re.compile(r"\blocals\s*\{")
+# Anchored to line start so it matches a real `locals {` block header, not the
+# `locals {}` that appears inside the canonical child-config comment ("...declare
+# these in this locals {} block."). Matching the comment made the injector splice
+# assignments into the comment and produce invalid HCL (`= "x"} block.`).
+_TG_LOCALS_HEADER_RE = re.compile(r"^[ \t]*locals\s*\{", re.MULTILINE)
 _TG_INCLUDE_RE = re.compile(r'^\s*include\s*(?:"[^"]+"\s*)?\{', re.MULTILINE)
 _TG_LOCAL_REF_RE = re.compile(r"\blocal\.([A-Za-z0-9_]+)")
 _SIMPLE_LOCAL_ASSIGN_RE = re.compile(r"^([A-Za-z0-9_]+)\s*=\s*(.+?)\s*$")

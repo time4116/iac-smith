@@ -1583,6 +1583,28 @@ class TestInjectMissingChildLocals:
         assert 'aws_region = "us-east-1"' in child
         assert _find_terragrunt_orphaned_locals(files) == []
 
+    def test_does_not_inject_into_locals_comment(self):
+        # The canonical child template carries a comment that mentions "locals {}
+        # block"; the injector must add a real locals block, never splice
+        # assignments into that comment (which produced invalid HCL like
+        # `environment = "non-prod"} block.`).
+        files = {
+            "environments/non-prod/root.hcl": self._root(),
+            self._STACK: (
+                'include "root" { path = find_in_parent_folders("root.hcl") }\n'
+                "# Redeclare values you need from the parent in this locals {} block.\n"
+                'terraform { source = "../../../modules/ecs-fargate" }\n'
+                "inputs = {\n  environment = local.environment\n}\n"
+            ),
+        }
+        _inject_missing_child_locals(files)
+        child = files[self._STACK]
+        # The comment is left intact with empty braces (not spliced into).
+        assert "in this locals {} block." in child
+        assert '"non-prod"} block' not in child
+        # A real locals block was added with the parent value.
+        assert 'environment = "non-prod"' in child
+
     def test_existing_local_not_duplicated(self):
         files = {
             self._ROOT: self._root(),

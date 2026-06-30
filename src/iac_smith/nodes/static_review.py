@@ -254,7 +254,11 @@ def _find_undeclared_variable_references(generated_files: dict[str, str]) -> lis
         if is_vars_tf:
             roots_with_vars_tf.add(root)
 
-        for m in _VAR_REF_RE.finditer(content):
+        # Scan only real references: strip comments and mask plain string text so a
+        # `var.xxx` in a comment or a `description` is not mistaken for a reference
+        # (which the model can never declare away — it just oscillates).
+        ref_scan = _mask_plain_string_text(_strip_hcl_comments(content))
+        for m in _VAR_REF_RE.finditer(ref_scan):
             refs_by_root.setdefault(root, {}).setdefault(m.group(1), []).append(path)
 
         for m in _VAR_DECL_RE.finditer(content):
@@ -365,6 +369,64 @@ def _strip_hcl_comments(content: str) -> str:
             i += 1
         else:
             result.append(ch)
+        i += 1
+    return "".join(result)
+
+
+def _mask_plain_string_text(content: str) -> str:
+    """Blank out literal text inside quoted strings, keeping `${...}` interpolations.
+
+    A `var.foo` in plain string text (a `description`, a tag value, a doc example)
+    is not a Terraform reference — only `${var.foo}` inside an interpolation is. The
+    reference scan masks the literal text so a placeholder like `var.xxx` in a
+    description can't be flagged as an undeclared variable the model can never
+    satisfy, while a real interpolated `${var.foo}` is preserved and still checked.
+    """
+    result: list[str] = []
+    in_string = False
+    interp_depth = 0
+    escape = False
+    i = 0
+    while i < len(content):
+        ch = content[i]
+        nxt = content[i + 1] if i + 1 < len(content) else ""
+        if not in_string:
+            result.append(ch)
+            if ch == '"':
+                in_string = True
+            i += 1
+            continue
+        # Inside a string.
+        if interp_depth > 0:
+            result.append(ch)
+            if ch == "{":
+                interp_depth += 1
+            elif ch == "}":
+                interp_depth -= 1
+            i += 1
+            continue
+        if escape:
+            result.append(" ")
+            escape = False
+            i += 1
+            continue
+        if ch == "\\":
+            result.append(" ")
+            escape = True
+            i += 1
+            continue
+        if ch == "$" and nxt == "{":
+            result.append("${")
+            interp_depth = 1
+            i += 2
+            continue
+        if ch == '"':
+            result.append(ch)
+            in_string = False
+            i += 1
+            continue
+        # Literal character inside the string: blank it (preserve newlines).
+        result.append("\n" if ch == "\n" else " ")
         i += 1
     return "".join(result)
 
