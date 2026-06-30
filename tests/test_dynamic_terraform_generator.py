@@ -424,6 +424,81 @@ def test_bedrock_terraform_generator_returns_model_generated_files_without_rende
     ]
 
 
+def test_generate_files_renders_root_hcl_deterministically():
+    from iac_smith.dynamic_terraform import _render_root_hcl
+
+    plan = ChangePlan(
+        stack_name="ecs-fargate",
+        environments=["non-prod"],
+        files_to_generate=[
+            "environments/non-prod/root.hcl",
+            "environments/non-prod/ecs-fargate/terragrunt.hcl",
+            "modules/ecs-fargate/main.tf",
+            "modules/ecs-fargate/variables.tf",
+            "modules/ecs-fargate/outputs.tf",
+        ],
+        backend_resources={"non-prod": BackendResource(bucket="my-state", lock_table="my-lock")},
+        summary=["Generate ECS Fargate"],
+    )
+    files = {
+        "modules/ecs-fargate/main.tf": (
+            'resource "aws_ecs_cluster" "this" { name = var.name_prefix }\n'
+        ),
+        "modules/ecs-fargate/variables.tf": 'variable "name_prefix" { type = string }\n',
+        "modules/ecs-fargate/outputs.tf": (
+            'output "cluster_name" { value = aws_ecs_cluster.this.name }\n'
+        ),
+        "environments/non-prod/ecs-fargate/terragrunt.hcl": (
+            'terraform { source = "../../../modules/ecs-fargate" }\n'
+            'inputs = { name_prefix = "test" }\n'
+        ),
+    }
+    runtime = FakeBedrockRuntime(files)
+    generator = BedrockTerraformGenerator(model_id="anthropic.test-model", bedrock_runtime=runtime)
+
+    result = generator.generate_files(
+        intent=_intent(),
+        change_plan=plan,
+        repo_patterns=RepoPatterns(),
+        ruleset=_ruleset(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+
+    # root.hcl is rendered deterministically, not by the model.
+    assert result["environments/non-prod/root.hcl"] == _render_root_hcl(
+        environment="non-prod",
+        aws_region="us-west-2",
+        bucket="my-state",
+        lock_table="my-lock",
+    )
+    # The model was asked for the four non-envelope files only — never root.hcl.
+    requested: list[str] = []
+    for call in runtime.calls:
+        body = json.loads(call["body"])
+        ctx = json.loads(body["messages"][0]["content"].split("Generation context JSON:\n", 1)[1])
+        requested.extend(ctx["files_to_generate"])
+    assert "environments/non-prod/root.hcl" not in requested
+    assert len(runtime.calls) == len(files)
+
+
+def test_render_root_hcl_emits_locals_remote_state_and_provider():
+    from iac_smith.dynamic_terraform import _render_root_hcl
+
+    rendered = _render_root_hcl(
+        environment="non-prod",
+        aws_region="us-west-2",
+        bucket="my-state",
+        lock_table="my-lock",
+    )
+    assert 'environment = "non-prod"' in rendered
+    assert 'aws_region  = "us-west-2"' in rendered
+    assert 'bucket         = "my-state"' in rendered
+    assert 'dynamodb_table = "my-lock"' in rendered
+    # Terragrunt interpolations are emitted verbatim, not evaluated/escaped.
+    assert "${path_relative_to_include()}/terraform.tfstate" in rendered
+    assert 'region = "${local.aws_region}"' in rendered
+
+
 def test_invoke_file_generation_streams_and_concatenates_text_deltas():
     path = "modules/example/main.tf"
     full_doc = json.dumps(

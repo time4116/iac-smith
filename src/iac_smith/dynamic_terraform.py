@@ -1406,6 +1406,81 @@ def _apply_workflow_overrides(generated_files: dict[str, str], change_plan: Chan
         )
 
 
+def _render_root_hcl(*, environment: str, aws_region: str, bucket: str, lock_table: str) -> str:
+    """Render an environment root config (root.hcl) deterministically.
+
+    The environment root is pure structural envelope — `remote_state`, the
+    generated AWS provider, and the `locals` (environment/aws_region) that child
+    stacks redeclare. It is identical every run apart from the env name, region,
+    and backend resource names, all of which are already known from the intent and
+    change plan. Generating it directly (instead of asking the model and then
+    repairing it) removes a whole class of envelope bugs — most importantly it
+    guarantees the root `locals` exist so child stacks can always resolve them.
+
+    Built line by line so the literal terragrunt interpolations (`${...}`) and HCL
+    map braces are emitted verbatim without f-string brace handling.
+    """
+    return "\n".join(
+        [
+            "locals {",
+            f'  environment = "{environment}"',
+            f'  aws_region  = "{aws_region}"',
+            "}",
+            "",
+            "remote_state {",
+            '  backend = "s3"',
+            "  config = {",
+            f'    bucket         = "{bucket}"',
+            '    key            = "${path_relative_to_include()}/terraform.tfstate"',
+            "    region         = local.aws_region",
+            "    encrypt        = true",
+            f'    dynamodb_table = "{lock_table}"',
+            "  }",
+            "  generate = {",
+            '    path      = "backend.tf"',
+            '    if_exists = "overwrite_terragrunt"',
+            "  }",
+            "}",
+            "",
+            'generate "provider" {',
+            '  path      = "provider.tf"',
+            '  if_exists = "overwrite_terragrunt"',
+            "  contents  = <<EOF",
+            'provider "aws" {',
+            '  region = "${local.aws_region}"',
+            "}",
+            "EOF",
+            "}",
+            "",
+        ]
+    )
+
+
+def _deterministic_envelope_files(
+    intent: InfrastructureIntent, change_plan: ChangePlan
+) -> dict[str, str]:
+    """Return the structural-envelope files rendered deterministically, by path.
+
+    These are whole files with no per-request content — the model never sees them,
+    so it cannot drop a `locals` block, mangle a comment, or hallucinate a backend.
+    Currently covers `environments/<env>/root.hcl`; Terraform/Terragrunt validate
+    and plan remain the authoritative correctness gate.
+    """
+    files: dict[str, str] = {}
+    planned = set(change_plan.files_to_generate)
+    for env in change_plan.environments:
+        root_path = f"environments/{env}/root.hcl"
+        backend = change_plan.backend_resources.get(env)
+        if root_path in planned and backend is not None:
+            files[root_path] = _render_root_hcl(
+                environment=env,
+                aws_region=intent.region,
+                bucket=backend.bucket,
+                lock_table=backend.lock_table,
+            )
+    return files
+
+
 TERRAFORM_FILE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -1730,10 +1805,17 @@ class BedrockTerraformGenerator:
         blackboard: RunBlackboard | None = None,
     ) -> dict[str, str]:
         generated_files: dict[str, str] = {}
-        total_files = len(change_plan.files_to_generate)
-        path_positions = {
-            path: index for index, path in enumerate(change_plan.files_to_generate, start=1)
-        }
+
+        # Structural-envelope files are rendered deterministically and never sent to
+        # the model — see _deterministic_envelope_files. Generate only the rest.
+        envelope_files = _deterministic_envelope_files(intent, change_plan)
+        model_paths = [p for p in change_plan.files_to_generate if p not in envelope_files]
+
+        total_files = len(model_paths)
+        path_positions = {path: index for index, path in enumerate(model_paths, start=1)}
+        for path in change_plan.files_to_generate:
+            if path in envelope_files:
+                self._log(f"IaC Smith: rendering {path} deterministically (structural envelope).")
         self._log(
             f"IaC Smith: generating {total_files} planned file(s) with Bedrock "
             f"(model: {self.model_id}, concurrency: {self.concurrency})."
@@ -1741,7 +1823,7 @@ class BedrockTerraformGenerator:
 
         existing_contents: dict[str, str] = {}
         if repo_path is not None:
-            for file_path in change_plan.files_to_generate:
+            for file_path in model_paths:
                 candidate = repo_path / file_path
                 if candidate.is_file():
                     with contextlib.suppress(OSError, UnicodeDecodeError):
@@ -1751,7 +1833,7 @@ class BedrockTerraformGenerator:
         # generated before outputs.tf and variables.tf, giving those files
         # concrete sibling context for consistent resource names.
         groups: dict[str, list[str]] = {}
-        for path in change_plan.files_to_generate:
+        for path in model_paths:
             groups.setdefault(path.rpartition("/")[0], []).append(path)
         for paths in groups.values():
             paths.sort(key=lambda p: _GEN_ORDER.get(p.rpartition("/")[2], 4))
@@ -1784,6 +1866,7 @@ class BedrockTerraformGenerator:
                 for path, content in future.result():
                     generated_files[path] = content
 
+        generated_files.update(envelope_files)
         generated_files = {path: generated_files[path] for path in change_plan.files_to_generate}
 
         # Overwrite model-generated workflow files with deterministically correct content.
@@ -1832,9 +1915,14 @@ class BedrockTerraformGenerator:
                 )
                 return generated_files
 
-            # Workflow files are generated deterministically — exclude them from repair
-            # so the model cannot overwrite the correct working-directory references.
-            repairable = [p for p in change_plan.files_to_generate if p not in _WORKFLOW_PATHS]
+            # Workflow and structural-envelope files are generated deterministically —
+            # exclude them from repair so the model cannot overwrite the correct
+            # working-directory references or re-introduce a broken envelope.
+            repairable = [
+                p
+                for p in change_plan.files_to_generate
+                if p not in _WORKFLOW_PATHS and p not in envelope_files
+            ]
             paths_to_repair = [
                 path for path in repairable if _path_needs_repair(path, issues)
             ] or repairable

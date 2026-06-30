@@ -363,6 +363,13 @@ Eight annotated structural templates are appended to every generation prompt imm
 - `.github/workflows/terraform-pr-check.yml` — trigger path and working-directory alignment example
 - `.github/workflows/terraform-apply.yml` — bootstrap job with idempotent imports, apply-foundation and stack apply jobs with `needs:` dependencies, `secrets.AWS_ROLE_ARN_NON_PROD` usage
 
+### Deterministic envelope generation
+
+Some planned files are pure **structural envelope** — invariant apart from env/region/stack-name, identical every run, and historically a source of repair-loop bugs when left to the model. These are rendered deterministically and **never sent to Bedrock**, so the model cannot drop a block, mangle a comment, or hallucinate them; `terraform`/`terragrunt` validate and plan remain the authoritative gate.
+
+- **Workflows** (`.github/workflows/*.yml`) — model-generated then overwritten via `_apply_workflow_overrides` (`_build_pr_check_workflow` / `_build_apply_workflow`).
+- **`environments/<env>/root.hcl`** — rendered by `_render_root_hcl` (via `_deterministic_envelope_files`) and excluded from both generation and the repair loop. Guarantees the root `locals` (`environment`, `aws_region`) always exist, which child stacks redeclare. This is the canonical home for new envelope files as more of the layout becomes deterministic.
+
 ---
 
 ## Static Review Checks
