@@ -44,9 +44,18 @@ _SIMPLE_LOCAL_ASSIGN_RE = re.compile(r"^([A-Za-z0-9_]+)\s*=\s*(.+?)\s*$")
 
 
 def _is_root_terragrunt(path: str) -> bool:
-    """True for an environment root config (environments[/<env>]/terragrunt.hcl), not a stack."""
+    """True for an environment root config (environments[/<env>]/root.hcl), not a stack.
+
+    Environment roots are named ``root.hcl`` (Terragrunt deprecated using
+    ``terragrunt.hcl`` as an include root); the legacy ``terragrunt.hcl`` name is
+    still accepted so a root's locals are found regardless of which the model emits.
+    """
     parts = path.split("/")
-    return parts[0] == "environments" and parts[-1] == "terragrunt.hcl" and len(parts) in (2, 3)
+    return (
+        parts[0] == "environments"
+        and parts[-1] in ("root.hcl", "terragrunt.hcl")
+        and len(parts) in (2, 3)
+    )
 
 
 def _parse_simple_locals(content: str) -> dict[str, str]:

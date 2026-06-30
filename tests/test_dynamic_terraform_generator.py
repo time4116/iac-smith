@@ -1563,6 +1563,26 @@ class TestInjectMissingChildLocals:
         # The deterministic fix makes the orphaned-locals check pass.
         assert _find_terragrunt_orphaned_locals(files) == []
 
+    def test_injects_from_root_hcl_environment_root(self):
+        # Environment roots are named root.hcl (not terragrunt.hcl); the injector
+        # must still find the root's locals or the orphaned-locals check oscillates.
+        from iac_smith.nodes.static_review import _find_terragrunt_orphaned_locals
+
+        files = {
+            "environments/non-prod/root.hcl": self._root(),
+            self._STACK: (
+                'include "root" { path = find_in_parent_folders("root.hcl") }\n'
+                'terraform { source = "../../../modules/ecs-fargate" }\n'
+                "inputs = {\n  environment = local.environment\n"
+                "  aws_region  = local.aws_region\n}\n"
+            ),
+        }
+        _inject_missing_child_locals(files)
+        child = files[self._STACK]
+        assert 'environment = "non-prod"' in child
+        assert 'aws_region = "us-east-1"' in child
+        assert _find_terragrunt_orphaned_locals(files) == []
+
     def test_existing_local_not_duplicated(self):
         files = {
             self._ROOT: self._root(),
