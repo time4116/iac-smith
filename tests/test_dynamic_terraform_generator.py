@@ -13,6 +13,7 @@ from iac_smith.dynamic_terraform import (
     _normalize_child_terragrunt,
     _path_needs_repair,
     _repair_unit_key,
+    _wire_foundation_dependency,
     build_generation_prompt,
     parse_generation_payload,
     parse_single_file_generation_payload,
@@ -1745,4 +1746,124 @@ class TestNormalizeChildTerragrunt:
         files = self._root()
         before = dict(files)
         _normalize_child_terragrunt(files)
+        assert files == before
+
+
+class TestWireFoundationDependency:
+    _STACK = "environments/non-prod/data-platform/terragrunt.hcl"
+    _FOUNDATION_OUTPUTS = (
+        'output "vpc_id" {\n  value = module.vpc.vpc_id\n}\n'
+        'output "private_subnet_ids" {\n  value = module.vpc.private_subnets\n}\n'
+        'output "public_subnet_ids" {\n  value = module.vpc.public_subnets\n}\n'
+        'output "vpc_cidr" {\n  value = module.vpc.vpc_cidr_block\n}\n'
+    )
+    _WORKLOAD_VARS = (
+        'variable "environment" {\n  type = string\n}\n'
+        'variable "vpc_id" {\n  type = string\n}\n'
+        'variable "private_subnet_ids" {\n  type = list(string)\n}\n'
+        'variable "instance_class" {\n  type = string\n  default = "db.t3.medium"\n}\n'
+    )
+
+    def _files(self, stack_body: str, *, with_foundation: bool = True) -> dict[str, str]:
+        files = {
+            self._STACK: stack_body,
+            "modules/data-platform/variables.tf": self._WORKLOAD_VARS,
+        }
+        if with_foundation:
+            files["environments/non-prod/foundation/terragrunt.hcl"] = 'include "root" {}\n'
+            files["modules/foundation/outputs.tf"] = self._FOUNDATION_OUTPUTS
+        return files
+
+    def test_wires_intersection_inputs_to_dependency(self):
+        files = self._files(
+            'terraform {\n  source = "../../../modules/data-platform"\n}\n'
+            "inputs = {\n"
+            "  environment        = local.environment\n"
+            '  vpc_id             = ""\n'
+            "  private_subnet_ids = []\n"
+            '  instance_class     = "db.t3.medium"\n'
+            "}\n"
+        )
+        _wire_foundation_dependency(files)
+        child = files[self._STACK]
+        assert 'dependency "foundation" {' in child
+        assert 'config_path = "../foundation"' in child
+        # Exact alignment is left to `terragrunt hcl format`; assert the wiring.
+        assert "vpc_id = dependency.foundation.outputs.vpc_id" in child
+        assert "private_subnet_ids = dependency.foundation.outputs.private_subnet_ids" in child
+        # Non-networking model inputs are preserved untouched.
+        assert 'instance_class     = "db.t3.medium"' in child
+        # The placeholder empties are gone.
+        assert 'vpc_id             = ""' not in child
+        assert "private_subnet_ids = []" not in child
+
+    def test_mock_outputs_typed_from_consuming_variable(self):
+        files = self._files(
+            'terraform {\n  source = "../../../modules/data-platform"\n}\n'
+            "inputs = {\n  vpc_id = local.x\n  private_subnet_ids = local.y\n}\n"
+        )
+        _wire_foundation_dependency(files)
+        child = files[self._STACK]
+        # string -> string mock, list(string) -> list mock.
+        assert 'vpc_id = "mock"' in child
+        assert 'private_subnet_ids = ["mock-0", "mock-1"]' in child
+        assert 'mock_outputs_allowed_terraform_commands = ["validate", "plan"]' in child
+
+    def test_no_op_when_workload_declares_no_foundation_inputs(self):
+        # A workload that needs no networking gets nothing forced on it.
+        files = {
+            self._STACK: (
+                'terraform {\n  source = "../../../modules/data-platform"\n}\n'
+                "inputs = {\n  environment = local.environment\n}\n"
+            ),
+            "modules/data-platform/variables.tf": 'variable "environment" {\n  type = string\n}\n',
+            "environments/non-prod/foundation/terragrunt.hcl": 'include "root" {}\n',
+            "modules/foundation/outputs.tf": self._FOUNDATION_OUTPUTS,
+        }
+        before = dict(files)
+        _wire_foundation_dependency(files)
+        assert files == before
+
+    def test_no_op_without_foundation_in_plan(self):
+        files = self._files("inputs = {\n  vpc_id = local.x\n}\n", with_foundation=False)
+        before = dict(files)
+        _wire_foundation_dependency(files)
+        assert files == before
+
+    def test_replaces_model_authored_dependency_block(self):
+        files = self._files(
+            'dependency "foundation" {\n'
+            '  config_path = "../wrong-path"\n'
+            "  mock_outputs = {\n    vpc_id = 123\n  }\n"
+            "}\n"
+            'terraform {\n  source = "../../../modules/data-platform"\n}\n'
+            "inputs = {\n  vpc_id = local.x\n  private_subnet_ids = local.y\n}\n"
+        )
+        _wire_foundation_dependency(files)
+        child = files[self._STACK]
+        assert "../wrong-path" not in child
+        assert child.count('dependency "foundation" {') == 1
+        assert 'config_path = "../foundation"' in child
+
+    def test_idempotent(self):
+        files = self._files(
+            'terraform {\n  source = "../../../modules/data-platform"\n}\n'
+            'inputs = {\n  vpc_id = ""\n  private_subnet_ids = []\n}\n'
+        )
+        _wire_foundation_dependency(files)
+        once = files[self._STACK]
+        _wire_foundation_dependency(files)
+        assert files[self._STACK] == once
+
+    def test_foundation_stack_itself_untouched(self):
+        files = {
+            "environments/non-prod/foundation/terragrunt.hcl": (
+                'terraform {\n  source = "../../../modules/foundation"\n}\n'
+                "inputs = {\n  environment = local.environment\n}\n"
+            ),
+            "modules/foundation/outputs.tf": self._FOUNDATION_OUTPUTS,
+            "modules/foundation/variables.tf": 'variable "vpc_id" {\n  type = string\n}\n',
+        }
+        before = dict(files)
+        _wire_foundation_dependency(files)
         assert files == before

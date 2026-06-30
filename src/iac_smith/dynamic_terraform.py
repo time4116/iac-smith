@@ -154,6 +154,164 @@ def _normalize_child_terragrunt(generated_files: dict[str, str]) -> None:
         generated_files[path] = _child_envelope_header(root_locals) + body.lstrip("\n")
 
 
+_TG_TERRAFORM_HEADER_RE = re.compile(r"^[ \t]*terraform\s*\{", re.MULTILINE)
+_TG_INPUTS_HEADER_RE = re.compile(r"^[ \t]*inputs\s*=\s*\{", re.MULTILINE)
+_TG_FOUNDATION_DEP_RE = re.compile(r'^[ \t]*dependency\s+"foundation"\s*\{', re.MULTILINE)
+_TF_VARIABLE_RE = re.compile(r'variable\s+"([^"]+)"\s*\{')
+_TF_OUTPUT_RE = re.compile(r'output\s+"([^"]+)"\s*\{')
+_TF_TYPE_RE = re.compile(r"^\s*type\s*=\s*(.+?)\s*$", re.MULTILINE)
+_TG_ASSIGN_RE = re.compile(r"^(\s*)([A-Za-z0-9_]+)\s*=")
+_FOUNDATION_STACK_DIR_RE = re.compile(r"environments/[^/]+/foundation/terragrunt\.hcl")
+
+
+def _tf_variable_types(variables_tf: str) -> dict[str, str]:
+    """Map each declared variable name to its ``type = ...`` expression ("" if none)."""
+    types: dict[str, str] = {}
+    for m in _TF_VARIABLE_RE.finditer(variables_tf):
+        body = _extract_hcl_block_body(variables_tf, m.start()) or ""
+        tm = _TF_TYPE_RE.search(body)
+        types[m.group(1)] = tm.group(1).strip() if tm else ""
+    return types
+
+
+def _mock_value_for_type(type_expr: str) -> str:
+    """A type-compatible mock literal for a foundation output consumed by a workload.
+
+    Keyed off the *consuming* variable's declared type so the mock satisfies the
+    input the workload actually feeds it — no per-output-name special-casing.
+    """
+    t = type_expr.replace(" ", "")
+    if t.startswith(("list(", "set(", "tuple(")):
+        return '["mock-0", "mock-1"]'
+    if t == "number":
+        return "0"
+    if t == "bool":
+        return "false"
+    if t.startswith(("map(", "object(")):
+        return "{}"
+    return '"mock"'
+
+
+def _render_foundation_dependency_block(wired: list[str], var_types: dict[str, str]) -> str:
+    lines = [
+        'dependency "foundation" {',
+        '  config_path = "../foundation"',
+        "",
+        "  mock_outputs = {",
+        *[f"    {name} = {_mock_value_for_type(var_types[name])}" for name in wired],
+        "  }",
+        "",
+        '  mock_outputs_allowed_terraform_commands = ["validate", "plan"]',
+        "}",
+        "",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _insert_dependency_block(content: str, block: str) -> str:
+    """Insert a dependency block ahead of the first ``terraform``/``inputs`` block."""
+    for pattern in (_TG_TERRAFORM_HEADER_RE, _TG_INPUTS_HEADER_RE):
+        m = pattern.search(content)
+        if m:
+            return content[: m.start()] + block + "\n" + content[m.start() :]
+    return content.rstrip("\n") + "\n\n" + block
+
+
+def _upsert_inputs_assignments(content: str, assignments: dict[str, str]) -> str:
+    """Set each top-level ``name = value`` in the ``inputs`` block (replace or add).
+
+    Only depth-0 assignments are touched, so a nested ``tags = { ... }`` whose key
+    happens to collide is left alone; model-authored inputs are otherwise preserved.
+    """
+    m = _TG_INPUTS_HEADER_RE.search(content)
+    if not m:
+        block = "inputs = {\n" + "".join(f"  {k} = {v}\n" for k, v in assignments.items()) + "}\n"
+        return content.rstrip("\n") + "\n\n" + block
+    brace = content.index("{", m.start())
+    depth = 0
+    end = None
+    for i in range(brace, len(content)):
+        if content[i] == "{":
+            depth += 1
+        elif content[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end is None:
+        return content
+    body = content[brace + 1 : end]
+    remaining = dict(assignments)
+    new_lines: list[str] = []
+    depth = 0
+    for line in body.split("\n"):
+        replaced = False
+        if depth == 0:
+            am = _TG_ASSIGN_RE.match(line)
+            if am and am.group(2) in remaining:
+                key = am.group(2)
+                new_lines.append(f"{am.group(1) or '  '}{key} = {remaining.pop(key)}")
+                replaced = True
+        if not replaced:
+            new_lines.append(line)
+        depth = max(depth + line.count("{") - line.count("}"), 0)
+    if remaining:
+        while new_lines and new_lines[-1].strip() == "":
+            new_lines.pop()
+        new_lines.extend(f"  {k} = {v}" for k, v in remaining.items())
+        new_lines.append("")
+    return content[: brace + 1] + "\n".join(new_lines) + content[end:]
+
+
+def _wire_foundation_dependency(generated_files: dict[str, str]) -> None:
+    """Deterministically wire each workload stack to the planned foundation stack.
+
+    When the plan includes the shared-networking foundation, a workload that
+    declares any variable matching a foundation output (``vpc_id``,
+    ``private_subnet_ids``, ...) should consume it through a ``dependency
+    "foundation"`` block rather than the placeholder the model tends to invent
+    (empty ``vpc_id``, ``[]`` subnets). Connecting the two stacks is structural
+    composition, not service knowledge: the wired set is exactly the intersection
+    of (foundation outputs) and (the workload module's declared variables), so a
+    workload that needs no networking has nothing forced on it. Any block the model
+    authored is replaced so the config_path, mock types, and output references are
+    always internally consistent — and the pass is idempotent.
+    """
+    foundation_outputs = _foundation_output_names(generated_files)
+    if not foundation_outputs:
+        return
+    envs_with_foundation = {
+        path.split("/")[1] for path in generated_files if _FOUNDATION_STACK_DIR_RE.fullmatch(path)
+    }
+    if not envs_with_foundation:
+        return
+    for path, content in list(generated_files.items()):
+        parts = path.split("/")
+        if (
+            len(parts) != 4
+            or parts[0] != "environments"
+            or parts[3] != "terragrunt.hcl"
+            or parts[2] == "foundation"
+            or parts[1] not in envs_with_foundation
+        ):
+            continue
+        var_types = _tf_variable_types(generated_files.get(f"modules/{parts[2]}/variables.tf", ""))
+        wired = [name for name in foundation_outputs if name in var_types]
+        if not wired:
+            continue
+        body = _remove_hcl_block(content, _TG_FOUNDATION_DEP_RE)
+        body = _insert_dependency_block(body, _render_foundation_dependency_block(wired, var_types))
+        refs = {name: f"dependency.foundation.outputs.{name}" for name in wired}
+        generated_files[path] = _upsert_inputs_assignments(body, refs)
+
+
+def _foundation_output_names(generated_files: dict[str, str]) -> list[str]:
+    content = generated_files.get("modules/foundation/outputs.tf")
+    if not content:
+        return []
+    return [m.group(1) for m in _TF_OUTPUT_RE.finditer(content)]
+
+
 _SOURCE_PINPOINT_RE = re.compile(r"\bon\s+(?P<file>[^\s,]+)\s+line\s+\d+")
 
 
@@ -2023,6 +2181,7 @@ class BedrockTerraformGenerator:
             # Rewrite each child stack's include/locals envelope deterministically so
             # the model can neither drop nor mangle it (the rest of the file is its own).
             _normalize_child_terragrunt(generated_files)
+            _wire_foundation_dependency(generated_files)
             validation = static_review_generated_files(generated_files)
             # Autofix both security errors and structural issues; advisory
             # warnings (public ingress, docs markers) are surfaced for review,
@@ -2209,4 +2368,5 @@ class BedrockTerraformGenerator:
                     repaired_files[path] = content
 
         _normalize_child_terragrunt(repaired_files)
+        _wire_foundation_dependency(repaired_files)
         return {path: repaired_files[path] for path in change_plan.files_to_generate}
