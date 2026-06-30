@@ -16,6 +16,7 @@ from iac_smith.nodes.static_review import (
     _find_cloudwatch_logs_kms_without_grant,
     _find_cross_file_duplicates,
     _find_duplicate_named_resources,
+    _find_empty_mock_outputs,
     _find_hardcoded_secret_values,
     _find_malformed_terraform_declarations,
     _find_placeholder_input_values,
@@ -84,6 +85,64 @@ class TestPlaceholderInputValues:
 
         assert result.status == ValidationStatus.FAILED
         assert any("placeholder value" in e for e in result.errors)
+
+
+class TestEmptyMockOutputs:
+    def test_flags_empty_string_mock_output(self) -> None:
+        # The exact #59 failure: an empty mock vpc_cidr surfaces as "" is not a valid
+        # CIDR block at plan time.
+        files = {
+            "environments/non-prod/rds-aurora/terragrunt.hcl": (
+                'dependency "foundation" {\n'
+                '  config_path = "../foundation"\n'
+                "  mock_outputs = {\n"
+                '    vpc_id   = "vpc-00000000"\n'
+                '    vpc_cidr = ""\n'
+                "  }\n"
+                "}\n"
+            )
+        }
+
+        errors = _find_empty_mock_outputs(files)
+
+        assert len(errors) == 1
+        assert "vpc_cidr" in errors[0]
+
+    def test_flags_empty_list_mock_output(self) -> None:
+        files = {
+            "environments/non-prod/rds-aurora/terragrunt.hcl": (
+                'dependency "foundation" {\n'
+                "  mock_outputs = {\n"
+                "    private_subnet_ids = []\n"
+                "  }\n"
+                "}\n"
+            )
+        }
+        assert any("private_subnet_ids" in e for e in _find_empty_mock_outputs(files))
+
+    def test_realistic_mock_outputs_are_allowed(self) -> None:
+        # Non-empty stand-ins are correct — they only feed plan. Not flagged.
+        files = {
+            "environments/non-prod/rds-aurora/terragrunt.hcl": (
+                'dependency "foundation" {\n'
+                "  mock_outputs = {\n"
+                '    vpc_id             = "vpc-00000000"\n'
+                '    vpc_cidr           = "10.0.0.0/16"\n'
+                '    private_subnet_ids = ["subnet-00000000", "subnet-11111111"]\n'
+                "  }\n"
+                "}\n"
+            )
+        }
+        assert _find_empty_mock_outputs(files) == []
+
+    def test_empty_value_outside_mock_outputs_is_not_flagged(self) -> None:
+        # A genuinely-optional empty input elsewhere is not this check's concern.
+        files = {
+            "environments/non-prod/rds-aurora/terragrunt.hcl": (
+                'inputs = {\n  optional_suffix = ""\n}\n'
+            )
+        }
+        assert _find_empty_mock_outputs(files) == []
 
 
 class TestMissingFoundationDependencyTargets:
