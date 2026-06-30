@@ -13,7 +13,7 @@ from typing import Protocol, cast
 from iac_smith.blackboard import RunBlackboard, normalize_validation_findings
 from iac_smith.dynamic_terraform import (
     BedrockTerraformGenerator,
-    _inject_missing_child_locals,
+    _normalize_child_terragrunt,
 )
 from iac_smith.graph import FileGenerator, IntentParser, build_graph
 from iac_smith.models.change_plan import ChangePlan
@@ -357,16 +357,14 @@ def _repair_runtime_static_issues(
 
 
 def _apply_with_child_locals(repo_path: Path, result: IaCSmithState) -> None:
-    """Inject root-derived child locals across the whole tree, then write it.
+    """Normalize every child stack's include/locals envelope, then write the tree.
 
     A stack generated in isolation — the foundation scaffolded as a plan delta, or
     by the runtime scaffold below — never shares a generation batch with the
-    environment root, so the generator's per-batch local injection cannot see
-    ``root.hcl``'s locals. Re-run it on the complete tree, where the root and every
-    child coexist, so a child's ``local.environment``/``local.aws_region`` is
-    declared before terragrunt parses the files.
+    environment root, so its envelope is normalized here on the complete tree,
+    where the root and every child coexist, before terragrunt parses the files.
     """
-    _inject_missing_child_locals(result["generated_files"])
+    _normalize_child_terragrunt(result["generated_files"])
     apply_generated_files(repo_path, result["generated_files"])
 
 

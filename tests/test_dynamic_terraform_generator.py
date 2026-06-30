@@ -10,7 +10,7 @@ from iac_smith.dynamic_terraform import (
     _build_apply_workflow,
     _build_pr_check_workflow,
     _extract_module_names,
-    _inject_missing_child_locals,
+    _normalize_child_terragrunt,
     _path_needs_repair,
     _repair_unit_key,
     build_generation_prompt,
@@ -1611,40 +1611,17 @@ class TestBuildApplyWorkflow:
         assert "working-directory: modules/ecs-fargate\n" not in wf
 
 
-class TestInjectMissingChildLocals:
-    _ROOT = "environments/non-prod/terragrunt.hcl"
+class TestNormalizeChildTerragrunt:
     _STACK = "environments/non-prod/ecs-fargate/terragrunt.hcl"
 
-    def _root(self) -> str:
-        return 'locals {\n  environment = "non-prod"\n  aws_region  = "us-east-1"\n}\n'
+    def _root(self, path: str = "environments/non-prod/root.hcl") -> dict[str, str]:
+        return {path: 'locals {\n  environment = "non-prod"\n  aws_region  = "us-east-1"\n}\n'}
 
-    def test_injects_missing_locals_and_satisfies_orphaned_check(self):
+    def test_renders_deterministic_include_and_locals(self):
         from iac_smith.nodes.static_review import _find_terragrunt_orphaned_locals
 
         files = {
-            self._ROOT: self._root(),
-            self._STACK: (
-                'include "root" { path = find_in_parent_folders() }\n'
-                'terraform { source = "../../../modules/ecs-fargate" }\n'
-                "inputs = {\n  environment = local.environment\n"
-                "  aws_region  = local.aws_region\n}\n"
-            ),
-        }
-        _inject_missing_child_locals(files)
-        child = files[self._STACK]
-        assert "locals {" in child
-        assert 'environment = "non-prod"' in child
-        assert 'aws_region = "us-east-1"' in child
-        # The deterministic fix makes the orphaned-locals check pass.
-        assert _find_terragrunt_orphaned_locals(files) == []
-
-    def test_injects_from_root_hcl_environment_root(self):
-        # Environment roots are named root.hcl (not terragrunt.hcl); the injector
-        # must still find the root's locals or the orphaned-locals check oscillates.
-        from iac_smith.nodes.static_review import _find_terragrunt_orphaned_locals
-
-        files = {
-            "environments/non-prod/root.hcl": self._root(),
+            **self._root(),
             self._STACK: (
                 'include "root" { path = find_in_parent_folders("root.hcl") }\n'
                 'terraform { source = "../../../modules/ecs-fargate" }\n'
@@ -1652,63 +1629,72 @@ class TestInjectMissingChildLocals:
                 "  aws_region  = local.aws_region\n}\n"
             ),
         }
-        _inject_missing_child_locals(files)
+        _normalize_child_terragrunt(files)
         child = files[self._STACK]
+        assert 'include "root" {' in child
+        assert 'path = find_in_parent_folders("root.hcl")' in child
         assert 'environment = "non-prod"' in child
         assert 'aws_region = "us-east-1"' in child
+        # The model's terraform source and inputs are preserved.
+        assert 'source = "../../../modules/ecs-fargate"' in child
+        assert "environment = local.environment" in child
         assert _find_terragrunt_orphaned_locals(files) == []
 
-    def test_does_not_inject_into_locals_comment(self):
-        # The canonical child template carries a comment that mentions "locals {}
-        # block"; the injector must add a real locals block, never splice
-        # assignments into that comment (which produced invalid HCL like
-        # `environment = "non-prod"} block.`).
+    def test_legacy_terragrunt_hcl_root_name(self):
         files = {
-            "environments/non-prod/root.hcl": self._root(),
-            self._STACK: (
-                'include "root" { path = find_in_parent_folders("root.hcl") }\n'
-                "# Redeclare values you need from the parent in this locals {} block.\n"
-                'terraform { source = "../../../modules/ecs-fargate" }\n'
-                "inputs = {\n  environment = local.environment\n}\n"
-            ),
-        }
-        _inject_missing_child_locals(files)
-        child = files[self._STACK]
-        # The comment is left intact with empty braces (not spliced into).
-        assert "in this locals {} block." in child
-        assert '"non-prod"} block' not in child
-        # A real locals block was added with the parent value.
-        assert 'environment = "non-prod"' in child
-
-    def test_existing_local_not_duplicated(self):
-        files = {
-            self._ROOT: self._root(),
+            **self._root("environments/non-prod/terragrunt.hcl"),
             self._STACK: (
                 'include "root" { path = find_in_parent_folders() }\n'
-                'locals {\n  environment = "non-prod"\n}\n'
-                "inputs = {\n  environment = local.environment\n"
-                "  aws_region  = local.aws_region\n}\n"
+                "inputs = { environment = local.environment }\n"
             ),
         }
-        _inject_missing_child_locals(files)
+        _normalize_child_terragrunt(files)
+        assert 'environment = "non-prod"' in files[self._STACK]
+
+    def test_replaces_model_written_locals_without_duplication(self):
+        # A partial/incorrect locals block the model wrote is replaced wholesale.
+        files = {
+            **self._root(),
+            self._STACK: (
+                'include "root" { path = find_in_parent_folders("root.hcl") }\n'
+                'locals {\n  environment = "WRONG"\n}\n'
+                "inputs = { environment = local.environment }\n"
+            ),
+        }
+        _normalize_child_terragrunt(files)
         child = files[self._STACK]
+        assert "WRONG" not in child
+        assert child.count("locals {") == 1
         assert child.count('environment = "non-prod"') == 1
         assert 'aws_region = "us-east-1"' in child
 
-    def test_root_config_is_untouched(self):
-        files = {self._ROOT: self._root()}
-        before = files[self._ROOT]
-        _inject_missing_child_locals(files)
-        assert files[self._ROOT] == before
-
-    def test_local_not_in_root_is_left_for_repair(self):
-        # A local the root config does not define cannot be auto-injected.
+    def test_inserts_include_when_model_omitted_it(self):
+        # The old additive injector skipped files with no include block, leaving a
+        # broken stack; the normalizer always emits a correct include.
         files = {
-            self._ROOT: 'locals {\n  environment = "non-prod"\n}\n',
+            **self._root(),
+            self._STACK: "inputs = { environment = local.environment }\n",
+        }
+        _normalize_child_terragrunt(files)
+        assert 'include "root" {' in files[self._STACK]
+        assert 'environment = "non-prod"' in files[self._STACK]
+
+    def test_does_not_mangle_canonical_locals_comment(self):
+        files = {
+            **self._root(),
             self._STACK: (
-                'include "root" { path = find_in_parent_folders() }\n'
-                "inputs = { name = local.something_unknown }\n"
+                'include "root" { path = find_in_parent_folders("root.hcl") }\n'
+                "# Redeclare values you need from the parent in this locals {} block.\n"
+                "inputs = { environment = local.environment }\n"
             ),
         }
-        _inject_missing_child_locals(files)
-        assert "something_unknown" not in files[self._STACK].split("inputs")[0]
+        _normalize_child_terragrunt(files)
+        child = files[self._STACK]
+        assert '"non-prod"} block' not in child
+        assert 'environment = "non-prod"' in child
+
+    def test_root_config_is_untouched(self):
+        files = self._root()
+        before = dict(files)
+        _normalize_child_terragrunt(files)
+        assert files == before
