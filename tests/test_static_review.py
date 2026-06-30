@@ -679,6 +679,38 @@ class TestUndeclaredVariableReferences:
         assert any("foo" in e for e in errors)
         assert any("bar" in e for e in errors)
 
+    def test_var_in_comment_not_flagged(self) -> None:
+        # A `var.xxx` placeholder in a comment is not a reference; flagging it makes
+        # the repair loop oscillate because the model can never declare it away.
+        files = {
+            "modules/ecs-fargate/main.tf": 'resource "aws_vpc" "this" {}',
+            "modules/ecs-fargate/variables.tf": (
+                'variable "vpc_id" { type = string }\n# example downstream usage: var.xxx\n'
+            ),
+        }
+        assert _find_undeclared_variable_references(files) == []
+
+    def test_var_in_description_string_not_flagged(self) -> None:
+        files = {
+            "modules/ecs-fargate/main.tf": 'resource "aws_vpc" "this" {}',
+            "modules/ecs-fargate/variables.tf": (
+                'variable "vpc_id" {\n'
+                "  type        = string\n"
+                '  description = "Set this the same way you set var.xxx elsewhere"\n'
+                "}\n"
+            ),
+        }
+        assert _find_undeclared_variable_references(files) == []
+
+    def test_interpolated_var_reference_still_flagged(self) -> None:
+        # A real `${var.foo}` inside a string is a reference and must still be caught.
+        files = {
+            "modules/ecs-fargate/main.tf": 'resource "x" "y" { name = "${var.foo}-suffix" }',
+            "modules/ecs-fargate/variables.tf": 'variable "other" { type = string }',
+        }
+        errors = _find_undeclared_variable_references(files)
+        assert any("foo" in e for e in errors)
+
     def test_non_module_files_ignored(self) -> None:
         files = {
             "environments/non-prod/terragrunt.hcl": ("inputs = { name = var.region }"),
