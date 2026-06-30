@@ -149,3 +149,48 @@ def test_bedrock_client_invokes_configured_model_without_hardcoded_model_id():
     body = json.loads(runtime.calls[0]["body"])
     assert body["anthropic_version"] == "bedrock-2023-05-31"
     assert "Return only JSON" in body["messages"][0]["content"]
+
+
+def test_bedrock_client_forces_structured_json_output():
+    runtime = FakeBedrockRuntime(
+        {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "resource_type": "baseline",
+                            "environment_scope": "both",
+                            "environments": ["non-prod", "prod"],
+                            "region": "us-east-1",
+                            "requires_new_vpc": False,
+                            "features": [],
+                            "assumptions": [],
+                            "warnings": [],
+                            "blocked": False,
+                            "block_reason": None,
+                        }
+                    ),
+                }
+            ]
+        }
+    )
+
+    client = BedrockIntentClient(model_id="anthropic.test-model", bedrock_runtime=runtime)
+    client.parse_issue("Bootstrap remote state")
+
+    body = json.loads(runtime.calls[0]["body"])
+    fmt = body["output_config"]["format"]
+    assert fmt["type"] == "json_schema"
+    assert fmt["schema"]["required"] == [
+        "resource_type",
+        "environment_scope",
+        "environments",
+        "region",
+        "requires_new_vpc",
+        "features",
+        "assumptions",
+        "warnings",
+        "blocked",
+        "block_reason",
+    ]

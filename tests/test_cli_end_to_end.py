@@ -1,6 +1,7 @@
 import subprocess
 from pathlib import Path
 
+from iac_smith import cli
 from iac_smith.blackboard import TerraformContract
 from iac_smith.cli import (
     IaCSmithRunResult,
@@ -8,6 +9,7 @@ from iac_smith.cli import (
     _descriptive_title,
     _maybe_comment_on_block,
     _repair_runtime_static_issues,
+    _run_timeout,
     _scaffold_foundation_files,
     _select_repair_model,
     run_iac_smith,
@@ -621,3 +623,44 @@ def test_scaffold_foundation_files_noop_without_foundation_dependency(tmp_path):
         _scaffold_foundation_files(file_generator=fake_generator, result=result, repo_path=tmp_path)
         is None
     )
+
+
+def test_run_timeout_defaults_to_six_minutes():
+    assert _run_timeout({}) == 360
+
+
+def test_run_timeout_parses_override_and_disables_on_zero():
+    assert _run_timeout({"IAC_SMITH_RUN_TIMEOUT": "90"}) == 90
+    assert _run_timeout({"IAC_SMITH_RUN_TIMEOUT": "0"}) == 0
+
+
+def test_run_timeout_falls_back_on_garbage():
+    assert _run_timeout({"IAC_SMITH_RUN_TIMEOUT": "soon"}) == 360
+
+
+def test_run_iac_smith_hard_fails_when_budget_exceeded(monkeypatch):
+    # A run that blows the wall-clock budget is converted to a blocked result rather
+    # than running unbounded.
+    def _slow_core(*args, **kwargs):
+        raise cli._RunTimeout
+
+    monkeypatch.setattr(cli, "_run_iac_smith_core", _slow_core)
+
+    result = run_iac_smith(
+        {"IAC_SMITH_RUN_TIMEOUT": "120"},
+        issue_client=FakeIssueClient(),
+        pr_client=FakePullRequestClient(),
+    )
+
+    assert result.status == "blocked"
+    assert "120s wall-clock budget" in result.block_reason
+
+
+def test_run_deadline_raises_after_short_budget():
+    # The SIGALRM watchdog actually fires (use a 1s budget and block on a sleep).
+    import time
+
+    import pytest
+
+    with pytest.raises(cli._RunTimeout), cli._run_deadline(1):
+        time.sleep(5)

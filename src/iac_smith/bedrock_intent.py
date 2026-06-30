@@ -21,6 +21,42 @@ INTENT_SCHEMA = """
 }
 """.strip()
 
+# Structured-output contract so Bedrock returns a valid JSON object instead of
+# prose or markdown. Models behind some inference profiles (e.g. the Sonnet
+# global profile) do not reliably honour a prompt-only "return only JSON"
+# instruction; forcing the shape here keeps intent parsing model-agnostic.
+INTENT_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "resource_type": {"type": "string"},
+        "environment_scope": {
+            "type": "string",
+            "enum": ["non_prod_only", "prod_only", "both"],
+        },
+        "environments": {"type": "array", "items": {"type": "string"}},
+        "region": {"type": "string"},
+        "requires_new_vpc": {"type": "boolean"},
+        "features": {"type": "array", "items": {"type": "string"}},
+        "assumptions": {"type": "array", "items": {"type": "string"}},
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "blocked": {"type": "boolean"},
+        "block_reason": {"type": ["string", "null"]},
+    },
+    "required": [
+        "resource_type",
+        "environment_scope",
+        "environments",
+        "region",
+        "requires_new_vpc",
+        "features",
+        "assumptions",
+        "warnings",
+        "blocked",
+        "block_reason",
+    ],
+    "additionalProperties": False,
+}
+
 
 class BedrockRuntime(Protocol):
     def invoke_model(self, **kwargs: Any) -> dict[str, Any]: ...
@@ -106,6 +142,9 @@ class BedrockIntentClient:
                             "content": prompt,
                         }
                     ],
+                    "output_config": {
+                        "format": {"type": "json_schema", "schema": INTENT_JSON_SCHEMA}
+                    },
                 }
             ),
         )

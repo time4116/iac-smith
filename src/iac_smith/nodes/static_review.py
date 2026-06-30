@@ -521,6 +521,42 @@ def _find_placeholder_input_values(generated_files: dict[str, str]) -> list[str]
     return errors
 
 
+_MOCK_OUTPUTS_RE = re.compile(r"\bmock_outputs\s*=\s*\{")
+# A depth-0 assignment to an empty string or empty list inside a mock_outputs body.
+_EMPTY_MOCK_ASSIGN_RE = re.compile(
+    r'^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(?:""|\[\s*\])\s*$', re.MULTILINE
+)
+
+
+def _find_empty_mock_outputs(generated_files: dict[str, str]) -> list[str]:
+    """Flag empty values inside Terragrunt ``mock_outputs`` blocks.
+
+    ``mock_outputs`` exist to supply plausible stand-in values for ``terragrunt
+    plan`` before the dependency stack is applied. An empty string or empty list
+    (``key = ""`` / ``key = []``) defeats that and surfaces downstream as e.g. ``""
+    is not a valid CIDR block`` or an empty subnet group. Generic: keyed on the
+    ``mock_outputs`` construct, never on a specific output name — the value only
+    feeds ``plan``, never ``apply``, so a realistic non-empty stand-in is correct.
+    """
+    errors: list[str] = []
+    for path, content in generated_files.items():
+        if not path.endswith(".hcl"):
+            continue
+        for match in _MOCK_OUTPUTS_RE.finditer(content):
+            body = _extract_hcl_block_body(content, match.start())
+            if body is None:
+                continue
+            for assign in _EMPTY_MOCK_ASSIGN_RE.finditer(body):
+                errors.append(
+                    f"`{path}` sets `{assign.group(1)}` to an empty value in a "
+                    "`mock_outputs` block. mock_outputs are plan-time stand-ins for an "
+                    "unapplied dependency; an empty value fails downstream (e.g. an invalid "
+                    "CIDR or empty id list). Give it a realistic non-empty value — it feeds "
+                    "`plan` only, never `apply`."
+                )
+    return errors
+
+
 def _find_redacted_placeholders(generated_files: dict[str, str]) -> list[str]:
     """Flag `***` redaction artifacts in generated workflow YAML files.
 
@@ -1211,6 +1247,7 @@ def static_review_generated_files(
     # Security/safety — blocking.
     errors.extend(_find_redacted_placeholders(generated_files))
     errors.extend(_find_placeholder_input_values(generated_files))
+    errors.extend(_find_empty_mock_outputs(generated_files))
 
     # Structural/semantic — advisory + autofix, never blocking.
     structural.extend(_find_undeclared_module_references(generated_files))
