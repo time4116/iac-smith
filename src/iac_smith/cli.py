@@ -11,7 +11,10 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from iac_smith.blackboard import RunBlackboard, normalize_validation_findings
-from iac_smith.dynamic_terraform import BedrockTerraformGenerator
+from iac_smith.dynamic_terraform import (
+    BedrockTerraformGenerator,
+    _inject_missing_child_locals,
+)
 from iac_smith.graph import FileGenerator, IntentParser, build_graph
 from iac_smith.models.change_plan import ChangePlan
 from iac_smith.models.intent import InfrastructureIntent
@@ -353,6 +356,20 @@ def _repair_runtime_static_issues(
     return current_files
 
 
+def _apply_with_child_locals(repo_path: Path, result: IaCSmithState) -> None:
+    """Inject root-derived child locals across the whole tree, then write it.
+
+    A stack generated in isolation — the foundation scaffolded as a plan delta, or
+    by the runtime scaffold below — never shares a generation batch with the
+    environment root, so the generator's per-batch local injection cannot see
+    ``root.hcl``'s locals. Re-run it on the complete tree, where the root and every
+    child coexist, so a child's ``local.environment``/``local.aws_region`` is
+    declared before terragrunt parses the files.
+    """
+    _inject_missing_child_locals(result["generated_files"])
+    apply_generated_files(repo_path, result["generated_files"])
+
+
 def _scaffold_foundation_files(
     *,
     file_generator: FileGenerator,
@@ -398,7 +415,7 @@ def _scaffold_foundation_files(
     )
     result["change_plan"] = expanded
     result["generated_files"] = {**result["generated_files"], **foundation_files}
-    apply_generated_files(repo_path, foundation_files)
+    _apply_with_child_locals(repo_path, result)
     return foundation_files
 
 
@@ -591,7 +608,7 @@ def _run_iac_smith_core(
     _log(f"IaC Smith: creating branch {branch}.")
     create_branch(repo_path, branch)
     _log(f"IaC Smith: writing {len(result['generated_files'])} generated file(s).")
-    apply_generated_files(repo_path, result["generated_files"])
+    _apply_with_child_locals(repo_path, result)
 
     if env.get("IAC_SMITH_SKIP_RUNTIME_VALIDATION") != "1":
         _log("IaC Smith: ensuring terraform/terragrunt versions for target repo.")
@@ -698,7 +715,7 @@ def _run_iac_smith_core(
                     )
                 raise
             result["generated_files"] = repaired_files
-            apply_generated_files(repo_path, repaired_files)
+            _apply_with_child_locals(repo_path, result)
 
         # Surface the Terraform/Terragrunt checks IaC Smith actually ran (fmt,
         # init, validate, local-state plan) in the PR body — these run after the
