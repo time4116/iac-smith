@@ -9,6 +9,7 @@ from iac_smith.dynamic_terraform import (
     BedrockTerraformGenerator,
     _build_apply_workflow,
     _build_pr_check_workflow,
+    _dedup_module_declarations,
     _extract_module_names,
     _normalize_child_terragrunt,
     _path_needs_repair,
@@ -1334,10 +1335,11 @@ class TestPathNeedsRepair:
 
 
 def test_variables_tf_not_repaired_when_only_main_tf_has_duplicate_declarations():
-    """Regression: when main.tf duplicates variable decls from variables.tf, repair
-    must only regenerate main.tf — not variables.tf.  Regenerating variables.tf can
-    drop declarations (e.g. var.project, var.region) that main.tf still references,
-    causing a second static review failure for undeclared variables.
+    """When main.tf duplicates variable decls from variables.tf, the deterministic
+    `_dedup_module_declarations` normalizer strips the main.tf copies before static
+    review — so the duplicate is resolved with no repair round at all, and
+    variables.tf is never regenerated (regenerating it can drop declarations like
+    var.project/var.region that main.tf still references).
     """
     main_tf_bad = (
         'variable "env" { type = string }\n'
@@ -1417,7 +1419,9 @@ def test_variables_tf_not_repaired_when_only_main_tf_has_duplicate_declarations(
 
     assert result["modules/networking/main.tf"] == main_tf_fixed
     assert result["modules/networking/variables.tf"] == variables_tf
-    assert call_count_by_path.get("modules/networking/main.tf", 0) == 2
+    # Deterministic dedup fixes main.tf up front, so no repair round is needed:
+    # each file is generated exactly once.
+    assert call_count_by_path.get("modules/networking/main.tf", 0) == 1
     assert call_count_by_path.get("modules/networking/variables.tf", 0) == 1
 
 
@@ -1747,6 +1751,100 @@ class TestNormalizeChildTerragrunt:
         before = dict(files)
         _normalize_child_terragrunt(files)
         assert files == before
+
+    def test_declares_stack_name_and_environment_derived_from_path(self):
+        # A child that references local.stack_name (or local.environment) must get
+        # them declared from its own path — the root does not expose stack_name, so
+        # the rebuilt envelope would otherwise fail with "Unsupported attribute".
+        files = {
+            **self._root(),
+            self._STACK: (
+                'include "root" { path = find_in_parent_folders("root.hcl") }\n'
+                'terraform { source = "../../../modules/ecs-fargate" }\n'
+                "inputs = {\n  name        = local.stack_name\n"
+                "  environment = local.environment\n}\n"
+            ),
+        }
+        _normalize_child_terragrunt(files)
+        child = files[self._STACK]
+        assert 'stack_name = "ecs-fargate"' in child
+        assert 'environment = "non-prod"' in child
+        assert child.count("locals {") == 1
+
+    def test_root_environment_wins_over_derived(self):
+        # The root's own environment value takes precedence over the path-derived one.
+        files = {
+            "environments/prod/root.hcl": (
+                'locals {\n  environment = "prod"\n  aws_region  = "us-east-1"\n}\n'
+            ),
+            "environments/prod/ecs-fargate/terragrunt.hcl": (
+                "inputs = { environment = local.environment }\n"
+            ),
+        }
+        _normalize_child_terragrunt(files)
+        child = files["environments/prod/ecs-fargate/terragrunt.hcl"]
+        assert child.count('environment = "prod"') == 1
+
+
+class TestDedupModuleDeclarations:
+    def test_removes_variable_duplicated_in_main_tf(self):
+        files = {
+            "modules/db/variables.tf": (
+                'variable "environment" {\n  type = string\n}\n'
+                'variable "instance_class" {\n  type = string\n}\n'
+            ),
+            "modules/db/main.tf": (
+                'variable "environment" {\n  type = string\n}\n'
+                'resource "aws_db_instance" "this" {\n  instance_class = var.instance_class\n}\n'
+            ),
+        }
+        _dedup_module_declarations(files)
+        main_tf = files["modules/db/main.tf"]
+        assert 'variable "environment"' not in main_tf
+        # The real resource is preserved.
+        assert 'resource "aws_db_instance" "this"' in main_tf
+        # variables.tf is authoritative and untouched.
+        assert files["modules/db/variables.tf"].count('variable "environment"') == 1
+
+    def test_keeps_variable_declared_only_in_main_tf(self):
+        files = {
+            "modules/db/variables.tf": 'variable "environment" {\n  type = string\n}\n',
+            "modules/db/main.tf": 'variable "only_here" {\n  type = string\n}\n',
+        }
+        _dedup_module_declarations(files)
+        assert 'variable "only_here"' in files["modules/db/main.tf"]
+
+    def test_dedups_outputs_too(self):
+        endpoint_output = 'output "endpoint" {\n  value = aws_db_instance.this.endpoint\n}\n'
+        files = {
+            "modules/db/outputs.tf": endpoint_output,
+            "modules/db/main.tf": endpoint_output + 'resource "aws_db_instance" "this" {}\n',
+        }
+        _dedup_module_declarations(files)
+        assert 'output "endpoint"' not in files["modules/db/main.tf"]
+        assert 'resource "aws_db_instance" "this"' in files["modules/db/main.tf"]
+
+    def test_noop_without_dedicated_file(self):
+        files = {
+            "modules/db/main.tf": 'variable "environment" {\n  type = string\n}\n',
+        }
+        before = dict(files)
+        _dedup_module_declarations(files)
+        assert files == before
+
+    def test_handles_nested_braces_in_variable_block(self):
+        files = {
+            "modules/db/variables.tf": 'variable "tags" {\n  type = map(string)\n}\n',
+            "modules/db/main.tf": (
+                'variable "tags" {\n  type = object({\n    Name = string\n  })\n'
+                "  default = {}\n}\n"
+                'resource "aws_db_instance" "this" {}\n'
+            ),
+        }
+        _dedup_module_declarations(files)
+        main_tf = files["modules/db/main.tf"]
+        assert 'variable "tags"' not in main_tf
+        assert 'resource "aws_db_instance" "this"' in main_tf
 
 
 class TestWireFoundationDependency:
