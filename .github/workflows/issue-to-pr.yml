@@ -13,6 +13,14 @@ on:
         description: 'Repo containing the issue (e.g. time4116/iac-smith-demo-infra)'
         required: true
         type: string
+      generation_mode:
+        description: 'Generation mode'
+        required: false
+        type: choice
+        default: spec_renderer
+        options:
+          - spec_renderer
+          - freeform
 
 permissions:
   actions: read
@@ -79,6 +87,7 @@ jobs:
           IAC_SMITH_GITHUB_TOKEN: ${{ github.event_name == 'workflow_dispatch' && secrets.IAC_SMITH_TARGET_REPO_PAT || github.token }}
           IAC_SMITH_SOURCE_REPO: ${{ inputs.source_repo || github.repository }}
           IAC_SMITH_ISSUE_NUMBER: ${{ inputs.issue_number || github.event.issue.number }}
+          IAC_SMITH_GENERATION_MODE: ${{ inputs.generation_mode || 'spec_renderer' }}
           BEDROCK_MODEL_ID: ${{ secrets.BEDROCK_MODEL_ID }}
           # Stronger model used ONLY for the final runtime repair attempt, on the
           # failing files, when the primary model cannot self-correct a
