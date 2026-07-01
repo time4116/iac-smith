@@ -1,6 +1,5 @@
 import json
 import threading
-import time
 
 import botocore.exceptions
 import pytest
@@ -111,18 +110,30 @@ class FakeBedrockRuntime:
 
 
 class BlockingBedrockRuntime(FakeBedrockRuntime):
-    def __init__(self, files: dict[str, str]):
+    def __init__(self, files: dict[str, str], expected_concurrency: int = 2):
         super().__init__(files)
         self.active = 0
         self.max_active = 0
+        self.expected_concurrency = expected_concurrency
         self.lock = threading.Lock()
+        # Set once expected_concurrency calls are simultaneously in-flight. Gating on
+        # this event (rather than wall-clock sleep overlap) makes the concurrency
+        # proof deterministic on loaded/low-core CI runners, and — unlike a fixed
+        # barrier cohort — does not depend on the total call count being even.
+        self.reached_concurrency = threading.Event()
 
     def invoke_model(self, **kwargs):
         with self.lock:
             self.active += 1
             self.max_active = max(self.max_active, self.active)
+            if self.active >= self.expected_concurrency:
+                self.reached_concurrency.set()
         try:
-            time.sleep(0.05)
+            # Block until the concurrency high-water mark is observed; once reached,
+            # every call (including the final odd one) passes straight through. A
+            # serialized generator never sets the event and each call trips the
+            # timeout, leaving max_active below the assertion threshold.
+            self.reached_concurrency.wait(timeout=10)
             return super().invoke_model(**kwargs)
         finally:
             with self.lock:
