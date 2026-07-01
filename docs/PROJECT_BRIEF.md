@@ -504,7 +504,7 @@ Warning rules do not block PR creation but must be disclosed in the PR.
 Examples:
 - region defaulted because none was specified,
 - public ALB created because request implied public service,
-- new VPC created because no existing network was specified,
+- existing network referenced because none was explicitly provided,
 - default CIDR ranges used,
 - plan skipped or partially run because credentials/backend were unavailable.
 

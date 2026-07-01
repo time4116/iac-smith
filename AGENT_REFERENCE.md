@@ -209,7 +209,7 @@ environments/{env}/{stack_name}/terragrunt.hcl
 environments/{env}/{stack_name}/README.md
 ```
 
-**If `requires_new_vpc: true` (foundation module):**
+**Foundation files (only when the repo already has a foundation, or scaffolded reactively):**
 ```
 modules/foundation/main.tf
 modules/foundation/variables.tf
@@ -220,9 +220,19 @@ environments/{env}/foundation/terragrunt.hcl
 environments/{env}/foundation/README.md
 ```
 
-**Foundation auto-scaffold (feedback-driven):** `requires_new_vpc` is the *up-front*
-signal, but it is often false for a workload that still turns out to need shared
-networking. So if the generated output itself declares a `dependency "foundation"`
+**Reference-existing networking is the deterministic default.** `plan_changes` never
+schedules a shared-networking foundation up-front on a fresh repo. The parsed
+`requires_new_vpc` intent field is **no longer a generation trigger**: it is
+model-parsed and flip-flopped between runs of the same issue, so the same request
+sometimes produced a whole VPC foundation and sometimes not. `_uses_foundation` now
+keys solely off deterministic repo state (`_repo_has_foundation`) — a foundation is
+*followed* only when one already exists in the target repo. Otherwise a workload
+sources the networking it needs from existing infrastructure (inputs / data sources),
+and a foundation is created only reactively (below) when generated output proves a
+cross-stack dependency is truly needed.
+
+**Foundation auto-scaffold (feedback-driven):** this is the sole path that adds a
+foundation to a fresh repo. If the generated output itself declares a `dependency "foundation"`
 (or `baseline`/`vpc`/`vpc-foundation` — `FOUNDATION_STACK_NAMES`) pointing at a stack
 that is neither created by this change nor present in the target repo,
 `validation_runner` calls `add_foundation_stack(change_plan)` to add the foundation

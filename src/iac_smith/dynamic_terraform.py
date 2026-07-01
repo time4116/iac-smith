@@ -703,25 +703,34 @@ terraform {
   source = "../../../modules/ecs-fargate"
 }
 
-# ALWAYS use dependency blocks to consume outputs from another stack.
-# NEVER write module.<name>.output_name — that syntax only works inside a Terraform module, not in terragrunt.
-# ALWAYS include mock_outputs so that `terragrunt plan` works in CI before the dependency is deployed.
-dependency "foundation" {
-  config_path = "../foundation"
-
-  mock_outputs = {
-    vpc_id             = "vpc-00000000000000000"
-    private_subnet_ids = ["subnet-00000000000000000"]
-    public_subnet_ids  = ["subnet-11111111111111111"]
-  }
-  mock_outputs_allowed_terraform_commands = ["validate", "plan"]
-}
+# DEFAULT — no foundation stack in this change: the workload sources the shared
+# networking it needs from EXISTING infrastructure. Pass the VPC/subnet ids in as
+# inputs (or read them inside the module with data sources). Do NOT invent a
+# `dependency "foundation"` on a stack that is not part of this change — that fails
+# `terragrunt plan`.
+#
+# ONLY when a foundation stack IS part of this change (its terragrunt.hcl is in
+# files_to_generate) or already exists in the repo do you consume its outputs
+# through a dependency block. You do not need to hand-author that block: when a
+# foundation stack is present it is wired in deterministically. If you do write it:
+#   - ALWAYS use dependency blocks to consume outputs from another stack.
+#   - NEVER write module.<name>.output_name — that only works inside a Terraform module.
+#   - ALWAYS include mock_outputs so `terragrunt plan` works in CI before it is deployed:
+#     dependency "foundation" {
+#       config_path = "../foundation"
+#       mock_outputs = {
+#         vpc_id             = "vpc-00000000000000000"
+#         private_subnet_ids = ["subnet-00000000000000000"]
+#         public_subnet_ids  = ["subnet-11111111111111111"]
+#       }
+#       mock_outputs_allowed_terraform_commands = ["validate", "plan"]
+#     }
 
 inputs = {
   environment        = local.environment
   aws_region         = local.aws_region   # pass EVERY required (no-default) module variable
-  vpc_id             = dependency.foundation.outputs.vpc_id
-  private_subnet_ids = dependency.foundation.outputs.private_subnet_ids
+  # DEFAULT: pass the existing VPC/subnet ids the workload should use.
+  # With a foundation stack present, these are wired to dependency.foundation.outputs.*.
 }
 ```
 
@@ -1069,6 +1078,12 @@ Non-negotiable rules:
   `data "aws_vpc"`, `data "aws_subnets"`, or the account's default VPC). A
   `dependency` pointing at a directory that does not exist fails `terragrunt
   plan` with "There is no variable named dependency".
+  When you read existing networking with a data source, make the lookup explicit
+  and required — do NOT default a lookup key to an empty string (e.g.
+  `variable "vpc_id" {{ default = "" }}` feeding `data "aws_vpc" {{ id = var.vpc_id }}`,
+  or `get_env("TF_VAR_vpc_id", "")`). An empty id silently resolves to an
+  arbitrary/default VPC. Declare the networking variable with NO default so an
+  unset value fails loudly, or select by an explicit filter/tag the issue names.
 * Generate complete, syntactically valid file bodies for each requested path.
   Do not use placeholder comments instead of Terraform resources when the issue
   asks for concrete infrastructure.

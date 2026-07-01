@@ -48,9 +48,10 @@ def _foundation_files(environments: list[str]) -> list[str]:
 def add_foundation_stack(change_plan: ChangePlan) -> ChangePlan:
     """Return a plan with the foundation module + stack added, if not already present.
 
-    Used when generated output proves a foundation is truly needed (a workload stack
-    depends on one that was not planned) — see ``plan_changes`` for the up-front
-    decision. Idempotent: adds only the foundation files missing from the plan.
+    On a fresh repo ``plan_changes`` never schedules a foundation up-front (see
+    ``_uses_foundation``); this is the sole path that adds one, invoked when
+    generated output proves it is truly needed (a workload stack depends on one
+    that was not planned). Idempotent: adds only the foundation files missing.
     """
     planned = set(change_plan.files_to_generate)
     additions = [f for f in _foundation_files(change_plan.environments) if f not in planned]
@@ -82,22 +83,26 @@ def _repo_has_foundation(repo_patterns: RepoPatterns | None) -> bool:
 
 def _uses_foundation(
     stack_name: str,
-    intent: InfrastructureIntent,
     repo_patterns: RepoPatterns | None,
 ) -> bool:
+    # A workload uses a foundation only when the repo already has one to follow.
+    # We do NOT speculatively decide a fresh repo needs a shared-networking stack
+    # from parsed intent (`requires_new_vpc`): that signal is model-parsed and
+    # flip-flops between runs of the same issue, which made the same request
+    # sometimes generate a whole VPC foundation and sometimes not. Referencing
+    # existing networking is the deterministic default; a foundation is scaffolded
+    # only reactively, when generated output proves a cross-stack dependency is
+    # truly needed (see add_foundation_stack).
     if _is_foundation_stack(stack_name):
         return False
-    return _repo_has_foundation(repo_patterns) or intent.requires_new_vpc
+    return _repo_has_foundation(repo_patterns)
 
 
 def _should_generate_foundation(
     stack_name: str,
-    intent: InfrastructureIntent,
     repo_patterns: RepoPatterns | None,
 ) -> bool:
-    return _uses_foundation(stack_name, intent, repo_patterns) and not _repo_has_foundation(
-        repo_patterns
-    )
+    return _uses_foundation(stack_name, repo_patterns) and not _repo_has_foundation(repo_patterns)
 
 
 def _planned_environments(
@@ -167,7 +172,7 @@ def plan_changes(
             ]
         )
 
-    if _should_generate_foundation(stack_name, intent, repo_patterns):
+    if _should_generate_foundation(stack_name, repo_patterns):
         files.extend(_foundation_files(environments))
 
     # Only generate module scaffold if the repo doesn't already have one for this stack.
@@ -193,13 +198,8 @@ def plan_changes(
             f"Reusing existing modules/{stack_name} from repository — "
             "new live path wired to existing module"
         )
-    if _uses_foundation(stack_name, intent, repo_patterns):
-        if _repo_has_foundation(repo_patterns):
-            summary.append(
-                "Follow existing foundation module pattern for shared network dependencies"
-            )
-        else:
-            summary.append("Generate foundation module for shared network dependencies")
+    if _uses_foundation(stack_name, repo_patterns):
+        summary.append("Follow existing foundation module pattern for shared network dependencies")
 
     return ChangePlan(
         stack_name=stack_name,
