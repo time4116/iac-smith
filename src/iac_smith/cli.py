@@ -529,21 +529,21 @@ def _run_iac_smith_core(
     state = build_initial_state(env, issue_client=issue_client)
     _log(f"IaC Smith: fetched issue #{state.get('issue_number')}: {state.get('issue_title')}")
     state["target_repo_path"] = str(repo_path)
-    generation_mode = env.get("IAC_SMITH_GENERATION_MODE", "freeform")
+    generation_mode = env.get("IAC_SMITH_GENERATION_MODE", "spec_renderer")
     runtime_repairer: RuntimeRepairer | None = None
     escalation_repairer: RuntimeRepairer | None = None
     if file_generator_fn:
         selected_file_generator = file_generator_fn
         if hasattr(file_generator_fn, "repair_files"):
             runtime_repairer = file_generator_fn  # type: ignore[assignment]
-    elif generation_mode == "spec_renderer":
-        generator = SpecRendererGenerator()
-        selected_file_generator = generator.generate_files
-    else:
+    elif generation_mode == "freeform":
         generator = BedrockTerraformGenerator(logger=_log)
         selected_file_generator = generator.generate_files
         runtime_repairer = generator
         escalation_repairer = _build_escalation_repairer(env, generator.model_id)
+    else:
+        generator = SpecRendererGenerator()
+        selected_file_generator = generator.generate_files
     graph = (
         build_graph(
             intent_parser_fn=intent_parser_fn,
@@ -678,6 +678,7 @@ def _run_iac_smith_core(
             change_plan=result["change_plan"],
             validation=result["validation"],
             runtime_checks=runtime_validation.checks,
+            generated_files=result.get("generated_files"),
         )
 
         if env.get("IAC_SMITH_GENERATE_LOCKFILE") != "0":

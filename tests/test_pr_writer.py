@@ -35,3 +35,37 @@ def test_pr_body_uses_planned_environment_names_when_repo_patterns_override_inte
     # Without runtime checks, only the security review group renders.
     assert "**Security review**" in body
     assert "**Terraform / Terragrunt validation**" not in body
+
+
+def test_pr_body_surfaces_structure_only_spec_renderer_warning():
+    intent = InfrastructureIntent(
+        raw_request="Create infrastructure",
+        resource_type="example",
+        environment_scope=EnvironmentScope.NON_PROD_ONLY,
+        environments=["non-prod"],
+        region="us-west-2",
+    )
+    plan = ChangePlan(
+        stack_name="example",
+        environments=["non-prod"],
+        files_to_generate=["modules/example/main.tf"],
+        backend_resources={
+            "non-prod": BackendResource(
+                bucket="iac-smith-dev-tfstate", lock_table="iac-smith-dev-lock"
+            )
+        },
+        summary=["Generated deterministic structure."],
+    )
+
+    body = build_pr_body(
+        issue_url="https://github.com/time4116/iac-smith/issues/1",
+        intent=intent,
+        change_plan=plan,
+        validation=ValidationResult(status=ValidationStatus.PASSED),
+        generated_files={
+            "modules/example/main.tf": "# No provider resources were selected for this component.\n"
+        },
+    )
+
+    assert "Structure-only PR" in body
+    assert "selected no provider resources" in body

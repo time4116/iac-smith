@@ -5,6 +5,7 @@ from iac_smith.eval import evaluate_fixture, report_to_text
 from iac_smith.models.change_plan import BackendResource, ChangePlan
 from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
+from iac_smith.runtime_validation import RuntimeStepResult
 from iac_smith.spec_renderer import (
     build_spec_from_intent,
     discover_foundation_outputs,
@@ -158,7 +159,26 @@ def test_eval_runtime_columns_are_wired_with_injected_validator(tmp_path: Path, 
         passed = True
         checks = ["`terraform validate` in `modules/example`", "`terragrunt plan` in `env`"]
         errors = []
-        contract_docs = {}
+        step_results = [
+            RuntimeStepResult(
+                phase="terraform_validate",
+                command="terraform validate",
+                location="modules/example",
+                passed=True,
+            ),
+            RuntimeStepResult(
+                phase="terragrunt_validate",
+                command="terragrunt hclfmt",
+                location="environments",
+                passed=True,
+            ),
+            RuntimeStepResult(
+                phase="terragrunt_plan",
+                command="terragrunt plan",
+                location="environments/non-prod/example",
+                passed=True,
+            ),
+        ]
 
     def fake_validate(repo_path, env_override=None):
         calls.append((repo_path, env_override))
@@ -190,3 +210,51 @@ def test_eval_runtime_columns_are_wired_with_injected_validator(tmp_path: Path, 
     assert report.terragrunt_validate_pass == 2
     assert report.terragrunt_plan_pass == 2
     assert "terragrunt_plan_pass: 2/2" in report_to_text(report)
+
+
+def test_eval_runtime_columns_use_structured_step_results(tmp_path: Path, monkeypatch):
+    class FakeRuntimeResult:
+        passed = False
+        checks = []
+        errors = ["terragrunt hclfmt failed, terraform never failed"]
+        step_results = [
+            RuntimeStepResult(
+                phase="terraform_validate",
+                command="terraform validate",
+                location="modules/example",
+                passed=True,
+            ),
+            RuntimeStepResult(
+                phase="terragrunt_validate",
+                command="terragrunt hclfmt",
+                location="environments",
+                passed=False,
+                output="bad hcl",
+            ),
+        ]
+
+    monkeypatch.setattr(
+        "iac_smith.eval.validate_generated_iac", lambda *a, **k: FakeRuntimeResult()
+    )
+    fixture = tmp_path / "fixture.yaml"
+    replay = tmp_path / "replay.yaml"
+    fixture.write_text(
+        "issue_number: 59\n"
+        "target_repo: time4116/iac-smith-demo-infra\n"
+        "issue_body: Create Aurora PostgreSQL\n",
+        encoding="utf-8",
+    )
+    replay.write_text(
+        "intents:\n"
+        "  - raw_request: Create Aurora PostgreSQL\n"
+        "    resource_type: aurora_postgres\n"
+        "    environment_scope: non_prod_only\n"
+        "    environments: [non-prod]\n"
+        "    region: us-west-2\n",
+        encoding="utf-8",
+    )
+
+    report = evaluate_fixture(fixture, runs=1, replay_path=replay, run_runtime=True)
+
+    assert report.terraform_validate_pass == 1
+    assert report.terragrunt_validate_pass == 0

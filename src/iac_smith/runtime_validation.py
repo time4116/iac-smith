@@ -15,11 +15,21 @@ from iac_smith.blackboard import (
 
 
 @dataclass(frozen=True)
+class RuntimeStepResult:
+    phase: str
+    command: str
+    location: str
+    passed: bool
+    output: str = ""
+
+
+@dataclass(frozen=True)
 class RuntimeValidationResult:
     passed: bool
     checks: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     contract_docs: dict[str, TerraformContract] = field(default_factory=dict)
+    step_results: list[RuntimeStepResult] = field(default_factory=list)
 
 
 def _check_timeout(env: dict[str, str]) -> int:
@@ -231,7 +241,7 @@ def _force_local_state(scratch_root: Path) -> None:
 
 def _run_local_state_plans(
     root: Path, env: dict[str, str], non_interactive: str
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[RuntimeStepResult]]:
     """Run ``terragrunt plan`` per stack against local state.
 
     Returns ``(passed_checks, errors)`` where each passed check names the literal
@@ -245,11 +255,12 @@ def _run_local_state_plans(
     """
     _, terragrunt_stacks = _changed_roots(root)
     if not terragrunt_stacks:
-        return [], []
+        return [], [], []
 
     plan_command = ["terragrunt", "plan", non_interactive, "-input=false"]
     checks: list[str] = []
     errors: list[str] = []
+    step_results: list[RuntimeStepResult] = []
     with tempfile.TemporaryDirectory(prefix="iac-smith-plan-") as tmp:
         scratch = Path(tmp) / "repo"
         shutil.copytree(
@@ -264,12 +275,21 @@ def _run_local_state_plans(
             rel = stack.relative_to(root).as_posix()
             stack_dir = scratch / stack.relative_to(root)
             ok, output = _run_check(plan_command, stack_dir, env)
+            step_results.append(
+                RuntimeStepResult(
+                    phase="terragrunt_plan",
+                    command=" ".join(plan_command),
+                    location=rel,
+                    passed=ok,
+                    output=output,
+                )
+            )
             if ok:
                 checks.append(f"`{' '.join(plan_command)}` in `{rel}` (local state)")
                 continue
             errors.append(f"terragrunt plan {rel} failed in `{rel}`:\n{output}")
             break
-    return checks, errors
+    return checks, errors, step_results
 
 
 def validate_generated_iac(
@@ -288,6 +308,7 @@ def validate_generated_iac(
     root = Path(repo_path)
     checks: list[str] = []
     errors: list[str] = []
+    step_results: list[RuntimeStepResult] = []
     env = {
         **(env_override or os.environ),
         "TF_INPUT": "false",
@@ -301,14 +322,25 @@ def validate_generated_iac(
         return RuntimeValidationResult(
             passed=False,
             errors=["Missing required validation command(s): " + ", ".join(missing)],
+            step_results=[
+                RuntimeStepResult(
+                    phase="prerequisite",
+                    command=command,
+                    location="PATH",
+                    passed=False,
+                    output="Missing required validation command.",
+                )
+                for command in missing
+            ],
         )
 
     terragrunt_hclfmt_cmd, non_interactive = _detect_terragrunt(env)
-    command_specs: list[tuple[str, list[str], Path]] = []
+    command_specs: list[tuple[str, str, list[str], Path]] = []
     if (root / "environments").exists():
         command_specs.append(
             (
                 "terragrunt hclfmt",
+                "terragrunt_validate",
                 terragrunt_hclfmt_cmd,
                 root / "environments",
             )
@@ -320,6 +352,7 @@ def validate_generated_iac(
         command_specs.append(
             (
                 "terraform fmt",
+                "terraform_validate",
                 ["terraform", "fmt", "-recursive", *fmt_paths],
                 root,
             )
@@ -330,6 +363,7 @@ def validate_generated_iac(
         command_specs.append(
             (
                 f"terraform init {module_root.relative_to(root)}",
+                "terraform_validate",
                 ["terraform", "init", "-backend=false", "-input=false"],
                 module_root,
             )
@@ -337,16 +371,26 @@ def validate_generated_iac(
         command_specs.append(
             (
                 f"terraform validate {module_root.relative_to(root)}",
+                "terraform_validate",
                 ["terraform", "validate"],
                 module_root,
             )
         )
 
     contract_docs: dict[str, TerraformContract] = {}
-    for label, command, cwd in command_specs:
+    for label, phase, command, cwd in command_specs:
         ok, output = _run_check(command, cwd, env)
         where = cwd.relative_to(root).as_posix()
         location = "repo root" if where == "." else f"`{where}`"
+        step_results.append(
+            RuntimeStepResult(
+                phase=phase,
+                command=" ".join(command),
+                location=where,
+                passed=ok,
+                output=output,
+            )
+        )
         if ok:
             checks.append(f"`{' '.join(command)}` in {location}")
             # A successful init means the module's providers are installed, so the
@@ -363,12 +407,17 @@ def validate_generated_iac(
     # the repair loop before a PR is opened. Opt-in: the controller's AWS role
     # must have read/describe permissions for the providers being planned.
     if not errors and env.get("IAC_SMITH_RUNTIME_PLAN") == "1":
-        plan_checks, plan_errors = _run_local_state_plans(root, env, non_interactive)
+        plan_checks, plan_errors, plan_steps = _run_local_state_plans(root, env, non_interactive)
+        step_results.extend(plan_steps)
         if plan_errors:
             errors.extend(plan_errors)
         else:
             checks.extend(plan_checks)
 
     return RuntimeValidationResult(
-        passed=not errors, checks=checks, errors=errors, contract_docs=contract_docs
+        passed=not errors,
+        checks=checks,
+        errors=errors,
+        contract_docs=contract_docs,
+        step_results=step_results,
     )

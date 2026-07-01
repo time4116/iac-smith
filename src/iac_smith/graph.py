@@ -59,8 +59,8 @@ def default_file_generator(
     repo_path: Path | None = None,
     blackboard: RunBlackboard | None = None,
 ) -> dict[str, str]:
-    if os.getenv("IAC_SMITH_GENERATION_MODE", "freeform") == "spec_renderer":
-        return SpecRendererGenerator().generate_files(
+    if os.getenv("IAC_SMITH_GENERATION_MODE") == "freeform":
+        return BedrockTerraformGenerator().generate_files(
             intent=intent,
             change_plan=change_plan,
             repo_patterns=repo_patterns,
@@ -69,7 +69,7 @@ def default_file_generator(
             repo_path=repo_path,
             blackboard=blackboard,
         )
-    return BedrockTerraformGenerator().generate_files(
+    return SpecRendererGenerator().generate_files(
         intent=intent,
         change_plan=change_plan,
         repo_patterns=repo_patterns,
@@ -262,6 +262,7 @@ def pr_writer(state: IaCSmithState) -> IaCSmithState:
             intent=state["intent"],
             change_plan=state["change_plan"],
             validation=state["validation"],
+            generated_files=state.get("generated_files"),
         ),
         "status": "pr_ready",
     }

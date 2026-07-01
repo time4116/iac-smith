@@ -96,13 +96,19 @@ def _runtime_result_for(
         if run_plan:
             env["IAC_SMITH_RUNTIME_PLAN"] = "1"
         result = validate_generated_iac(repo_root, env_override=env)
-    terraform_validate = result.passed or not any("terraform" in e.lower() for e in result.errors)
-    terragrunt_validate = result.passed or not any("terragrunt" in e.lower() for e in result.errors)
-    if any("Missing required validation command" in e for e in result.errors):
+    terraform_steps = [step for step in result.step_results if step.phase == "terraform_validate"]
+    terragrunt_steps = [step for step in result.step_results if step.phase == "terragrunt_validate"]
+    plan_steps = [step for step in result.step_results if step.phase == "terragrunt_plan"]
+    prerequisite_failed = any(
+        step.phase == "prerequisite" and not step.passed for step in result.step_results
+    )
+    terraform_validate = bool(terraform_steps) and all(step.passed for step in terraform_steps)
+    terragrunt_validate = bool(terragrunt_steps) and all(step.passed for step in terragrunt_steps)
+    if prerequisite_failed:
         return False, False, False if run_plan else None, result.errors
     terragrunt_plan = None
     if run_plan:
-        terragrunt_plan = result.passed or not any("terragrunt plan" in e for e in result.errors)
+        terragrunt_plan = bool(plan_steps) and all(step.passed for step in plan_steps)
     return terraform_validate, terragrunt_validate, terragrunt_plan, result.errors
 
 

@@ -58,9 +58,9 @@ IaC Smith will refuse requests that are genuinely destructive or risky rather th
 
 ## Generation modes and local evals
 
-The default generation mode remains the existing Bedrock free-form Terraform generator. To exercise the typed-spec compiler path, set `IAC_SMITH_GENERATION_MODE=spec_renderer`. In this mode IaC Smith builds an `InfrastructureSpec` from parsed intent and the deterministic change plan, then renders repository structure, Terragrunt envelopes, backend bootstrap, workflows, module variables, outputs, and cross-stack dependency wiring from the spec.
+The default generation mode is the typed-spec compiler. IaC Smith builds an `InfrastructureSpec` from parsed intent and the deterministic change plan, then renders repository structure, Terragrunt envelopes, backend bootstrap, workflows, module variables, outputs, and cross-stack dependency wiring from the spec. The previous Bedrock free-form Terraform generator remains available only as an explicit escape hatch with `IAC_SMITH_GENERATION_MODE=freeform`.
 
-The spec renderer validates the spec before rendering so module paths, Terragrunt inputs, dependency outputs, and variables are compiled together instead of repaired after independent per-file generation. Existing foundation outputs are discovered from the target repository's `modules/foundation/outputs.tf` when available. Provider resources are intentionally not keyword-selected in this mode; registry/module or provider-schema composition must select them generically before the renderer emits apply-ready resource bodies.
+The spec renderer validates the spec before rendering so module paths, Terragrunt inputs, dependency outputs, and variables are compiled together instead of repaired after independent per-file generation. Existing foundation outputs are discovered from the target repository's `modules/foundation/outputs.tf` when available. Provider resources are intentionally not keyword-selected yet; registry/module or provider-schema composition must select them generically before the renderer emits apply-ready resource bodies. Generated PR bodies explicitly warn when a PR is structure-only and contains placeholder module bodies.
 
 Use the local eval harness before changing generation behavior:
 
