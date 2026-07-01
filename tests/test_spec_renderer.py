@@ -55,7 +55,14 @@ def test_build_spec_from_intent_records_components_contracts_and_no_new_foundati
     assert spec.stack_name == "aurora-postgres"
     assert [component.name for component in spec.components] == ["aurora-postgres"]
     assert spec.components[0].implementation.kind == "provider_resources"
-    assert spec.components[0].implementation.resources == []
+    assert [resource.type for resource in spec.components[0].implementation.resources] == [
+        "aws_kms_key",
+        "aws_rds_cluster",
+        "aws_rds_cluster_instance",
+        "aws_db_proxy",
+        "aws_secretsmanager_secret",
+        "aws_secretsmanager_secret_rotation",
+    ]
     assert spec.dependencies[0].producer == "foundation"
     assert spec.dependencies[0].outputs == ["vpc_id", "private_subnet_ids"]
     assert spec.rendering_policy == "deterministic_structure_only"
@@ -80,7 +87,7 @@ def test_render_spec_owns_cross_file_contracts_deterministically():
 
     assert 'terraform {\n  source = "../../../modules/aurora-postgres"\n}' in stack_hcl
     assert 'dependency "foundation"' in stack_hcl
-    assert "vpc_id             = dependency.foundation.outputs.vpc_id" in stack_hcl
+    assert "vpc_id = dependency.foundation.outputs.vpc_id" in stack_hcl
     assert 'variable "vpc_id"' in variables
     assert 'variable "private_subnet_ids"' in variables
     assert 'resource "aws_vpc"' not in first["modules/aurora-postgres/main.tf"]

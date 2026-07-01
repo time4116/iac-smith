@@ -12,8 +12,10 @@ from pydantic import BaseModel, Field
 
 from iac_smith.models.change_plan import ChangePlan
 from iac_smith.models.intent import InfrastructureIntent
+from iac_smith.models.repo_patterns import RepoPatterns
 from iac_smith.nodes.change_planner import plan_changes as default_plan_changes
 from iac_smith.nodes.static_review import static_review_generated_files
+from iac_smith.spec_renderer import SpecRendererGenerator
 
 
 class EvalRunResult(BaseModel):
@@ -52,36 +54,65 @@ def _load_fixture(path: Path) -> dict[str, Any]:
     return data
 
 
+def _load_replay_intents(path: Path | None) -> list[InfrastructureIntent] | None:
+    if path is None:
+        return None
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    raw_intents = data.get("intents") if isinstance(data, dict) else data
+    if not isinstance(raw_intents, list) or not raw_intents:
+        raise ValueError(f"Replay file {path} must contain a non-empty `intents` list.")
+    return [InfrastructureIntent.model_validate(raw) for raw in raw_intents]
+
+
+def _replay_parser(intents: list[InfrastructureIntent]) -> Callable[[str], InfrastructureIntent]:
+    index = 0
+
+    def parse(_issue_body: str) -> InfrastructureIntent:
+        nonlocal index
+        intent = intents[index % len(intents)]
+        index += 1
+        return intent
+
+    return parse
+
+
 def evaluate_fixture(
     fixture_path: str | Path,
     *,
     runs: int = 3,
-    parse_intent: Callable[[str], InfrastructureIntent],
+    parse_intent: Callable[[str], InfrastructureIntent] | None = None,
     plan_changes: Callable[[InfrastructureIntent, str], ChangePlan] | None = None,
-    generate_files: Callable[..., dict[str, str]],
+    generate_files: Callable[..., dict[str, str]] | None = None,
+    replay_path: str | Path | None = None,
 ) -> EvalReport:
-    """Run a deterministic local variance harness for one issue fixture.
+    """Run a local variance harness for one issue fixture.
 
-    Callers inject parser/generator functions so tests can use recorded responses,
-    while live commands can supply Bedrock-backed functions. The report measures
-    exactly the instability that made issue-level live runs impossible to reason
-    about: intent, plan, rendered files, and validation failures.
+    Use ``replay_path`` to run without live Bedrock. Replay files contain recorded
+    structured intents and can be committed as fixtures for deterministic
+    regression tests.
     """
 
     fixture = _load_fixture(Path(fixture_path))
+    replay_intents = _load_replay_intents(Path(replay_path)) if replay_path else None
+    parser = parse_intent or (_replay_parser(replay_intents) if replay_intents else None)
+    if parser is None:
+        raise ValueError("evaluate_fixture requires parse_intent or replay_path.")
     planner = plan_changes or default_plan_changes
+    generator = generate_files or SpecRendererGenerator().generate_files
+    repo_patterns = RepoPatterns.model_validate(fixture.get("repo_patterns") or {})
     results: list[EvalRunResult] = []
     failures: Counter[str] = Counter()
 
     for _ in range(runs):
-        intent = parse_intent(fixture["issue_body"])
+        intent = parser(fixture["issue_body"])
         change_plan = planner(intent, fixture["target_repo"])
-        generated_files = generate_files(
+        generated_files = generator(
             intent=intent,
             change_plan=change_plan,
-            repo_patterns=fixture.get("repo_patterns"),
+            repo_patterns=repo_patterns,
             ruleset=None,
             target_repo=fixture["target_repo"],
+            repo_path=fixture.get("repo_path"),
         )
         validation = static_review_generated_files(generated_files)
         run_failures = [*validation.errors, *validation.structural]
@@ -134,19 +165,19 @@ def main() -> None:
     import argparse
 
     from iac_smith.bedrock_intent import BedrockIntentClient
-    from iac_smith.graph import default_file_generator
 
     parser = argparse.ArgumentParser(description="Run IaC Smith local variance evals.")
     parser.add_argument("fixture", type=Path)
     parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--replay", type=Path, help="YAML file containing recorded intents")
     args = parser.parse_args()
 
-    client = BedrockIntentClient()
+    parse_intent = None if args.replay else BedrockIntentClient().parse_issue
     report = evaluate_fixture(
         args.fixture,
         runs=args.runs,
-        parse_intent=client.parse_issue,
-        generate_files=default_file_generator,
+        parse_intent=parse_intent,
+        replay_path=args.replay,
     )
     print(report_to_text(report), end="")
 

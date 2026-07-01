@@ -58,17 +58,17 @@ IaC Smith will refuse requests that are genuinely destructive or risky rather th
 
 ## Generation modes and local evals
 
-The default generation mode remains the existing Bedrock free-form Terraform generator. To exercise the typed-spec compiler path, set `IAC_SMITH_GENERATION_MODE=spec_renderer`. In this mode IaC Smith builds an `InfrastructureSpec` from parsed intent and the deterministic change plan, then renders repository structure, Terragrunt envelopes, backend bootstrap, workflows, module variables, outputs, and cross-stack dependency wiring from that spec.
+The default generation mode remains the existing Bedrock free-form Terraform generator. To exercise the typed-spec compiler path, set `IAC_SMITH_GENERATION_MODE=spec_renderer`. In this mode IaC Smith builds an `InfrastructureSpec` from parsed intent and the deterministic change plan, then renders repository structure, Terragrunt envelopes, backend bootstrap, workflows, module variables, outputs, cross-stack dependency wiring, and selected provider resources from the spec.
 
-The spec renderer intentionally emits deterministic structure only until provider-schema or Terraform Registry module selection is added. That keeps the generic/no-golden-path boundary while moving global consistency out of per-file LLM text generation.
+The spec renderer validates the spec before rendering so module paths, Terragrunt inputs, dependency outputs, variables, and resource blocks are compiled together instead of repaired after independent per-file generation. Existing foundation outputs are discovered from the target repository's `modules/foundation/outputs.tf` when available.
 
 Use the local eval harness before changing generation behavior:
 
 ```bash
-uv run python -m iac_smith.eval path/to/fixture.yaml --runs 10
+uv run python -m iac_smith.eval fixtures/eval/issue-59-aurora.yaml --replay fixtures/eval/replay-issue-59-aurora.yaml --runs 10
 ```
 
-The report tracks intent variants, plan variants, rendered-file hash variants, static-review pass count, and failure clusters so repeated issue runs can be measured without dispatching the full GitHub Actions workflow.
+Omit `--replay` to use live Bedrock intent parsing. The report tracks intent variants, plan variants, rendered-file hash variants, static-review pass count, and failure clusters so repeated issue runs can be measured without dispatching the full GitHub Actions workflow.
 
 ## Architecture and security model
 

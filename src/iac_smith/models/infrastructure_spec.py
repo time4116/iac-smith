@@ -28,9 +28,16 @@ class OutputSpec(BaseModel):
     value: str
 
 
+class ResourceSpec(BaseModel):
+    type: str
+    name: str
+    arguments: dict[str, str] = Field(default_factory=dict)
+    blocks: list[str] = Field(default_factory=list)
+
+
 class ProviderResourcesSpec(BaseModel):
     kind: Literal["provider_resources"] = "provider_resources"
-    resources: list[str] = Field(default_factory=list)
+    resources: list[ResourceSpec] = Field(default_factory=list)
     contract_source: str = "provider-schema"
 
 

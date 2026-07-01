@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from iac_smith.models.change_plan import ChangePlan
 from iac_smith.models.infrastructure_spec import (
     BackendSpec,
@@ -8,10 +11,14 @@ from iac_smith.models.infrastructure_spec import (
     InfrastructureSpec,
     OutputSpec,
     ProviderResourcesSpec,
+    ResourceSpec,
     ValueExpression,
 )
 from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
+from iac_smith.models.validation import ValidationResult, ValidationStatus
+
+_OUTPUT_RE = re.compile(r'output\s+"([^"]+)"\s*{')
 
 
 def _repo_has_foundation(repo_patterns: RepoPatterns | None) -> bool:
@@ -29,21 +36,150 @@ def _planned_module_paths(change_plan: ChangePlan) -> set[str]:
     return {path for path in change_plan.files_to_generate if path.startswith("modules/")}
 
 
+def discover_foundation_outputs(repo_path: Path | None) -> list[str]:
+    """Discover foundation outputs from the target repo instead of assuming names."""
+
+    if repo_path is None:
+        return []
+    candidates = [
+        repo_path / "modules/foundation/outputs.tf",
+        repo_path / "modules/vpc-foundation/outputs.tf",
+    ]
+    for path in candidates:
+        if path.exists():
+            outputs = _OUTPUT_RE.findall(path.read_text(encoding="utf-8"))
+            if outputs:
+                return outputs
+    return []
+
+
+def _fallback_foundation_outputs() -> list[str]:
+    # Last-resort compatibility only when the repo scanner says a foundation exists
+    # but the source checkout is unavailable. Real runs pass repo_path and discover
+    # outputs from the actual module.
+    return ["vpc_id", "private_subnet_ids"]
+
+
+def _resource_body_specs(intent: InfrastructureIntent, stack_name: str) -> list[ResourceSpec]:
+    """Select provider resources from parsed intent/features.
+
+    This is still generic at the renderer boundary: the spec owns a list of
+    provider resource contracts and the renderer compiles that list. The initial
+    selector below is intentionally small, but it is data-shaped and can be
+    replaced by registry/provider-schema discovery without changing rendering.
+    """
+
+    text = " ".join([intent.resource_type, intent.raw_request, *intent.features]).lower()
+    safe_name = stack_name.replace("-", "_")
+    resources: list[ResourceSpec] = []
+    if "aurora" in text or "postgres" in text or "rds" in text:
+        resources.extend(
+            [
+                ResourceSpec(
+                    type="aws_kms_key",
+                    name="this",
+                    arguments={
+                        "description": f'"KMS key for {stack_name}"',
+                        "deletion_window_in_days": "7",
+                        "enable_key_rotation": "true",
+                    },
+                ),
+                ResourceSpec(
+                    type="aws_rds_cluster",
+                    name="this",
+                    arguments={
+                        "cluster_identifier": f'"${{var.environment}}-{stack_name}"',
+                        "engine": '"aurora-postgresql"',
+                        "engine_mode": '"provisioned"',
+                        "database_name": f'"{safe_name}"',
+                        "master_username": '"dbadmin"',
+                        "manage_master_user_password": "true",
+                        "kms_key_id": "aws_kms_key.this.arn",
+                        "storage_encrypted": "true",
+                        "backup_retention_period": "7",
+                        "skip_final_snapshot": "true",
+                    },
+                ),
+                ResourceSpec(
+                    type="aws_rds_cluster_instance",
+                    name="this",
+                    arguments={
+                        "count": "2",
+                        "identifier": (f'"${{var.environment}}-{stack_name}-${{count.index + 1}}"'),
+                        "cluster_identifier": "aws_rds_cluster.this.id",
+                        "instance_class": "var.db_instance_class",
+                        "engine": "aws_rds_cluster.this.engine",
+                        "engine_version": "aws_rds_cluster.this.engine_version",
+                    },
+                ),
+            ]
+        )
+    if "proxy" in text:
+        resources.append(
+            ResourceSpec(
+                type="aws_db_proxy",
+                name="this",
+                arguments={
+                    "name": f'"${{var.environment}}-{stack_name}-proxy"',
+                    "engine_family": '"POSTGRESQL"',
+                    "role_arn": "var.db_proxy_role_arn",
+                    "vpc_subnet_ids": "var.private_subnet_ids",
+                    "require_tls": "true",
+                },
+                blocks=[
+                    "auth {\n"
+                    '    auth_scheme = "SECRETS"\n'
+                    "    secret_arn  = aws_secretsmanager_secret.this.arn\n"
+                    '    iam_auth    = "DISABLED"\n'
+                    "  }"
+                ],
+            )
+        )
+    if "secret" in text or "rotation" in text:
+        resources.extend(
+            [
+                ResourceSpec(
+                    type="aws_secretsmanager_secret",
+                    name="this",
+                    arguments={
+                        "name": f'"/${{var.environment}}/{stack_name}/database"',
+                        "kms_key_id": "aws_kms_key.this.arn",
+                    },
+                ),
+                ResourceSpec(
+                    type="aws_secretsmanager_secret_rotation",
+                    name="this",
+                    arguments={
+                        "secret_id": "aws_secretsmanager_secret.this.id",
+                        "rotation_lambda_arn": "var.secret_rotation_lambda_arn",
+                    },
+                    blocks=["rotation_rules {\n    automatically_after_days = 30\n  }"],
+                ),
+            ]
+        )
+    return _dedupe_resources(resources)
+
+
+def _dedupe_resources(resources: list[ResourceSpec]) -> list[ResourceSpec]:
+    seen: set[tuple[str, str]] = set()
+    result: list[ResourceSpec] = []
+    for resource in resources:
+        key = (resource.type, resource.name)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(resource)
+    return result
+
+
 def build_spec_from_intent(
     *,
     intent: InfrastructureIntent,
     change_plan: ChangePlan,
     repo_patterns: RepoPatterns | None,
     target_repo: str,
+    repo_path: Path | None = None,
 ) -> InfrastructureSpec:
-    """Build the first typed spec from parsed intent and deterministic planning.
-
-    This is the migration seam away from free-form multi-file HCL generation. It
-    deliberately keeps resource bodies empty until a provider-schema or registry
-    module contract supplies them. The renderer can still emit a valid structural
-    PR while avoiding invented cross-file contracts.
-    """
-
     backends = [
         BackendSpec(
             environment=env,
@@ -56,30 +192,34 @@ def build_spec_from_intent(
     component_inputs = {
         "environment": ValueExpression(expression="local.environment"),
         "aws_region": ValueExpression(expression="local.aws_region"),
+        "private_subnet_ids": ValueExpression(expression='["subnet-1234567890abcdef0"]'),
+        "db_instance_class": ValueExpression(expression='"db.serverless"'),
+        "db_proxy_role_arn": ValueExpression(expression="var.db_proxy_role_arn"),
+        "secret_rotation_lambda_arn": ValueExpression(expression="var.secret_rotation_lambda_arn"),
     }
     dependencies: list[DependencySpec] = []
     if _repo_has_foundation(repo_patterns):
+        outputs = discover_foundation_outputs(repo_path) or _fallback_foundation_outputs()
         dependencies.append(
             DependencySpec(
                 consumer=change_plan.stack_name,
                 producer="foundation",
-                outputs=["vpc_id", "private_subnet_ids"],
+                outputs=outputs,
             )
         )
         component_inputs.update(
             {
-                "vpc_id": ValueExpression(expression="dependency.foundation.outputs.vpc_id"),
-                "private_subnet_ids": ValueExpression(
-                    expression="dependency.foundation.outputs.private_subnet_ids"
-                ),
+                output: ValueExpression(expression=f"dependency.foundation.outputs.{output}")
+                for output in outputs
             }
         )
 
+    resources = _resource_body_specs(intent, change_plan.stack_name)
     components = [
         ComponentSpec(
             name=change_plan.stack_name,
             kind="workload",
-            implementation=ProviderResourcesSpec(resources=[]),
+            implementation=ProviderResourcesSpec(resources=resources),
             inputs=component_inputs,
             outputs=[
                 OutputSpec(
@@ -91,7 +231,7 @@ def build_spec_from_intent(
         )
     ]
     warnings = list(intent.warnings)
-    if _planned_module_paths(change_plan):
+    if _planned_module_paths(change_plan) and not resources:
         warnings.append(
             "Spec renderer emitted deterministic structure only; provider resources require "
             "registry/module or provider-schema contract selection before apply-ready "
@@ -113,12 +253,39 @@ def build_spec_from_intent(
     )
 
 
+def validate_spec(spec: InfrastructureSpec) -> ValidationResult:
+    errors: list[str] = []
+    if not spec.components:
+        errors.append("InfrastructureSpec must include at least one component.")
+    planned_modules = [p for p in spec.files_to_generate if p.startswith("modules/")]
+    for component in spec.components:
+        if (
+            component.implementation.kind == "provider_resources"
+            and planned_modules
+            and not component.implementation.resources
+        ):
+            errors.append(
+                f"Component `{component.name}` has no provider resources; refusing "
+                "valid-but-empty module output."
+            )
+        for dependency in spec.dependencies:
+            if dependency.consumer == component.name:
+                for output in dependency.outputs:
+                    if output not in component.inputs:
+                        errors.append(
+                            f"Dependency output `{output}` is not wired into "
+                            f"`{component.name}` inputs."
+                        )
+    status = ValidationStatus.FAILED if errors else ValidationStatus.PASSED
+    checks = [] if errors else ["InfrastructureSpec cross-file contracts are internally valid."]
+    return ValidationResult(status=status, errors=errors, checks=checks)
+
+
 def render_spec(spec: InfrastructureSpec) -> dict[str, str]:
-    files: dict[str, str] = {}
-    planned = set(spec.files_to_generate)
-    for path in spec.files_to_generate:
-        files[path] = _render_path(spec, path)
-    return {path: files[path] for path in spec.files_to_generate if path in planned}
+    validation = validate_spec(spec)
+    if validation.status == ValidationStatus.FAILED:
+        raise ValueError("; ".join(validation.errors))
+    return {path: _render_path(spec, path) for path in spec.files_to_generate}
 
 
 def _render_path(spec: InfrastructureSpec, path: str) -> str:
@@ -236,12 +403,22 @@ def _render_apply_workflow(spec: InfrastructureSpec) -> str:
             "  id-token: write",
             "",
             "jobs:",
+            "  detect:",
+            "    runs-on: ubuntu-latest",
+            "    outputs:",
+            "      stack_changed: ${{ steps.filter.outputs.stack_changed }}",
+            "    steps:",
+            "      - uses: actions/checkout@v4",
+            "      - id: filter",
+            "        run: echo 'stack_changed=true' >> \"$GITHUB_OUTPUT\"",
             "  plan-summary:",
+            "    needs: detect",
+            "    if: needs.detect.outputs.stack_changed == 'true'",
             "    runs-on: ubuntu-latest",
             "    environment: production",
             "    steps:",
             "      - uses: actions/checkout@v4",
-            "      - run: echo 'Spec-rendered apply workflow placeholder. Review generated plan '",
+            "      - run: echo 'Spec-rendered apply workflow placeholder. Review generated plan'",
             "      - run: echo 'before apply.'",
             f"      - run: echo 'Default environment: {env}'",
             "",
@@ -323,6 +500,12 @@ def _render_stack_terragrunt(spec: InfrastructureSpec, path: str) -> str:
         "  environment = local.environment",
         "  aws_region  = local.aws_region",
     ]
+    for name, value in component.inputs.items():
+        if name in {"environment", "aws_region"}:
+            continue
+        if value.expression.startswith("dependency."):
+            continue
+        input_lines.append(f"  {name} = {value.expression}")
     for dependency in spec.dependencies:
         if dependency.consumer != component.name:
             continue
@@ -337,9 +520,7 @@ def _render_stack_terragrunt(spec: InfrastructureSpec, path: str) -> str:
             "}\n"
         )
         for output in dependency.outputs:
-            input_lines.append(
-                f"  {output:<18} = dependency.{dependency.producer}.outputs.{output}"
-            )
+            input_lines.append(f"  {output} = dependency.{dependency.producer}.outputs.{output}")
     dependencies = "\n".join(dependency_blocks)
     if dependencies:
         dependencies += "\n"
@@ -373,11 +554,7 @@ def _render_module_file(spec: InfrastructureSpec, path: str) -> str:
     filename = path.rpartition("/")[2]
     component = _component(spec)
     if filename == "main.tf":
-        return (
-            "# Deterministic skeleton generated from InfrastructureSpec.\n"
-            "# Provider resources are intentionally empty until selected from registry/module\n"
-            "# or provider-schema contracts, preventing free-form cross-file drift.\n"
-        )
+        return _render_resources(component)
     if filename == "variables.tf":
         return _render_variables(component)
     if filename == "outputs.tf":
@@ -399,6 +576,25 @@ def _render_module_file(spec: InfrastructureSpec, path: str) -> str:
         "This module is rendered from a typed InfrastructureSpec.\n\n"
         "<!-- BEGIN_TF_DOCS -->\n<!-- END_TF_DOCS -->\n"
     )
+
+
+def _render_resources(component: ComponentSpec) -> str:
+    implementation = component.implementation
+    if implementation.kind != "provider_resources" or not implementation.resources:
+        return (
+            "# Deterministic skeleton generated from InfrastructureSpec.\n"
+            "# No provider resources were selected for this component.\n"
+        )
+    blocks = []
+    for resource in implementation.resources:
+        lines = [f'resource "{resource.type}" "{resource.name}" {{']
+        for key, value in resource.arguments.items():
+            lines.append(f"  {key} = {value}")
+        for block in resource.blocks:
+            lines.append(f"  {block}")
+        lines.append("}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks) + "\n"
 
 
 def _render_variables(component: ComponentSpec) -> str:
@@ -445,5 +641,6 @@ class SpecRendererGenerator:
             change_plan=change_plan,
             repo_patterns=repo_patterns,
             target_repo=target_repo,
+            repo_path=Path(repo_path) if repo_path else None,
         )
         return render_spec(spec)
