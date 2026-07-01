@@ -56,6 +56,20 @@ Runtime validation is intentionally conservative. IaC Smith never runs `terrafor
 
 IaC Smith will refuse requests that are genuinely destructive or risky rather than generating an unsafe or misleading implementation.
 
+## Generation modes and local evals
+
+The default generation mode is the typed-spec compiler. IaC Smith builds an `InfrastructureSpec` from parsed intent and the deterministic change plan, then renders repository structure, Terragrunt envelopes, backend bootstrap, workflows, module variables, outputs, and cross-stack dependency wiring from the spec. The previous Bedrock free-form Terraform generator remains available only as an explicit escape hatch with `IAC_SMITH_GENERATION_MODE=freeform`.
+
+The spec renderer validates the spec before rendering so module paths, Terragrunt inputs, dependency outputs, and variables are compiled together instead of repaired after independent per-file generation. Existing foundation outputs are discovered from the target repository's `modules/foundation/outputs.tf` when available. Provider resources are intentionally not keyword-selected yet; registry/module or provider-schema composition must select them generically before the renderer emits apply-ready resource bodies. Generated PR bodies explicitly warn when a PR is structure-only and contains placeholder module bodies.
+
+Use the local eval harness before changing generation behavior:
+
+```bash
+uv run python -m iac_smith.eval fixtures/eval/issue-59-aurora.yaml --replay fixtures/eval/replay-issue-59-aurora.yaml --runs 10
+```
+
+Omit `--replay` to use live Bedrock intent parsing. Add `--runtime` to run Terraform/Terragrunt validation in a scratch repo, and `--plan` to include local-state Terragrunt plans where credentials and provider access make that feasible. The report tracks intent variants, plan variants, rendered-file hash variants, static-review pass count, Terraform/Terragrunt runtime pass counts, and failure clusters so repeated issue runs can be measured without dispatching the full GitHub Actions workflow.
+
 ## Architecture and security model
 
 IaC Smith is split into a controller repository and a target infrastructure repository. The controller repository runs the GitHub Actions workflow, reads the source issue, calls Bedrock, scans the target repository, validates generated Terraform/Terragrunt, and opens a pull request. The target infrastructure repository owns the generated IaC and its normal post-merge apply workflow.

@@ -1,3 +1,4 @@
+import os
 from collections.abc import Callable
 from inspect import signature
 from pathlib import Path
@@ -28,6 +29,7 @@ from iac_smith.nodes.static_review import (
 )
 from iac_smith.provider_schema import build_schema_resolver
 from iac_smith.repo_scanner import scan_repo_patterns
+from iac_smith.spec_renderer import SpecRendererGenerator
 from iac_smith.state import IaCSmithState
 
 IntentParser = Callable[[str], InfrastructureIntent]
@@ -57,7 +59,17 @@ def default_file_generator(
     repo_path: Path | None = None,
     blackboard: RunBlackboard | None = None,
 ) -> dict[str, str]:
-    return BedrockTerraformGenerator().generate_files(
+    if os.getenv("IAC_SMITH_GENERATION_MODE") == "freeform":
+        return BedrockTerraformGenerator().generate_files(
+            intent=intent,
+            change_plan=change_plan,
+            repo_patterns=repo_patterns,
+            ruleset=ruleset,
+            target_repo=target_repo,
+            repo_path=repo_path,
+            blackboard=blackboard,
+        )
+    return SpecRendererGenerator().generate_files(
         intent=intent,
         change_plan=change_plan,
         repo_patterns=repo_patterns,
@@ -170,6 +182,7 @@ def make_code_generator(file_generator_fn: FileGenerator):
         return {
             **state,
             "generated_files": generated_files,
+            "structure_only": bool(getattr(generated_files, "structure_only", False)),
             "status": "generated",
         }
 
@@ -250,6 +263,7 @@ def pr_writer(state: IaCSmithState) -> IaCSmithState:
             intent=state["intent"],
             change_plan=state["change_plan"],
             validation=state["validation"],
+            structure_only=state.get("structure_only", False),
         ),
         "status": "pr_ready",
     }

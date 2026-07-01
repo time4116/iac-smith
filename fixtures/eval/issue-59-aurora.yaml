@@ -1,0 +1,5 @@
+issue_number: 59
+target_repo: time4116/iac-smith-demo-infra
+issue_body: >
+  Create a non-prod Aurora PostgreSQL data platform in us-west-2 with RDS Proxy,
+  a KMS CMK, and secret rotation.

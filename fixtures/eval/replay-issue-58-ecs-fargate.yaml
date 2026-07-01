@@ -1,0 +1,8 @@
+intents:
+  - raw_request: Create a non-prod ECS Fargate service with private networking and remote state.
+    resource_type: ecs_fargate
+    environment_scope: non_prod_only
+    environments: [non-prod]
+    region: us-west-2
+    requires_new_vpc: false
+    features: [private_networking, remote_state]

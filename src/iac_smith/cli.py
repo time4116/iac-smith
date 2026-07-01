@@ -36,6 +36,7 @@ from iac_smith.services.github import (
     GitHubPullRequest,
     GitHubPullRequestClient,
 )
+from iac_smith.spec_renderer import SpecRendererGenerator
 from iac_smith.state import IaCSmithState
 from iac_smith.version_detection import ensure_terraform_terragrunt
 from iac_smith.workspace import apply_generated_files, commit_generated_files, create_branch
@@ -373,6 +374,15 @@ def _apply_with_child_locals(repo_path: Path, result: IaCSmithState) -> None:
     apply_generated_files(repo_path, result["generated_files"])
 
 
+def _apply_generated_files_for_mode(
+    repo_path: Path, result: IaCSmithState, *, generation_mode: str
+) -> None:
+    if generation_mode == "spec_renderer":
+        apply_generated_files(repo_path, result["generated_files"])
+        return
+    _apply_with_child_locals(repo_path, result)
+
+
 def _block_comment_body(summary: str) -> str:
     return (
         "**IaC Smith could not open a pull request for this issue.**\n\n"
@@ -519,17 +529,21 @@ def _run_iac_smith_core(
     state = build_initial_state(env, issue_client=issue_client)
     _log(f"IaC Smith: fetched issue #{state.get('issue_number')}: {state.get('issue_title')}")
     state["target_repo_path"] = str(repo_path)
+    generation_mode = env.get("IAC_SMITH_GENERATION_MODE", "spec_renderer")
     runtime_repairer: RuntimeRepairer | None = None
     escalation_repairer: RuntimeRepairer | None = None
     if file_generator_fn:
         selected_file_generator = file_generator_fn
         if hasattr(file_generator_fn, "repair_files"):
             runtime_repairer = file_generator_fn  # type: ignore[assignment]
-    else:
+    elif generation_mode == "freeform":
         generator = BedrockTerraformGenerator(logger=_log)
         selected_file_generator = generator.generate_files
         runtime_repairer = generator
         escalation_repairer = _build_escalation_repairer(env, generator.model_id)
+    else:
+        generator = SpecRendererGenerator()
+        selected_file_generator = generator.generate_files
     graph = (
         build_graph(
             intent_parser_fn=intent_parser_fn,
@@ -562,7 +576,7 @@ def _run_iac_smith_core(
     _log(f"IaC Smith: creating branch {branch}.")
     create_branch(repo_path, branch)
     _log(f"IaC Smith: writing {len(result['generated_files'])} generated file(s).")
-    _apply_with_child_locals(repo_path, result)
+    _apply_generated_files_for_mode(repo_path, result, generation_mode=generation_mode)
 
     if env.get("IAC_SMITH_SKIP_RUNTIME_VALIDATION") != "1":
         _log("IaC Smith: ensuring terraform/terragrunt versions for target repo.")
@@ -653,7 +667,7 @@ def _run_iac_smith_core(
                     )
                 raise
             result["generated_files"] = repaired_files
-            _apply_with_child_locals(repo_path, result)
+            _apply_generated_files_for_mode(repo_path, result, generation_mode=generation_mode)
 
         # Surface the Terraform/Terragrunt checks IaC Smith actually ran (fmt,
         # init, validate, local-state plan) in the PR body — these run after the
@@ -664,6 +678,7 @@ def _run_iac_smith_core(
             change_plan=result["change_plan"],
             validation=result["validation"],
             runtime_checks=runtime_validation.checks,
+            structure_only=result.get("structure_only", False),
         )
 
         if env.get("IAC_SMITH_GENERATE_LOCKFILE") != "0":

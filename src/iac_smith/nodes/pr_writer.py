@@ -22,12 +22,23 @@ def _checks(items: list[str]) -> str:
     return "\n".join(f"- ✅ {item}" for item in items)
 
 
+def _structure_only_warnings(structure_only: bool) -> list[str]:
+    if not structure_only:
+        return []
+    return [
+        "Structure-only PR: the spec renderer selected no provider resources, "
+        "so generated module bodies are placeholders until generic "
+        "registry/module or provider-schema composition is implemented."
+    ]
+
+
 def build_pr_body(
     issue_url: str,
     intent: InfrastructureIntent,
     change_plan: ChangePlan,
     validation: ValidationResult,
     runtime_checks: list[str] | None = None,
+    structure_only: bool = False,
 ) -> str:
     changed_files = "\n".join(f"* `{path}`" for path in change_plan.files_to_generate)
     backend_lines = "\n".join(
@@ -41,6 +52,12 @@ def build_pr_body(
             "IaC Smith ran these commands locally before opening this PR:\n\n"
             f"{_checks(runtime_checks)}"
         )
+    warnings = [
+        *intent.warnings,
+        *validation.warnings,
+        *validation.structural,
+        *_structure_only_warnings(structure_only),
+    ]
     return f"""## Source issue
 
 {issue_url}
@@ -71,7 +88,7 @@ Stack: `{change_plan.stack_name}`
 
 ## Warnings and risks
 
-{_bullets([*intent.warnings, *validation.warnings, *validation.structural])}
+{_bullets(warnings)}
 
 ## Iterating on this infrastructure
 

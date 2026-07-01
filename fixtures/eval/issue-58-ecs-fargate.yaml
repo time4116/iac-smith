@@ -1,0 +1,4 @@
+issue_number: 58
+target_repo: time4116/iac-smith-demo-infra
+issue_body: >
+  Create a non-prod ECS Fargate service with private networking and remote state.

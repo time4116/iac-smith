@@ -1,0 +1,12 @@
+intents:
+  - raw_request: >
+      Create a non-prod Aurora PostgreSQL data platform in us-west-2 with RDS Proxy,
+      a KMS CMK, and secret rotation.
+    resource_type: aurora_postgres
+    environment_scope: non_prod_only
+    environments: [non-prod]
+    region: us-west-2
+    requires_new_vpc: false
+    features: [rds_proxy, kms, secret_rotation]
+    assumptions:
+      - Referenced existing networking when a foundation module is present.
