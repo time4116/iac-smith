@@ -142,15 +142,22 @@ def test_plan_raises_for_blocked_intent():
         raise AssertionError("blocked intent should not produce a change plan")
 
 
-def test_plan_ecs_fargate_adds_foundation_stack_and_module():
+def test_plan_does_not_speculatively_generate_foundation_on_fresh_repo():
+    # Deterministic default: a fresh repo (no existing foundation) never gets a
+    # shared-networking foundation planned up-front, even when intent parsed
+    # requires_new_vpc=True. That signal is model-parsed and flip-flops between
+    # runs of the same issue; referencing existing networking is the default, and
+    # a foundation is only scaffolded reactively (add_foundation_stack) when the
+    # generated output proves a cross-stack dependency is truly needed.
     plan = plan_changes(
-        _intent("ecs_fargate"),
+        _intent("ecs_fargate"),  # _intent sets requires_new_vpc=True
         target_repo="time4116/iac-smith-demo-infra",
     )
 
-    assert "environments/non-prod/foundation/terragrunt.hcl" in plan.files_to_generate
-    assert "modules/foundation/main.tf" in plan.files_to_generate
+    assert "environments/non-prod/foundation/terragrunt.hcl" not in plan.files_to_generate
+    assert "modules/foundation/main.tf" not in plan.files_to_generate
     assert "modules/ecs-fargate/main.tf" in plan.files_to_generate
+    assert not any("Generate foundation module" in s for s in plan.summary)
     assert (
         plan.backend_resources["non-prod"].bucket == "iac-smith-state-non-prod-iac-smith-demo-infra"
     )
@@ -204,10 +211,12 @@ def test_add_foundation_stack_adds_module_and_per_env_stack():
 
 
 def test_add_foundation_stack_is_idempotent():
-    plan = plan_changes(
-        _intent("ecs_fargate"),  # already includes foundation
+    base = plan_changes(
+        _intent("ecs_fargate"),
         target_repo="time4116/iac-smith-demo-infra",
     )
+    # A fresh plan no longer schedules foundation up-front; seed it once.
+    plan = add_foundation_stack(base)
     assert "modules/foundation/main.tf" in plan.files_to_generate
 
     expanded = add_foundation_stack(plan)
