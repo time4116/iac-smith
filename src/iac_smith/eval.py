@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
@@ -15,7 +16,9 @@ from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
 from iac_smith.nodes.change_planner import plan_changes as default_plan_changes
 from iac_smith.nodes.static_review import static_review_generated_files
+from iac_smith.runtime_validation import validate_generated_iac
 from iac_smith.spec_renderer import SpecRendererGenerator
+from iac_smith.workspace import apply_generated_files
 
 
 class EvalRunResult(BaseModel):
@@ -23,6 +26,9 @@ class EvalRunResult(BaseModel):
     plan_hash: str
     render_hash: str
     static_passed: bool
+    terraform_validate_passed: bool | None = None
+    terragrunt_validate_passed: bool | None = None
+    terragrunt_plan_passed: bool | None = None
     failures: list[str] = Field(default_factory=list)
 
 
@@ -34,6 +40,9 @@ class EvalReport(BaseModel):
     plan_variants: int
     render_hash_variants: int
     static_pass: int
+    terraform_validate_pass: int | None = None
+    terragrunt_validate_pass: int | None = None
+    terragrunt_plan_pass: int | None = None
     failure_clusters: list[str]
     results: list[EvalRunResult]
 
@@ -76,6 +85,27 @@ def _replay_parser(intents: list[InfrastructureIntent]) -> Callable[[str], Infra
     return parse
 
 
+def _runtime_result_for(
+    generated_files: dict[str, str], *, run_plan: bool
+) -> tuple[bool, bool, bool | None, list[str]]:
+    with tempfile.TemporaryDirectory(prefix="iac-smith-eval-") as tmp:
+        repo_root = Path(tmp) / "repo"
+        repo_root.mkdir()
+        apply_generated_files(repo_root, generated_files)
+        env = {"IAC_SMITH_CHECK_TIMEOUT": "60"}
+        if run_plan:
+            env["IAC_SMITH_RUNTIME_PLAN"] = "1"
+        result = validate_generated_iac(repo_root, env_override=env)
+    terraform_validate = result.passed or not any("terraform" in e.lower() for e in result.errors)
+    terragrunt_validate = result.passed or not any("terragrunt" in e.lower() for e in result.errors)
+    if any("Missing required validation command" in e for e in result.errors):
+        return False, False, False if run_plan else None, result.errors
+    terragrunt_plan = None
+    if run_plan:
+        terragrunt_plan = result.passed or not any("terragrunt plan" in e for e in result.errors)
+    return terraform_validate, terragrunt_validate, terragrunt_plan, result.errors
+
+
 def evaluate_fixture(
     fixture_path: str | Path,
     *,
@@ -84,12 +114,15 @@ def evaluate_fixture(
     plan_changes: Callable[[InfrastructureIntent, str], ChangePlan] | None = None,
     generate_files: Callable[..., dict[str, str]] | None = None,
     replay_path: str | Path | None = None,
+    run_runtime: bool = False,
+    run_plan: bool = False,
 ) -> EvalReport:
     """Run a local variance harness for one issue fixture.
 
     Use ``replay_path`` to run without live Bedrock. Replay files contain recorded
     structured intents and can be committed as fixtures for deterministic
-    regression tests.
+    regression tests. Runtime validation is opt-in because it shells out to
+    terraform/terragrunt and may need provider downloads.
     """
 
     fixture = _load_fixture(Path(fixture_path))
@@ -116,6 +149,17 @@ def evaluate_fixture(
         )
         validation = static_review_generated_files(generated_files)
         run_failures = [*validation.errors, *validation.structural]
+        terraform_validate_passed = None
+        terragrunt_validate_passed = None
+        terragrunt_plan_passed = None
+        if run_runtime:
+            (
+                terraform_validate_passed,
+                terragrunt_validate_passed,
+                terragrunt_plan_passed,
+                runtime_failures,
+            ) = _runtime_result_for(generated_files, run_plan=run_plan)
+            run_failures.extend(runtime_failures)
         for failure in run_failures:
             failures[failure] += 1
         results.append(
@@ -124,10 +168,15 @@ def evaluate_fixture(
                 plan_hash=_stable_hash(change_plan.model_dump(mode="json")),
                 render_hash=_stable_hash(generated_files),
                 static_passed=not validation.errors and not validation.structural,
+                terraform_validate_passed=terraform_validate_passed,
+                terragrunt_validate_passed=terragrunt_validate_passed,
+                terragrunt_plan_passed=terragrunt_plan_passed,
                 failures=run_failures,
             )
         )
 
+    runtime_was_run = any(result.terraform_validate_passed is not None for result in results)
+    plan_was_run = any(result.terragrunt_plan_passed is not None for result in results)
     return EvalReport(
         issue_number=fixture.get("issue_number"),
         target_repo=fixture["target_repo"],
@@ -136,9 +185,28 @@ def evaluate_fixture(
         plan_variants=len({result.plan_hash for result in results}),
         render_hash_variants=len({result.render_hash for result in results}),
         static_pass=sum(1 for result in results if result.static_passed),
+        terraform_validate_pass=(
+            sum(1 for result in results if result.terraform_validate_passed)
+            if runtime_was_run
+            else None
+        ),
+        terragrunt_validate_pass=(
+            sum(1 for result in results if result.terragrunt_validate_passed)
+            if runtime_was_run
+            else None
+        ),
+        terragrunt_plan_pass=(
+            sum(1 for result in results if result.terragrunt_plan_passed) if plan_was_run else None
+        ),
         failure_clusters=[failure for failure, _ in failures.most_common()],
         results=results,
     )
+
+
+def _pass_text(value: int | None, runs: int) -> str:
+    if value is None:
+        return "not_run"
+    return f"{value}/{runs}"
 
 
 def report_to_text(report: EvalReport) -> str:
@@ -150,6 +218,9 @@ def report_to_text(report: EvalReport) -> str:
         f"plan_variants: {report.plan_variants}",
         f"render_hash_variants: {report.render_hash_variants}",
         f"static_pass: {report.static_pass}/{report.runs}",
+        f"terraform_validate_pass: {_pass_text(report.terraform_validate_pass, report.runs)}",
+        f"terragrunt_validate_pass: {_pass_text(report.terragrunt_validate_pass, report.runs)}",
+        f"terragrunt_plan_pass: {_pass_text(report.terragrunt_plan_pass, report.runs)}",
         "failure_clusters:",
     ]
     if report.failure_clusters:
@@ -170,6 +241,10 @@ def main() -> None:
     parser.add_argument("fixture", type=Path)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--replay", type=Path, help="YAML file containing recorded intents")
+    parser.add_argument(
+        "--runtime", action="store_true", help="run terraform/terragrunt validation"
+    )
+    parser.add_argument("--plan", action="store_true", help="include local-state terragrunt plan")
     args = parser.parse_args()
 
     parse_intent = None if args.replay else BedrockIntentClient().parse_issue
@@ -178,6 +253,8 @@ def main() -> None:
         runs=args.runs,
         parse_intent=parse_intent,
         replay_path=args.replay,
+        run_runtime=args.runtime or args.plan,
+        run_plan=args.plan,
     )
     print(report_to_text(report), end="")
 

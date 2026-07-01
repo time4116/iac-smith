@@ -55,14 +55,7 @@ def test_build_spec_from_intent_records_components_contracts_and_no_new_foundati
     assert spec.stack_name == "aurora-postgres"
     assert [component.name for component in spec.components] == ["aurora-postgres"]
     assert spec.components[0].implementation.kind == "provider_resources"
-    assert [resource.type for resource in spec.components[0].implementation.resources] == [
-        "aws_kms_key",
-        "aws_rds_cluster",
-        "aws_rds_cluster_instance",
-        "aws_db_proxy",
-        "aws_secretsmanager_secret",
-        "aws_secretsmanager_secret_rotation",
-    ]
+    assert spec.components[0].implementation.resources == []
     assert spec.dependencies[0].producer == "foundation"
     assert spec.dependencies[0].outputs == ["vpc_id", "private_subnet_ids"]
     assert spec.rendering_policy == "deterministic_structure_only"

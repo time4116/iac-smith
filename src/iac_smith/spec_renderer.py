@@ -11,7 +11,6 @@ from iac_smith.models.infrastructure_spec import (
     InfrastructureSpec,
     OutputSpec,
     ProviderResourcesSpec,
-    ResourceSpec,
     ValueExpression,
 )
 from iac_smith.models.intent import InfrastructureIntent
@@ -60,118 +59,6 @@ def _fallback_foundation_outputs() -> list[str]:
     return ["vpc_id", "private_subnet_ids"]
 
 
-def _resource_body_specs(intent: InfrastructureIntent, stack_name: str) -> list[ResourceSpec]:
-    """Select provider resources from parsed intent/features.
-
-    This is still generic at the renderer boundary: the spec owns a list of
-    provider resource contracts and the renderer compiles that list. The initial
-    selector below is intentionally small, but it is data-shaped and can be
-    replaced by registry/provider-schema discovery without changing rendering.
-    """
-
-    text = " ".join([intent.resource_type, intent.raw_request, *intent.features]).lower()
-    safe_name = stack_name.replace("-", "_")
-    resources: list[ResourceSpec] = []
-    if "aurora" in text or "postgres" in text or "rds" in text:
-        resources.extend(
-            [
-                ResourceSpec(
-                    type="aws_kms_key",
-                    name="this",
-                    arguments={
-                        "description": f'"KMS key for {stack_name}"',
-                        "deletion_window_in_days": "7",
-                        "enable_key_rotation": "true",
-                    },
-                ),
-                ResourceSpec(
-                    type="aws_rds_cluster",
-                    name="this",
-                    arguments={
-                        "cluster_identifier": f'"${{var.environment}}-{stack_name}"',
-                        "engine": '"aurora-postgresql"',
-                        "engine_mode": '"provisioned"',
-                        "database_name": f'"{safe_name}"',
-                        "master_username": '"dbadmin"',
-                        "manage_master_user_password": "true",
-                        "kms_key_id": "aws_kms_key.this.arn",
-                        "storage_encrypted": "true",
-                        "backup_retention_period": "7",
-                        "skip_final_snapshot": "true",
-                    },
-                ),
-                ResourceSpec(
-                    type="aws_rds_cluster_instance",
-                    name="this",
-                    arguments={
-                        "count": "2",
-                        "identifier": (f'"${{var.environment}}-{stack_name}-${{count.index + 1}}"'),
-                        "cluster_identifier": "aws_rds_cluster.this.id",
-                        "instance_class": "var.db_instance_class",
-                        "engine": "aws_rds_cluster.this.engine",
-                        "engine_version": "aws_rds_cluster.this.engine_version",
-                    },
-                ),
-            ]
-        )
-    if "proxy" in text:
-        resources.append(
-            ResourceSpec(
-                type="aws_db_proxy",
-                name="this",
-                arguments={
-                    "name": f'"${{var.environment}}-{stack_name}-proxy"',
-                    "engine_family": '"POSTGRESQL"',
-                    "role_arn": "var.db_proxy_role_arn",
-                    "vpc_subnet_ids": "var.private_subnet_ids",
-                    "require_tls": "true",
-                },
-                blocks=[
-                    "auth {\n"
-                    '    auth_scheme = "SECRETS"\n'
-                    "    secret_arn  = aws_secretsmanager_secret.this.arn\n"
-                    '    iam_auth    = "DISABLED"\n'
-                    "  }"
-                ],
-            )
-        )
-    if "secret" in text or "rotation" in text:
-        resources.extend(
-            [
-                ResourceSpec(
-                    type="aws_secretsmanager_secret",
-                    name="this",
-                    arguments={
-                        "name": f'"/${{var.environment}}/{stack_name}/database"',
-                        "kms_key_id": "aws_kms_key.this.arn",
-                    },
-                ),
-                ResourceSpec(
-                    type="aws_secretsmanager_secret_rotation",
-                    name="this",
-                    arguments={
-                        "secret_id": "aws_secretsmanager_secret.this.id",
-                        "rotation_lambda_arn": "var.secret_rotation_lambda_arn",
-                    },
-                    blocks=["rotation_rules {\n    automatically_after_days = 30\n  }"],
-                ),
-            ]
-        )
-    return _dedupe_resources(resources)
-
-
-def _dedupe_resources(resources: list[ResourceSpec]) -> list[ResourceSpec]:
-    seen: set[tuple[str, str]] = set()
-    result: list[ResourceSpec] = []
-    for resource in resources:
-        key = (resource.type, resource.name)
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(resource)
-    return result
-
-
 def build_spec_from_intent(
     *,
     intent: InfrastructureIntent,
@@ -192,10 +79,6 @@ def build_spec_from_intent(
     component_inputs = {
         "environment": ValueExpression(expression="local.environment"),
         "aws_region": ValueExpression(expression="local.aws_region"),
-        "private_subnet_ids": ValueExpression(expression='["subnet-1234567890abcdef0"]'),
-        "db_instance_class": ValueExpression(expression='"db.serverless"'),
-        "db_proxy_role_arn": ValueExpression(expression="var.db_proxy_role_arn"),
-        "secret_rotation_lambda_arn": ValueExpression(expression="var.secret_rotation_lambda_arn"),
     }
     dependencies: list[DependencySpec] = []
     if _repo_has_foundation(repo_patterns):
@@ -214,7 +97,7 @@ def build_spec_from_intent(
             }
         )
 
-    resources = _resource_body_specs(intent, change_plan.stack_name)
+    resources = []
     components = [
         ComponentSpec(
             name=change_plan.stack_name,
@@ -233,9 +116,9 @@ def build_spec_from_intent(
     warnings = list(intent.warnings)
     if _planned_module_paths(change_plan) and not resources:
         warnings.append(
-            "Spec renderer emitted deterministic structure only; provider resources require "
-            "registry/module or provider-schema contract selection before apply-ready "
-            "resource bodies."
+            "Spec renderer emitted deterministic structure only; no provider resources "
+            "were selected because registry/module or provider-schema composition is "
+            "not implemented in this mode."
         )
 
     return InfrastructureSpec(
@@ -257,17 +140,7 @@ def validate_spec(spec: InfrastructureSpec) -> ValidationResult:
     errors: list[str] = []
     if not spec.components:
         errors.append("InfrastructureSpec must include at least one component.")
-    planned_modules = [p for p in spec.files_to_generate if p.startswith("modules/")]
     for component in spec.components:
-        if (
-            component.implementation.kind == "provider_resources"
-            and planned_modules
-            and not component.implementation.resources
-        ):
-            errors.append(
-                f"Component `{component.name}` has no provider resources; refusing "
-                "valid-but-empty module output."
-            )
         for dependency in spec.dependencies:
             if dependency.consumer == component.name:
                 for output in dependency.outputs:
@@ -503,7 +376,7 @@ def _render_stack_terragrunt(spec: InfrastructureSpec, path: str) -> str:
     for name, value in component.inputs.items():
         if name in {"environment", "aws_region"}:
             continue
-        if value.expression.startswith("dependency."):
+        if value.expression.startswith(("dependency.", "var.")):
             continue
         input_lines.append(f"  {name} = {value.expression}")
     for dependency in spec.dependencies:

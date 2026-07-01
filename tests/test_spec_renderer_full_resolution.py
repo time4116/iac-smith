@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from iac_smith.cli import _apply_generated_files_for_mode
-from iac_smith.eval import evaluate_fixture
+from iac_smith.eval import evaluate_fixture, report_to_text
 from iac_smith.models.change_plan import BackendResource, ChangePlan
 from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
@@ -84,7 +84,7 @@ def test_foundation_outputs_are_discovered_from_repo_not_hardcoded(tmp_path: Pat
     assert 'variable "app_subnet_ids"' in variables
 
 
-def test_aurora_spec_renders_real_resource_bodies_for_issue_59_shape():
+def test_spec_renderer_does_not_keyword_generate_aurora_golden_path():
     spec = build_spec_from_intent(
         intent=_aurora_intent(),
         change_plan=_plan(),
@@ -95,15 +95,15 @@ def test_aurora_spec_renders_real_resource_bodies_for_issue_59_shape():
     validation = validate_spec(spec)
     files = render_spec(spec)
     main_tf = files["modules/aurora-postgres/main.tf"]
+    stack_hcl = files["environments/non-prod/aurora-postgres/terragrunt.hcl"]
 
     assert validation.errors == []
-    assert 'resource "aws_rds_cluster" "this"' in main_tf
-    assert 'resource "aws_rds_cluster_instance" "this"' in main_tf
-    assert 'resource "aws_db_proxy" "this"' in main_tf
-    assert 'resource "aws_kms_key" "this"' in main_tf
-    assert 'resource "aws_secretsmanager_secret" "this"' in main_tf
-    assert 'resource "aws_secretsmanager_secret_rotation" "this"' in main_tf
-    assert "only comments" not in main_tf
+    assert spec.components[0].implementation.kind == "provider_resources"
+    assert spec.components[0].implementation.resources == []
+    assert 'resource "aws_rds_cluster"' not in main_tf
+    assert "No provider resources were selected" in main_tf
+    assert "var." not in stack_hcl
+    assert "subnet-1234567890abcdef0" not in stack_hcl
 
 
 def test_spec_renderer_mode_bypasses_freeform_normalizers(tmp_path: Path):
@@ -147,3 +147,46 @@ def test_eval_replay_file_runs_without_live_bedrock(tmp_path: Path):
     assert report.intent_variants == 1
     assert report.render_hash_variants == 1
     assert report.static_pass == 3
+    assert report.terraform_validate_pass is None
+    assert "terraform_validate_pass: not_run" in report_to_text(report)
+
+
+def test_eval_runtime_columns_are_wired_with_injected_validator(tmp_path: Path, monkeypatch):
+    calls = []
+
+    class FakeRuntimeResult:
+        passed = True
+        checks = ["`terraform validate` in `modules/example`", "`terragrunt plan` in `env`"]
+        errors = []
+        contract_docs = {}
+
+    def fake_validate(repo_path, env_override=None):
+        calls.append((repo_path, env_override))
+        return FakeRuntimeResult()
+
+    monkeypatch.setattr("iac_smith.eval.validate_generated_iac", fake_validate)
+    fixture = tmp_path / "fixture.yaml"
+    replay = tmp_path / "replay.yaml"
+    fixture.write_text(
+        "issue_number: 59\n"
+        "target_repo: time4116/iac-smith-demo-infra\n"
+        "issue_body: Create Aurora PostgreSQL\n",
+        encoding="utf-8",
+    )
+    replay.write_text(
+        "intents:\n"
+        "  - raw_request: Create Aurora PostgreSQL\n"
+        "    resource_type: aurora_postgres\n"
+        "    environment_scope: non_prod_only\n"
+        "    environments: [non-prod]\n"
+        "    region: us-west-2\n",
+        encoding="utf-8",
+    )
+
+    report = evaluate_fixture(fixture, runs=2, replay_path=replay, run_runtime=True, run_plan=True)
+
+    assert len(calls) == 2
+    assert report.terraform_validate_pass == 2
+    assert report.terragrunt_validate_pass == 2
+    assert report.terragrunt_plan_pass == 2
+    assert "terragrunt_plan_pass: 2/2" in report_to_text(report)
