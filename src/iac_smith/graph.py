@@ -197,6 +197,10 @@ def validation_runner(state: IaCSmithState) -> IaCSmithState:
     # contract-gate failure can be turned into a negative pattern carrying the real
     # allowed arguments (see normalize_validation_findings below).
     contract_docs: dict = {}
+    # The full universe of valid resource types the declared providers expose, kept
+    # at function scope so a hallucinated-type finding can suggest the nearest real
+    # types back to the repair model instead of only telling it what to avoid.
+    known_types: set[str] | None = None
     if generated_files:
         validation = static_review_generated_files(
             generated_files, known_stack_dirs=known_stack_dirs
@@ -243,7 +247,11 @@ def validation_runner(state: IaCSmithState) -> IaCSmithState:
 
     if validation.status == ValidationStatus.FAILED and blackboard:
         blackboard = blackboard.with_findings(
-            normalize_validation_findings(validation.errors, contract_docs=contract_docs or None)
+            normalize_validation_findings(
+                validation.errors,
+                contract_docs=contract_docs or None,
+                known_resource_types=known_types,
+            )
         )
 
     return {

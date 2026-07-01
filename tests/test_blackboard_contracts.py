@@ -334,7 +334,7 @@ def test_normalize_validation_findings_recognizes_contract_gate_resource_type_er
     assert len(findings) == 1
     assert findings[0].scope == "aws_db_proxy_target_group"
     assert findings[0].source == "contract gate"
-    assert "Do not use unsupported Terraform resource type `aws_db_proxy_target_group`" in (
+    assert "`aws_db_proxy_target_group` does not exist in the provider schema" in (
         findings[0].negative_pattern
     )
 

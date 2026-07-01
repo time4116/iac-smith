@@ -1,5 +1,6 @@
 import re
 from collections.abc import Iterable
+from difflib import get_close_matches
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -374,8 +375,30 @@ def _allowed_arguments_hint(scope: str, contract_docs: dict[str, TerraformContra
     )
 
 
+def _nearest_resource_type_hint(scope: str, known_resource_types: set[str] | None) -> str:
+    """Point a hallucinated resource type at the closest real one(s).
+
+    Generic and schema-driven: candidates come from the provider's actual type
+    universe, ranked by string similarity — no service-specific mapping. This turns
+    a bare "do not use X" into an actionable "you meant Y", which is what lets the
+    repair model converge instead of guessing a new invalid name each attempt.
+    """
+    if not known_resource_types:
+        return ""
+    matches = get_close_matches(scope, sorted(known_resource_types), n=3, cutoff=0.6)
+    if not matches:
+        return ""
+    quoted = ", ".join(f"`{match}`" for match in matches)
+    return (
+        f" The closest resource types the provider actually defines are: {quoted}"
+        " — use one of these."
+    )
+
+
 def normalize_validation_findings(
-    errors: list[str], contract_docs: dict[str, TerraformContract] | None = None
+    errors: list[str],
+    contract_docs: dict[str, TerraformContract] | None = None,
+    known_resource_types: set[str] | None = None,
 ) -> list[ValidationFinding]:
     findings: list[ValidationFinding] = []
     seen: set[tuple[str, str]] = set()
@@ -445,7 +468,11 @@ def normalize_validation_findings(
                     scope=scope,
                     finding="Unsupported resource type",
                     source="terraform validation",
-                    negative_pattern=f"Do not use unsupported Terraform resource type `{scope}`.",
+                    negative_pattern=(
+                        f"The Terraform resource type `{scope}` does not exist in the provider "
+                        f"schema; do not use it."
+                        + _nearest_resource_type_hint(scope, known_resource_types)
+                    ),
                 )
             )
         for match in _CONTRACT_GATE_RESOURCE_RE.finditer(error):
@@ -459,7 +486,11 @@ def normalize_validation_findings(
                     scope=scope,
                     finding="Unsupported resource type",
                     source="contract gate",
-                    negative_pattern=f"Do not use unsupported Terraform resource type `{scope}`.",
+                    negative_pattern=(
+                        f"The Terraform resource type `{scope}` does not exist in the provider "
+                        f"schema; do not use it."
+                        + _nearest_resource_type_hint(scope, known_resource_types)
+                    ),
                 )
             )
         for match in _VALUE_REGEX_RE.finditer(error):
