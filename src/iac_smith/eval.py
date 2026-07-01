@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 from collections import Counter
 from collections.abc import Callable
@@ -92,7 +93,7 @@ def _runtime_result_for(
         repo_root = Path(tmp) / "repo"
         repo_root.mkdir()
         apply_generated_files(repo_root, generated_files)
-        env = {"IAC_SMITH_CHECK_TIMEOUT": "60"}
+        env = {**os.environ, "IAC_SMITH_CHECK_TIMEOUT": "60"}
         if run_plan:
             env["IAC_SMITH_RUNTIME_PLAN"] = "1"
         result = validate_generated_iac(repo_root, env_override=env)
