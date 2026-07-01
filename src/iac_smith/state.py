@@ -27,4 +27,3 @@ class IaCSmithState(TypedDict, total=False):
     status: str
     block_reason: str | None
     repair_attempts: int
-    foundation_added: bool

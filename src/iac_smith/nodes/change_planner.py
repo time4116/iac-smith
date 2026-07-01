@@ -27,49 +27,6 @@ def _is_foundation_stack(stack_name: str) -> bool:
     return stack_name in FOUNDATION_STACK_NAMES
 
 
-def _foundation_files(environments: list[str]) -> list[str]:
-    """Every file the foundation module + per-environment foundation stack needs."""
-    files: list[str] = []
-    for env in environments:
-        files.append(f"environments/{env}/foundation/terragrunt.hcl")
-        files.append(f"environments/{env}/foundation/README.md")
-    files.extend(
-        [
-            "modules/foundation/main.tf",
-            "modules/foundation/variables.tf",
-            "modules/foundation/outputs.tf",
-            "modules/foundation/versions.tf",
-            "modules/foundation/README.md",
-        ]
-    )
-    return files
-
-
-def add_foundation_stack(change_plan: ChangePlan) -> ChangePlan:
-    """Return a plan with the foundation module + stack added, if not already present.
-
-    On a fresh repo ``plan_changes`` never schedules a foundation up-front (see
-    ``_uses_foundation``); this is the sole path that adds one, invoked when
-    generated output proves it is truly needed (a workload stack depends on one
-    that was not planned). Idempotent: adds only the foundation files missing.
-    """
-    planned = set(change_plan.files_to_generate)
-    additions = [f for f in _foundation_files(change_plan.environments) if f not in planned]
-    if not additions:
-        return change_plan
-    note = (
-        "Generate foundation module for shared network dependencies "
-        "(a generated stack depends on it)"
-    )
-    summary = change_plan.summary if note in change_plan.summary else [*change_plan.summary, note]
-    return change_plan.model_copy(
-        update={
-            "files_to_generate": [*change_plan.files_to_generate, *additions],
-            "summary": summary,
-        }
-    )
-
-
 def _repo_has_foundation(repo_patterns: RepoPatterns | None) -> bool:
     if not repo_patterns:
         return False
@@ -85,24 +42,15 @@ def _uses_foundation(
     stack_name: str,
     repo_patterns: RepoPatterns | None,
 ) -> bool:
-    # A workload uses a foundation only when the repo already has one to follow.
-    # We do NOT speculatively decide a fresh repo needs a shared-networking stack
-    # from parsed intent (`requires_new_vpc`): that signal is model-parsed and
-    # flip-flops between runs of the same issue, which made the same request
-    # sometimes generate a whole VPC foundation and sometimes not. Referencing
-    # existing networking is the deterministic default; a foundation is scaffolded
-    # only reactively, when generated output proves a cross-stack dependency is
-    # truly needed (see add_foundation_stack).
+    # A workload wires to a foundation only when the repo ALREADY has one to follow —
+    # that is reference-existing, not creation. IaC Smith never generates a
+    # shared-networking foundation itself: the parsed `requires_new_vpc` intent is
+    # model-parsed and flip-flopped between runs, and the reactive scaffold that
+    # created one on demand produced non-deterministic cross-stack output-contract
+    # breakage. Referencing existing networking is the deterministic default.
     if _is_foundation_stack(stack_name):
         return False
     return _repo_has_foundation(repo_patterns)
-
-
-def _should_generate_foundation(
-    stack_name: str,
-    repo_patterns: RepoPatterns | None,
-) -> bool:
-    return _uses_foundation(stack_name, repo_patterns) and not _repo_has_foundation(repo_patterns)
 
 
 def _planned_environments(
@@ -171,9 +119,6 @@ def plan_changes(
                 f"environments/{env}/{stack_name}/README.md",
             ]
         )
-
-    if _should_generate_foundation(stack_name, repo_patterns):
-        files.extend(_foundation_files(environments))
 
     # Only generate module scaffold if the repo doesn't already have one for this stack.
     if stack_name != "baseline" and not _module_already_exists(stack_name, repo_patterns):

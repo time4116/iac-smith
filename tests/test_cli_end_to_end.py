@@ -11,7 +11,6 @@ from iac_smith.cli import (
     _maybe_comment_on_block,
     _repair_runtime_static_issues,
     _run_timeout,
-    _scaffold_foundation_files,
     _select_repair_model,
     run_iac_smith,
 )
@@ -565,90 +564,6 @@ def test_run_iac_smith_blocks_when_runtime_validation_fails(tmp_path: Path, monk
     assert result.status == "blocked"
     assert result.block_reason == "terragrunt plan failed"
     assert pr_client.calls == []
-
-
-def _workload_intent() -> InfrastructureIntent:
-    return InfrastructureIntent(
-        raw_request="Aurora data platform",
-        resource_type="rds_aurora",
-        environment_scope=EnvironmentScope.NON_PROD_ONLY,
-        environments=["non-prod"],
-        region="us-west-2",
-        requires_new_vpc=False,
-        features=[],
-    )
-
-
-def _workload_plan() -> ChangePlan:
-    return ChangePlan(
-        stack_name="rds-aurora",
-        environments=["non-prod"],
-        files_to_generate=[
-            "environments/non-prod/rds-aurora/terragrunt.hcl",
-            "modules/rds-aurora/main.tf",
-        ],
-        backend_resources={"non-prod": BackendResource(bucket="b", lock_table="l")},
-        summary=["Generate rds-aurora"],
-    )
-
-
-def test_scaffold_foundation_files_generates_missing_foundation(tmp_path):
-    workload_tg = (
-        'dependency "foundation" {\n  config_path = "../foundation"\n'
-        '  mock_outputs = { vpc_id = "vpc-123" }\n}\n'
-    )
-    result = {
-        "intent": _workload_intent(),
-        "change_plan": _workload_plan(),
-        "repo_patterns": RepoPatterns(),
-        "ruleset": None,
-        "target_repo": "time4116/iac-smith-demo-infra",
-        "generated_files": {
-            "environments/non-prod/rds-aurora/terragrunt.hcl": workload_tg,
-        },
-        "blackboard": None,
-    }
-    requested: dict = {}
-
-    def fake_generator(*, change_plan, **kwargs):
-        requested["paths"] = list(change_plan.files_to_generate)
-        return {path: "# generated\n" for path in change_plan.files_to_generate}
-
-    new_files = _scaffold_foundation_files(
-        file_generator=fake_generator, result=result, repo_path=tmp_path
-    )
-
-    assert new_files is not None
-    assert "modules/foundation/main.tf" in new_files
-    assert "environments/non-prod/foundation/terragrunt.hcl" in new_files
-    # Only foundation files were requested from the generator, not the workload.
-    assert all("foundation" in path for path in requested["paths"])
-    # Merged into result state and written to the repo on disk.
-    assert "modules/foundation/main.tf" in result["generated_files"]
-    assert (tmp_path / "modules" / "foundation" / "main.tf").is_file()
-    assert "modules/foundation/main.tf" in result["change_plan"].files_to_generate
-
-
-def test_scaffold_foundation_files_noop_without_foundation_dependency(tmp_path):
-    result = {
-        "intent": _workload_intent(),
-        "change_plan": _workload_plan(),
-        "repo_patterns": RepoPatterns(),
-        "ruleset": None,
-        "target_repo": "time4116/iac-smith-demo-infra",
-        "generated_files": {
-            "environments/non-prod/rds-aurora/terragrunt.hcl": "remote_state {}\n",
-        },
-        "blackboard": None,
-    }
-
-    def fake_generator(**kwargs):
-        raise AssertionError("must not generate when no foundation dependency is missing")
-
-    assert (
-        _scaffold_foundation_files(file_generator=fake_generator, result=result, repo_path=tmp_path)
-        is None
-    )
 
 
 def test_run_timeout_defaults_to_six_minutes():
