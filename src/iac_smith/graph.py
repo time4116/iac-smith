@@ -1,3 +1,4 @@
+import os
 from collections.abc import Callable
 from inspect import signature
 from pathlib import Path
@@ -28,6 +29,7 @@ from iac_smith.nodes.static_review import (
 )
 from iac_smith.provider_schema import build_schema_resolver
 from iac_smith.repo_scanner import scan_repo_patterns
+from iac_smith.spec_renderer import SpecRendererGenerator
 from iac_smith.state import IaCSmithState
 
 IntentParser = Callable[[str], InfrastructureIntent]
@@ -57,6 +59,16 @@ def default_file_generator(
     repo_path: Path | None = None,
     blackboard: RunBlackboard | None = None,
 ) -> dict[str, str]:
+    if os.getenv("IAC_SMITH_GENERATION_MODE", "freeform") == "spec_renderer":
+        return SpecRendererGenerator().generate_files(
+            intent=intent,
+            change_plan=change_plan,
+            repo_patterns=repo_patterns,
+            ruleset=ruleset,
+            target_repo=target_repo,
+            repo_path=repo_path,
+            blackboard=blackboard,
+        )
     return BedrockTerraformGenerator().generate_files(
         intent=intent,
         change_plan=change_plan,

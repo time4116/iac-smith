@@ -56,6 +56,20 @@ Runtime validation is intentionally conservative. IaC Smith never runs `terrafor
 
 IaC Smith will refuse requests that are genuinely destructive or risky rather than generating an unsafe or misleading implementation.
 
+## Generation modes and local evals
+
+The default generation mode remains the existing Bedrock free-form Terraform generator. To exercise the typed-spec compiler path, set `IAC_SMITH_GENERATION_MODE=spec_renderer`. In this mode IaC Smith builds an `InfrastructureSpec` from parsed intent and the deterministic change plan, then renders repository structure, Terragrunt envelopes, backend bootstrap, workflows, module variables, outputs, and cross-stack dependency wiring from that spec.
+
+The spec renderer intentionally emits deterministic structure only until provider-schema or Terraform Registry module selection is added. That keeps the generic/no-golden-path boundary while moving global consistency out of per-file LLM text generation.
+
+Use the local eval harness before changing generation behavior:
+
+```bash
+uv run python -m iac_smith.eval path/to/fixture.yaml --runs 10
+```
+
+The report tracks intent variants, plan variants, rendered-file hash variants, static-review pass count, and failure clusters so repeated issue runs can be measured without dispatching the full GitHub Actions workflow.
+
 ## Architecture and security model
 
 IaC Smith is split into a controller repository and a target infrastructure repository. The controller repository runs the GitHub Actions workflow, reads the source issue, calls Bedrock, scans the target repository, validates generated Terraform/Terragrunt, and opens a pull request. The target infrastructure repository owns the generated IaC and its normal post-merge apply workflow.
