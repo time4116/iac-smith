@@ -111,9 +111,9 @@ inputs = {
 
 ## Foundation module
 
-Referencing existing networking is the default: IaC Smith does **not** generate a `foundation` module speculatively. If a `modules/foundation` directory already exists in the target repository, the new stack is wired to it rather than a second one being generated. Otherwise the workload sources the VPC/subnets it needs from existing infrastructure (passed as inputs or read with data sources).
+Referencing existing networking is the default, and IaC Smith **never generates** a `foundation` module — not up front, and not reactively. If a `modules/foundation` directory already exists in the target repository, a new stack is *wired to it* (referencing existing infrastructure). Otherwise the workload sources the VPC/subnets it needs from existing infrastructure — passed as inputs or read with data sources — and any stray `dependency "foundation"` a stack tries to declare on a non-existent foundation is stripped so it cannot break `terragrunt plan`.
 
-A `foundation` module is generated for a fresh repo only *reactively* — when generated output proves a workload genuinely depends on a shared-networking stack that was not planned. When that happens it provides VPC, public/private subnets, NAT gateway, route tables, and internet gateway — everything a compute or data stack needs as inputs.
+Creating a whole shared-networking layer is intentionally out of scope: it dropped a large-blast-radius VPC into unrelated workload PRs, and the model-authored foundation's output contract drifted from what workloads referenced — a recurring source of non-deterministic breakage.
 
 ## Adding a new stack to an existing repo
 

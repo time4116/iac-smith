@@ -3,7 +3,6 @@ import re
 from pathlib import Path
 
 from iac_smith.models.validation import ValidationResult, ValidationStatus
-from iac_smith.nodes.change_planner import FOUNDATION_STACK_NAMES
 from iac_smith.nodes.contract import parse_module_variables
 
 SECRET_PATTERNS = [
@@ -896,37 +895,6 @@ def _find_terragrunt_dangling_dependencies(
                 f"instead of a cross-stack dependency."
             )
     return errors
-
-
-def missing_foundation_dependency_targets(
-    generated_files: dict[str, str], known_stack_dirs: set[str]
-) -> set[str]:
-    """Return foundation-style stack dirs a generated stack depends on but that don't exist.
-
-    A workload stack declaring `dependency "foundation"` pointing at a stack that is
-    neither created by this change nor present in the repo is the model telling us a
-    shared network foundation is *truly needed*. Restricted to foundation-style
-    targets (``FOUNDATION_STACK_NAMES``) because those are the layer the planner
-    knows how to scaffold — an arbitrary missing stack is left to the dangling-
-    dependency finding to repair, not auto-created.
-    """
-    resolvable = {
-        posixpath.dirname(path) for path in generated_files if _is_stack_terragrunt(path)
-    } | known_stack_dirs
-    targets: set[str] = set()
-    for path, content in generated_files.items():
-        if not _is_stack_terragrunt(path):
-            continue
-        for block in _extract_named_hcl_blocks(content, _DEPENDENCY_HEADER_RE).values():
-            config_m = _CONFIG_PATH_RE.search(block)
-            if config_m is None:
-                continue
-            target = _resolve_dependency_target(path, config_m.group(1))
-            if target is None or target in resolvable:
-                continue
-            if posixpath.basename(target) in FOUNDATION_STACK_NAMES:
-                targets.add(target)
-    return targets
 
 
 _APPRUNNER_RESOURCE_RE = re.compile(r'\bresource\s+"aws_apprunner_service"')

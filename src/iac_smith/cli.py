@@ -15,6 +15,7 @@ from iac_smith.dynamic_terraform import (
     BedrockTerraformGenerator,
     _dedup_module_declarations,
     _normalize_child_terragrunt,
+    _strip_orphan_foundation_dependency,
     _wire_foundation_dependency,
 )
 from iac_smith.graph import FileGenerator, IntentParser, build_graph
@@ -22,11 +23,9 @@ from iac_smith.models.change_plan import ChangePlan
 from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
 from iac_smith.models.rules import Ruleset
-from iac_smith.nodes.change_planner import add_foundation_stack
 from iac_smith.nodes.pr_writer import branch_name_for_issue, build_pr_body
 from iac_smith.nodes.static_review import (
     existing_stack_dirs,
-    missing_foundation_dependency_targets,
     static_review_generated_files,
 )
 from iac_smith.provider_lock import ensure_terraform_gitignore, generate_provider_locks
@@ -370,56 +369,8 @@ def _apply_with_child_locals(repo_path: Path, result: IaCSmithState) -> None:
     _normalize_child_terragrunt(result["generated_files"])
     _dedup_module_declarations(result["generated_files"])
     _wire_foundation_dependency(result["generated_files"])
+    _strip_orphan_foundation_dependency(result["generated_files"])
     apply_generated_files(repo_path, result["generated_files"])
-
-
-def _scaffold_foundation_files(
-    *,
-    file_generator: FileGenerator,
-    result: IaCSmithState,
-    repo_path: Path,
-) -> dict[str, str] | None:
-    """Generate a foundation stack a runtime plan proved is missing.
-
-    A workload often needs shared networking (VPC/subnets) it can only get from a
-    foundation stack, but the model can't create a whole new stack during repair —
-    so it loops between a dangling ``dependency "foundation"``, illegal ``data``
-    blocks in ``terragrunt.hcl``, and ``REPLACE_WITH_*`` placeholders. The graph
-    phase can't catch this because the generator's own static-review loop resolves
-    the dangling dependency before ``validation_runner`` sees it; the need only
-    becomes provable at ``terragrunt plan`` ("dependency \"foundation\" ... does not
-    exist"). Here we scaffold the foundation module + stack so the existing
-    dependency resolves instead of asking the model to fake networking.
-
-    Returns the newly generated foundation files (already merged into ``result`` and
-    written to ``repo_path``), or ``None`` when no foundation dependency is missing.
-    """
-    if not missing_foundation_dependency_targets(
-        result["generated_files"], existing_stack_dirs(repo_path)
-    ):
-        return None
-    expanded = add_foundation_stack(result["change_plan"])
-    new_paths = [
-        path
-        for path in expanded.files_to_generate
-        if path not in result["change_plan"].files_to_generate
-    ]
-    if not new_paths:
-        return None
-    foundation_plan = expanded.model_copy(update={"files_to_generate": new_paths})
-    foundation_files = file_generator(
-        intent=result["intent"],
-        change_plan=foundation_plan,
-        repo_patterns=result["repo_patterns"],
-        ruleset=result.get("ruleset"),
-        target_repo=result["target_repo"],
-        repo_path=repo_path,
-        blackboard=result.get("blackboard"),
-    )
-    result["change_plan"] = expanded
-    result["generated_files"] = {**result["generated_files"], **foundation_files}
-    _apply_with_child_locals(repo_path, result)
-    return foundation_files
 
 
 def _block_comment_body(summary: str) -> str:
@@ -618,7 +569,6 @@ def _run_iac_smith_core(
         version_env = ensure_terraform_terragrunt(repo_path)
 
         max_runtime_repairs = _runtime_repair_attempts(env)
-        foundation_scaffolded = False
         for repair_attempt in range(max_runtime_repairs + 1):
             _log("IaC Smith: running Terraform/Terragrunt validation and plan before commit.")
             runtime_validation = validate_generated_iac(repo_path, env_override=version_env)
@@ -634,21 +584,6 @@ def _run_iac_smith_core(
 
             block_reason = "; ".join(runtime_validation.errors)
             _log(f"IaC Smith: runtime validation failed: {block_reason}")
-            # Before spending a model-repair attempt, scaffold a foundation stack if a
-            # generated stack depends on one that does not exist — the model cannot
-            # create a new stack during repair, so without this it loops forever
-            # faking networking. Done at most once per run.
-            if not foundation_scaffolded:
-                foundation_files = _scaffold_foundation_files(
-                    file_generator=selected_file_generator, result=result, repo_path=repo_path
-                )
-                if foundation_files is not None:
-                    _log(
-                        f"IaC Smith: scaffolded foundation stack ({len(foundation_files)} file(s)) "
-                        "— a generated stack depends on it; re-validating."
-                    )
-                    foundation_scaffolded = True
-                    continue
             if repair_attempt >= max_runtime_repairs or runtime_repairer is None:
                 return IaCSmithRunResult(status="blocked", branch=branch, block_reason=block_reason)
 

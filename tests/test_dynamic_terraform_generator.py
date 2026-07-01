@@ -14,6 +14,7 @@ from iac_smith.dynamic_terraform import (
     _normalize_child_terragrunt,
     _path_needs_repair,
     _repair_unit_key,
+    _strip_orphan_foundation_dependency,
     _wire_foundation_dependency,
     build_generation_prompt,
     parse_generation_payload,
@@ -1964,4 +1965,51 @@ class TestWireFoundationDependency:
         }
         before = dict(files)
         _wire_foundation_dependency(files)
+        assert files == before
+
+
+class TestStripOrphanFoundationDependency:
+    _STACK = "environments/non-prod/rds-aurora/terragrunt.hcl"
+    _WITH_DEP = (
+        'terraform {\n  source = "../../../modules/rds-aurora"\n}\n'
+        'dependency "foundation" {\n  config_path = "../foundation"\n'
+        '  mock_outputs = {\n    vpc_id = "vpc-0"\n  }\n}\n'
+        "inputs = {\n"
+        "  environment        = local.environment\n"
+        "  vpc_id             = dependency.foundation.outputs.vpc_id\n"
+        "  private_subnet_ids = dependency.foundation.outputs.private_subnet_ids\n"
+        "}\n"
+    )
+
+    def test_strips_dependency_and_output_refs_when_no_foundation(self):
+        files = {self._STACK: self._WITH_DEP}
+        _strip_orphan_foundation_dependency(files)
+        out = files[self._STACK]
+        assert 'dependency "foundation"' not in out
+        assert "dependency.foundation.outputs" not in out
+        # Unrelated inputs and the terraform source survive.
+        assert "environment        = local.environment" in out
+        assert 'source = "../../../modules/rds-aurora"' in out
+
+    def test_no_op_when_foundation_stack_present(self):
+        files = {
+            self._STACK: self._WITH_DEP,
+            "environments/non-prod/foundation/terragrunt.hcl": (
+                'terraform {\n  source = "../../../modules/foundation"\n}\n'
+            ),
+            "modules/foundation/outputs.tf": 'output "vpc_id" {\n  value = module.vpc.vpc_id\n}\n',
+        }
+        before = dict(files)
+        _strip_orphan_foundation_dependency(files)
+        assert files == before
+
+    def test_no_op_when_workload_has_no_foundation_reference(self):
+        files = {
+            self._STACK: (
+                'terraform {\n  source = "../../../modules/rds-aurora"\n}\n'
+                "inputs = {\n  environment = local.environment\n}\n"
+            )
+        }
+        before = dict(files)
+        _strip_orphan_foundation_dependency(files)
         assert files == before

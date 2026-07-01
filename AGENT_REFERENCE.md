@@ -209,44 +209,29 @@ environments/{env}/{stack_name}/terragrunt.hcl
 environments/{env}/{stack_name}/README.md
 ```
 
-**Foundation files (only when the repo already has a foundation, or scaffolded reactively):**
-```
-modules/foundation/main.tf
-modules/foundation/variables.tf
-modules/foundation/outputs.tf
-modules/foundation/versions.tf
-modules/foundation/README.md
-environments/{env}/foundation/terragrunt.hcl
-environments/{env}/foundation/README.md
-```
+**IaC Smith never generates a shared-networking foundation.** Reference-existing
+networking is the deterministic default. `plan_changes` never schedules a foundation,
+and there is no reactive scaffold that creates one on demand. The two mechanisms that
+used to create foundations were both removed because they were non-deterministic:
 
-**Reference-existing networking is the deterministic default.** `plan_changes` never
-schedules a shared-networking foundation up-front on a fresh repo. The parsed
-`requires_new_vpc` intent field is **no longer a generation trigger**: it is
-model-parsed and flip-flopped between runs of the same issue, so the same request
-sometimes produced a whole VPC foundation and sometimes not. `_uses_foundation` now
-keys solely off deterministic repo state (`_repo_has_foundation`) — a foundation is
-*followed* only when one already exists in the target repo. Otherwise a workload
-sources the networking it needs from existing infrastructure (inputs / data sources),
-and a foundation is created only reactively (below) when generated output proves a
-cross-stack dependency is truly needed.
+- The parsed `requires_new_vpc` intent field (model-parsed, flip-flopped between runs
+  of the same issue → the same request sometimes produced a whole VPC foundation and
+  sometimes not). `_uses_foundation` now keys solely off deterministic repo state
+  (`_repo_has_foundation`).
+- The reactive `add_foundation_stack` scaffold (fired whenever the model authored a
+  `dependency "foundation"`). It generated model-authored foundations whose output
+  contract drifted from what the workload referenced (`dependency.foundation.outputs.vpc_cidr`
+  / `private_subnet_azs` with no matching `output`), which the repair loop oscillated
+  on until the run hit its wall-clock budget.
 
-**Foundation auto-scaffold (feedback-driven):** this is the sole path that adds a
-foundation to a fresh repo. If the generated output itself declares a `dependency "foundation"`
-(or `baseline`/`vpc`/`vpc-foundation` — `FOUNDATION_STACK_NAMES`) pointing at a stack
-that is neither created by this change nor present in the target repo,
-`validation_runner` calls `add_foundation_stack(change_plan)` to add the foundation
-module + per-environment stack above. The already-generated workload files are kept;
-`code_generator` regenerates **only the newly-planned foundation files** (the plan
-delta) and merges them, rather than re-running every file through the model — adding a
-foundation stack does not change the existing files, and a full regeneration roughly
-doubles the slowest part of the run. This is the model's own output proving the
-foundation is *truly needed*, rather than
-looping repair on an unfixable dangling-dependency finding (which would otherwise
-only surface at `terragrunt plan`). Scoped to foundation-style targets (an arbitrary
-missing stack is left to the dangling-dependency finding), guarded to run **at most
-once per run** (`state["foundation_added"]`), and detected by
-`static_review.missing_foundation_dependency_targets`.
+A workload therefore sources the networking it needs from existing infrastructure
+(inputs / data sources). A foundation is only ever *followed*, never created, and only
+when one already exists in the target repo — `_wire_foundation_dependency` wires the
+workload to it. When no foundation stack is present,
+`_strip_orphan_foundation_dependency` removes any model-authored `dependency "foundation"`
+block and the inputs that referenced `dependency.foundation.outputs.*`, so an orphan
+cross-stack reference can never reach `terragrunt plan` as a hard "no variable named
+dependency" error.
 
 **If stack module does not exist yet:**
 ```
@@ -382,8 +367,9 @@ Some planned files are pure **structural envelope** — invariant apart from env
 - **`environments/<env>/root.hcl`** — rendered by `_render_root_hcl` (via `_deterministic_envelope_files`) and excluded from both generation and the repair loop. Guarantees the root `locals` (`environment`, `aws_region`) always exist, which child stacks redeclare. This is the canonical home for new envelope files as more of the layout becomes deterministic.
 - **Child stack `terragrunt.hcl` envelope** — `_normalize_child_terragrunt` rewrites every child stack's `include` and `locals` blocks deterministically from the env's root locals (before static review and before each disk write), leaving the model's `terraform`/`dependency`/`inputs` untouched. The child always gets a correct, parseable `include "root"` + `locals { environment, aws_region }` regardless of what the model emitted — so a missing/dropped/mangled envelope is structurally impossible. The rebuilt `locals` also always declares `environment` and `stack_name` derived from the child's own path (env dir and stack dir; root values win if present), so a model that references `local.stack_name`/`local.environment` — values the root does not expose — no longer fails with "Unsupported attribute". This replaced the additive `_inject_missing_child_locals` patcher; the orphaned-locals static check remains only as a backstop for trees assembled without a root config.
 - **Module declaration dedup** — `_dedup_module_declarations` (runs right after `_normalize_child_terragrunt`, same three call sites) removes any `variable`/`output` block from a module's `main.tf` that its dedicated `variables.tf`/`outputs.tf` already declares. Terraform rejects duplicate declarations ("... must be unique within a module"), and the model intermittently repeats them — a class of error the repair loop can **oscillate** on (fix main.tf, the model re-adds it when regenerating the dedicated file) until the run hits its wall-clock budget. Dedup is deterministic and authoritative (the dedicated file wins), so it breaks the loop before static review even runs; a declaration living solely in `main.tf` is left untouched. Nested braces in a block body are handled by brace-balanced excision (`_strip_named_blocks`).
-- **Foundation stack** — the shared-networking foundation is fully invariant, so it is rendered deterministically rather than hand-authored by the model: `modules/foundation/*.tf` (`_FOUNDATION_MODULE_FILES`) source the community **`terraform-aws-modules/vpc/aws`** module (pinned `~> 5.0`) and expose `vpc_id`/`private_subnet_ids`/`public_subnet_ids`/`vpc_cidr` — the names workloads consume via `dependency.foundation.outputs.*`. The foundation stack `terragrunt.hcl` is rendered by `_render_foundation_stack_terragrunt` (source + `inputs`) and gets its envelope from the child-normalizer above. `terraform init`/`plan` resolves and validates the module; the lockfile pins providers. This is the first instance of the broader "source published registry modules instead of authoring resource graphs" direction (workload stacks are the next step).
-- **Workload→foundation dependency wiring** — `_wire_foundation_dependency` runs after the child-normalizer (same three call sites) and deterministically connects a workload stack to a planned foundation. For each `environments/<env>/<workload>/terragrunt.hcl`, it computes the intersection of the foundation's output names (parsed from `modules/foundation/outputs.tf`) with the workload module's declared variables (parsed from `modules/<workload>/variables.tf`); if non-empty, it (re)writes a canonical `dependency "foundation"` block — `config_path = "../foundation"`, `mock_outputs` typed from each consuming variable's declared `type`, `mock_outputs_allowed_terraform_commands = ["validate","plan"]` — and rewires each intersection input to `dependency.foundation.outputs.<name>`, preserving all other model-authored inputs. The set is purely structural (foundation outputs ∩ workload variables), so a workload that needs no networking gets nothing forced on it; no service-specific names are hardcoded. Idempotent, and it replaces any block the model authored so config_path/mock-types/output-refs are always internally consistent. This fixes the class of bug where the model shipped a foundation **and** a workload but left the workload's `vpc_id`/`private_subnet_ids` as placeholder empties.
+- **Foundation module (deterministic, only when following an existing one)** — IaC Smith never *generates* a foundation, but the invariant `_FOUNDATION_MODULE_FILES` (sourcing the community **`terraform-aws-modules/vpc/aws`** module, pinned `~> 5.0`, exposing `vpc_id`/`private_subnet_ids`/`public_subnet_ids`/`vpc_cidr`) and `_render_foundation_stack_terragrunt` remain the canonical rendering for a foundation stack that is already part of the tree, rendered via `_deterministic_envelope_files` so the model never hand-authors it.
+- **Workload→foundation dependency wiring / stripping** — `_wire_foundation_dependency` runs after the child-normalizer (same three call sites) and connects a workload to a foundation **that already exists in the tree**. For each `environments/<env>/<workload>/terragrunt.hcl` it computes the intersection of the foundation's output names (from `modules/foundation/outputs.tf`) with the workload module's declared variables (from `modules/<workload>/variables.tf`); if non-empty it (re)writes a canonical `dependency "foundation"` block (`config_path = "../foundation"`, `mock_outputs` typed from each consuming variable's `type`, `mock_outputs_allowed_terraform_commands = ["validate","plan"]`) and rewires each intersection input to `dependency.foundation.outputs.<name>`, preserving other inputs. Purely structural (outputs ∩ variables), idempotent, no service-specific names. `_strip_orphan_foundation_dependency` runs right after it and covers the common case where **no** foundation exists: it removes any model-authored `dependency "foundation"` block and every input referencing `dependency.foundation.outputs.*`, leaving the workload to source networking from its own variables/data sources — so an orphan cross-stack reference can never become a hard `terragrunt plan` failure the repair loop oscillates on.
+- **Unattributable static-review issues no longer trigger full regeneration** — the repair loop repairs only files `_path_needs_repair` attributes to the issues; when none are attributable it hands the best-effort tree to terraform/terragrunt validation to gate, instead of the old `or repairable` fallback that regenerated **every** file each round (a cross-cutting error just reproduced itself, burning the whole budget).
 
 ---
 

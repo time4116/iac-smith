@@ -389,6 +389,37 @@ def _foundation_output_names(generated_files: dict[str, str]) -> list[str]:
     return [m.group(1) for m in _TF_OUTPUT_RE.finditer(content)]
 
 
+_TG_FOUNDATION_OUTPUT_REF_RE = re.compile(r"dependency\.foundation\.outputs\.")
+
+
+def _strip_orphan_foundation_dependency(generated_files: dict[str, str]) -> None:
+    """Drop a workload's ``dependency "foundation"`` when no foundation stack exists.
+
+    IaC Smith never generates a shared-networking foundation, so a model-authored
+    ``dependency "foundation"`` on a fresh repo points at a stack that will never be
+    created — a hard ``terragrunt plan`` error ("There is no variable named
+    dependency") the repair loop oscillates on. When the tree contains no foundation
+    stack, strip the orphan dependency block and every input assignment that
+    referenced ``dependency.foundation.outputs.*``, leaving the workload to source
+    the networking it needs from its own variables/data sources. No-op when a
+    foundation stack is present — that case is wired by ``_wire_foundation_dependency``.
+    """
+    has_foundation = any(
+        _FOUNDATION_STACK_DIR_RE.fullmatch(path) for path in generated_files
+    ) or bool(_foundation_output_names(generated_files))
+    if has_foundation:
+        return
+    for path, content in list(generated_files.items()):
+        parts = path.split("/")
+        if len(parts) < 4 or parts[0] != "environments" or parts[-1] != "terragrunt.hcl":
+            continue
+        if "foundation" not in content:
+            continue
+        body = _remove_hcl_block(content, _TG_FOUNDATION_DEP_RE)
+        kept = [ln for ln in body.splitlines() if not _TG_FOUNDATION_OUTPUT_REF_RE.search(ln)]
+        generated_files[path] = "\n".join(kept) + ("\n" if body.endswith("\n") else "")
+
+
 _SOURCE_PINPOINT_RE = re.compile(r"\bon\s+(?P<file>[^\s,]+)\s+line\s+\d+")
 
 
@@ -2275,6 +2306,7 @@ class BedrockTerraformGenerator:
             _normalize_child_terragrunt(generated_files)
             _dedup_module_declarations(generated_files)
             _wire_foundation_dependency(generated_files)
+            _strip_orphan_foundation_dependency(generated_files)
             validation = static_review_generated_files(generated_files)
             # Autofix both security errors and structural issues; advisory
             # warnings (public ingress, docs markers) are surfaced for review,
@@ -2319,9 +2351,17 @@ class BedrockTerraformGenerator:
                 for p in change_plan.files_to_generate
                 if p not in _WORKFLOW_PATHS and p not in envelope_files
             ]
-            paths_to_repair = [
-                path for path in repairable if _path_needs_repair(path, issues)
-            ] or repairable
+            paths_to_repair = [path for path in repairable if _path_needs_repair(path, issues)]
+            if not paths_to_repair:
+                # No file is attributable to these issues. Regenerating every file
+                # (the old fallback) just reproduces the same cross-cutting error each
+                # round — the churn that burns the whole budget. Hand the best-effort
+                # tree to terraform/terragrunt validation to gate instead.
+                self._log(
+                    "IaC Smith: static review issues are not attributable to specific "
+                    "files; returning best-effort files for downstream validation to gate."
+                )
+                return generated_files
             self._log(
                 f"IaC Smith: repairing {len(paths_to_repair)} file(s) after static review issues."
             )
@@ -2463,4 +2503,5 @@ class BedrockTerraformGenerator:
         _normalize_child_terragrunt(repaired_files)
         _dedup_module_declarations(repaired_files)
         _wire_foundation_dependency(repaired_files)
+        _strip_orphan_foundation_dependency(repaired_files)
         return {path: repaired_files[path] for path in change_plan.files_to_generate}

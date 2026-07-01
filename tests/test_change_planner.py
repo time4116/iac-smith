@@ -1,6 +1,6 @@
 from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
-from iac_smith.nodes.change_planner import add_foundation_stack, plan_changes
+from iac_smith.nodes.change_planner import plan_changes
 
 
 def _intent(resource_type: str = "eks_fargate") -> InfrastructureIntent:
@@ -144,11 +144,10 @@ def test_plan_raises_for_blocked_intent():
 
 def test_plan_does_not_speculatively_generate_foundation_on_fresh_repo():
     # Deterministic default: a fresh repo (no existing foundation) never gets a
-    # shared-networking foundation planned up-front, even when intent parsed
-    # requires_new_vpc=True. That signal is model-parsed and flip-flops between
-    # runs of the same issue; referencing existing networking is the default, and
-    # a foundation is only scaffolded reactively (add_foundation_stack) when the
-    # generated output proves a cross-stack dependency is truly needed.
+    # shared-networking foundation planned, even when intent parsed
+    # requires_new_vpc=True. IaC Smith never generates a foundation — referencing
+    # existing networking is the default; a workload wires to a foundation only when
+    # the repo already has one to follow.
     plan = plan_changes(
         _intent("ecs_fargate"),  # _intent sets requires_new_vpc=True
         target_repo="time4116/iac-smith-demo-infra",
@@ -182,10 +181,9 @@ def test_plan_strips_stack_suffix_from_resource_type():
     assert not any("ecs-fargate-stack" in p for p in plan.files_to_generate)
 
 
-def test_add_foundation_stack_adds_module_and_per_env_stack():
-    # A workload plan that did not schedule foundation (requires_new_vpc was false)
-    # gets the foundation module + per-environment stack added when generated output
-    # proves it is needed.
+def test_plan_never_generates_foundation_for_networking_workload():
+    # Even a workload that clearly needs networking gets no foundation generated —
+    # IaC Smith sources existing networking rather than creating a VPC.
     plan = plan_changes(
         InfrastructureIntent(
             raw_request="Aurora data platform",
@@ -193,37 +191,14 @@ def test_add_foundation_stack_adds_module_and_per_env_stack():
             environment_scope=EnvironmentScope.NON_PROD_ONLY,
             environments=["non-prod"],
             region="us-west-2",
-            requires_new_vpc=False,
+            requires_new_vpc=True,
             features=[],
         ),
         target_repo="time4116/iac-smith-demo-infra",
     )
     assert "modules/foundation/main.tf" not in plan.files_to_generate
-
-    expanded = add_foundation_stack(plan)
-
-    assert "modules/foundation/main.tf" in expanded.files_to_generate
-    assert "modules/foundation/variables.tf" in expanded.files_to_generate
-    assert "environments/non-prod/foundation/terragrunt.hcl" in expanded.files_to_generate
-    assert any("foundation module" in s for s in expanded.summary)
-    # The original workload files are preserved.
-    assert "modules/rds-aurora/main.tf" in expanded.files_to_generate
-
-
-def test_add_foundation_stack_is_idempotent():
-    base = plan_changes(
-        _intent("ecs_fargate"),
-        target_repo="time4116/iac-smith-demo-infra",
-    )
-    # A fresh plan no longer schedules foundation up-front; seed it once.
-    plan = add_foundation_stack(base)
-    assert "modules/foundation/main.tf" in plan.files_to_generate
-
-    expanded = add_foundation_stack(plan)
-
-    # No duplicates; the plan is unchanged because foundation is already scheduled.
-    assert expanded.files_to_generate.count("modules/foundation/main.tf") == 1
-    assert expanded.files_to_generate == plan.files_to_generate
+    assert "environments/non-prod/foundation/terragrunt.hcl" not in plan.files_to_generate
+    assert "modules/rds-aurora/main.tf" in plan.files_to_generate
 
 
 def test_plan_existing_foundation_applies_to_arbitrary_workload_stack():

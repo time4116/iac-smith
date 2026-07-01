@@ -18,13 +18,12 @@ from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
 from iac_smith.models.rules import Ruleset
 from iac_smith.models.validation import ValidationResult, ValidationStatus
-from iac_smith.nodes.change_planner import add_foundation_stack, plan_changes
+from iac_smith.nodes.change_planner import plan_changes
 from iac_smith.nodes.intent_parser import parse_intent
 from iac_smith.nodes.pr_writer import build_pr_body
 from iac_smith.nodes.ruleset_loader import load_ruleset
 from iac_smith.nodes.static_review import (
     existing_stack_dirs,
-    missing_foundation_dependency_targets,
     static_review_generated_files,
 )
 from iac_smith.provider_schema import build_schema_resolver
@@ -157,27 +156,6 @@ def make_code_generator(file_generator_fn: FileGenerator):
         if existing and not missing and not validation_errors:
             return {**state, "status": "generated"}
 
-        # The plan grew (a foundation stack was scaffolded) but the existing files
-        # are fine — generate only the newly-planned files and keep the rest, rather
-        # than re-running every file through the model.
-        if existing and missing and not validation_errors:
-            delta_plan = state["change_plan"].model_copy(update={"files_to_generate": missing})
-            new_files = _call_file_generator(
-                file_generator_fn,
-                intent=state["intent"],
-                change_plan=delta_plan,
-                repo_patterns=state["repo_patterns"],
-                ruleset=state.get("ruleset"),
-                target_repo=state["target_repo"],
-                repo_path=repo_path,
-                blackboard=state.get("blackboard"),
-            )
-            return {
-                **state,
-                "generated_files": {**existing, **new_files},
-                "status": "generated",
-            }
-
         # First pass, or a repair with validation errors: full (re)generation.
         generated_files = _call_file_generator(
             file_generator_fn,
@@ -210,30 +188,6 @@ def validation_runner(state: IaCSmithState) -> IaCSmithState:
         validation = static_review_generated_files(
             generated_files, known_stack_dirs=known_stack_dirs
         )
-        # If the generated output proves a shared network foundation is truly needed
-        # (a workload stack declares a dependency on a foundation stack nobody
-        # created), scaffold it into the plan and regenerate — a dangling cross-stack
-        # dependency would otherwise only surface as an unfixable repair finding (or
-        # fail at `terragrunt plan`). Runs regardless of static-review status (the
-        # dependency may not yet reference outputs) and at most once per run.
-        if not state.get("foundation_added"):
-            foundation_targets = missing_foundation_dependency_targets(
-                generated_files, known_stack_dirs
-            )
-            if foundation_targets:
-                return {
-                    **state,
-                    "change_plan": add_foundation_stack(state["change_plan"]),
-                    "foundation_added": True,
-                    # Keep the already-generated workload files — they don't change
-                    # when a foundation stack is added. code_generator regenerates only
-                    # the newly-planned foundation files (the delta) and merges them,
-                    # instead of re-running every file through the model again. Clear
-                    # validation so that delta path is taken rather than a full repair.
-                    "validation": None,
-                    "blackboard": blackboard,
-                    "status": "needs_repair",
-                }
         if validation.status != ValidationStatus.FAILED:
             # Harvest the real provider schema for the providers the generated files
             # declare (generic across providers; clean-config harvest, so it is
