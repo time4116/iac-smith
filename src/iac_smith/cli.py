@@ -13,6 +13,7 @@ from typing import Protocol, cast
 from iac_smith.blackboard import RunBlackboard, normalize_validation_findings
 from iac_smith.dynamic_terraform import (
     BedrockTerraformGenerator,
+    _dedup_module_declarations,
     _normalize_child_terragrunt,
     _wire_foundation_dependency,
 )
@@ -367,6 +368,7 @@ def _apply_with_child_locals(repo_path: Path, result: IaCSmithState) -> None:
     where the root and every child coexist, before terragrunt parses the files.
     """
     _normalize_child_terragrunt(result["generated_files"])
+    _dedup_module_declarations(result["generated_files"])
     _wire_foundation_dependency(result["generated_files"])
     apply_generated_files(repo_path, result["generated_files"])
 

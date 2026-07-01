@@ -149,9 +149,17 @@ def _normalize_child_terragrunt(generated_files: dict[str, str]) -> None:
         root_locals = root_locals_by_env.get(parts[1])
         if not root_locals:
             continue
+        # The rebuilt locals carry only what the root declares, so a model that
+        # referenced a structural value the root does not expose (commonly
+        # `local.stack_name`, sometimes `local.environment`) would fail with
+        # "Unsupported attribute". Both are derivable from the child's own path —
+        # env dir and stack dir — so declare them (root wins if it already has them).
+        child_locals = dict(root_locals)
+        child_locals.setdefault("environment", f'"{parts[1]}"')
+        child_locals.setdefault("stack_name", f'"{parts[2]}"')
         body = _remove_hcl_block(content, _TG_LOCALS_HEADER_RE)
         body = _remove_hcl_block(body, _TG_INCLUDE_RE)
-        generated_files[path] = _child_envelope_header(root_locals) + body.lstrip("\n")
+        generated_files[path] = _child_envelope_header(child_locals) + body.lstrip("\n")
 
 
 _TG_TERRAFORM_HEADER_RE = re.compile(r"^[ \t]*terraform\s*\{", re.MULTILINE)
@@ -162,6 +170,75 @@ _TF_OUTPUT_RE = re.compile(r'output\s+"([^"]+)"\s*\{')
 _TF_TYPE_RE = re.compile(r"^\s*type\s*=\s*(.+?)\s*$", re.MULTILINE)
 _TG_ASSIGN_RE = re.compile(r"^(\s*)([A-Za-z0-9_]+)\s*=")
 _FOUNDATION_STACK_DIR_RE = re.compile(r"environments/[^/]+/foundation/terragrunt\.hcl")
+
+
+def _strip_named_blocks(content: str, block_re: re.Pattern[str], names: set[str]) -> str:
+    """Remove every brace-balanced block whose captured name is in ``names``."""
+    if not names:
+        return content
+    spans: list[tuple[int, int]] = []
+    for m in block_re.finditer(content):
+        if m.group(1) not in names:
+            continue
+        brace = content.find("{", m.start())
+        if brace == -1:
+            continue
+        depth = 0
+        for i in range(brace, len(content)):
+            if content[i] == "{":
+                depth += 1
+            elif content[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    # Swallow the newline that trailed the block so removing a block
+                    # at the start of the file does not leave a leading blank line.
+                    if end < len(content) and content[end] == "\n":
+                        end += 1
+                    spans.append((m.start(), end))
+                    break
+    if not spans:
+        return content
+    out: list[str] = []
+    last = 0
+    for start, end in spans:
+        out.append(content[last:start])
+        last = end
+    out.append(content[last:])
+    return re.sub(r"\n{3,}", "\n\n", "".join(out))
+
+
+def _dedup_module_declarations(generated_files: dict[str, str]) -> None:
+    """Drop declarations from a module's main.tf that its dedicated file already owns.
+
+    The model intermittently repeats a ``variable``/``output`` in main.tf on top of
+    variables.tf/outputs.tf. Terraform rejects the duplicate ("... must be unique
+    within a module"), and the repair loop can oscillate on it — fix one file, the
+    model re-adds it when regenerating the other — until the run hits its wall-clock
+    budget. Deterministic dedup breaks the loop: the dedicated file is authoritative
+    and the main.tf copy is removed. Only true duplicates are stripped; a declaration
+    that lives solely in main.tf is left untouched.
+    """
+    modules: set[str] = set()
+    for path in generated_files:
+        parts = path.split("/")
+        if len(parts) >= 3 and parts[0] == "modules" and path.endswith(".tf"):
+            modules.add("/".join(parts[:2]))
+    for module in modules:
+        main_key = f"{module}/main.tf"
+        main_tf = generated_files.get(main_key)
+        if main_tf is None:
+            continue
+        for dedicated, block_re in (
+            ("variables.tf", _TF_VARIABLE_RE),
+            ("outputs.tf", _TF_OUTPUT_RE),
+        ):
+            owned = generated_files.get(f"{module}/{dedicated}")
+            if not owned:
+                continue
+            names = {m.group(1) for m in block_re.finditer(owned)}
+            main_tf = _strip_named_blocks(main_tf, block_re, names)
+        generated_files[main_key] = main_tf
 
 
 def _tf_variable_types(variables_tf: str) -> dict[str, str]:
@@ -2196,6 +2273,7 @@ class BedrockTerraformGenerator:
             # Rewrite each child stack's include/locals envelope deterministically so
             # the model can neither drop nor mangle it (the rest of the file is its own).
             _normalize_child_terragrunt(generated_files)
+            _dedup_module_declarations(generated_files)
             _wire_foundation_dependency(generated_files)
             validation = static_review_generated_files(generated_files)
             # Autofix both security errors and structural issues; advisory
@@ -2383,5 +2461,6 @@ class BedrockTerraformGenerator:
                     repaired_files[path] = content
 
         _normalize_child_terragrunt(repaired_files)
+        _dedup_module_declarations(repaired_files)
         _wire_foundation_dependency(repaired_files)
         return {path: repaired_files[path] for path in change_plan.files_to_generate}
