@@ -62,9 +62,7 @@ def test_pr_body_surfaces_structure_only_spec_renderer_warning():
         intent=intent,
         change_plan=plan,
         validation=ValidationResult(status=ValidationStatus.PASSED),
-        generated_files={
-            "modules/example/main.tf": "# No provider resources were selected for this component.\n"
-        },
+        structure_only=True,
     )
 
     assert "Structure-only PR" in body

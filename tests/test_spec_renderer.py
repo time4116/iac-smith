@@ -1,7 +1,7 @@
 from iac_smith.models.change_plan import BackendResource, ChangePlan
 from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
-from iac_smith.spec_renderer import build_spec_from_intent, render_spec
+from iac_smith.spec_renderer import build_spec_from_intent, is_structure_only_spec, render_spec
 
 
 def _intent(resource_type: str = "aurora_postgres") -> InfrastructureIntent:
@@ -73,6 +73,8 @@ def test_render_spec_owns_cross_file_contracts_deterministically():
     second = render_spec(spec)
 
     assert first == second
+    assert first.structure_only is True
+    assert is_structure_only_spec(spec) is True
     assert set(first) == set(_plan().files_to_generate)
     stack_hcl = first["environments/non-prod/aurora-postgres/terragrunt.hcl"]
     variables = first["modules/aurora-postgres/variables.tf"]

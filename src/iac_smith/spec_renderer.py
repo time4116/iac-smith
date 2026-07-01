@@ -20,6 +20,14 @@ from iac_smith.models.validation import ValidationResult, ValidationStatus
 _OUTPUT_RE = re.compile(r'output\s+"([^"]+)"\s*{')
 
 
+class RenderedFiles(dict[str, str]):
+    """Generated file mapping with renderer metadata carried out of the spec layer."""
+
+    def __init__(self, files: dict[str, str], *, structure_only: bool = False):
+        super().__init__(files)
+        self.structure_only = structure_only
+
+
 def _repo_has_foundation(repo_patterns: RepoPatterns | None) -> bool:
     if not repo_patterns:
         return False
@@ -32,7 +40,11 @@ def _repo_has_foundation(repo_patterns: RepoPatterns | None) -> bool:
 
 
 def _planned_module_paths(change_plan: ChangePlan) -> set[str]:
-    return {path for path in change_plan.files_to_generate if path.startswith("modules/")}
+    return _planned_module_paths_from_files(change_plan.files_to_generate)
+
+
+def _planned_module_paths_from_files(files_to_generate: list[str]) -> set[str]:
+    return {path for path in files_to_generate if path.startswith("modules/")}
 
 
 def discover_foundation_outputs(repo_path: Path | None) -> list[str]:
@@ -154,11 +166,26 @@ def validate_spec(spec: InfrastructureSpec) -> ValidationResult:
     return ValidationResult(status=status, errors=errors, checks=checks)
 
 
-def render_spec(spec: InfrastructureSpec) -> dict[str, str]:
+def is_structure_only_spec(spec: InfrastructureSpec) -> bool:
+    """True when planned module components contain no selected implementation bodies."""
+
+    if not _planned_module_paths_from_files(spec.files_to_generate):
+        return False
+    for component in spec.components:
+        implementation = component.implementation
+        if implementation.kind == "provider_resources" and implementation.resources:
+            return False
+        if implementation.kind == "registry_module":
+            return False
+    return True
+
+
+def render_spec(spec: InfrastructureSpec) -> RenderedFiles:
     validation = validate_spec(spec)
     if validation.status == ValidationStatus.FAILED:
         raise ValueError("; ".join(validation.errors))
-    return {path: _render_path(spec, path) for path in spec.files_to_generate}
+    files = {path: _render_path(spec, path) for path in spec.files_to_generate}
+    return RenderedFiles(files, structure_only=is_structure_only_spec(spec))
 
 
 def _render_path(spec: InfrastructureSpec, path: str) -> str:

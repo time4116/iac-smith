@@ -678,7 +678,7 @@ def _run_iac_smith_core(
             change_plan=result["change_plan"],
             validation=result["validation"],
             runtime_checks=runtime_validation.checks,
-            generated_files=result.get("generated_files"),
+            structure_only=result.get("structure_only", False),
         )
 
         if env.get("IAC_SMITH_GENERATE_LOCKFILE") != "0":

@@ -22,23 +22,14 @@ def _checks(items: list[str]) -> str:
     return "\n".join(f"- ✅ {item}" for item in items)
 
 
-def _structure_only_warnings(generated_files: dict[str, str] | None) -> list[str]:
-    if not generated_files:
+def _structure_only_warnings(structure_only: bool) -> list[str]:
+    if not structure_only:
         return []
-    module_main_files = {
-        path: content
-        for path, content in generated_files.items()
-        if path.startswith("modules/") and path.endswith("/main.tf")
-    }
-    if module_main_files and all(
-        "No provider resources were selected" in content for content in module_main_files.values()
-    ):
-        return [
-            "Structure-only PR: the spec renderer selected no provider resources, "
-            "so generated module bodies are placeholders until generic "
-            "registry/module or provider-schema composition is implemented."
-        ]
-    return []
+    return [
+        "Structure-only PR: the spec renderer selected no provider resources, "
+        "so generated module bodies are placeholders until generic "
+        "registry/module or provider-schema composition is implemented."
+    ]
 
 
 def build_pr_body(
@@ -47,7 +38,7 @@ def build_pr_body(
     change_plan: ChangePlan,
     validation: ValidationResult,
     runtime_checks: list[str] | None = None,
-    generated_files: dict[str, str] | None = None,
+    structure_only: bool = False,
 ) -> str:
     changed_files = "\n".join(f"* `{path}`" for path in change_plan.files_to_generate)
     backend_lines = "\n".join(
@@ -65,7 +56,7 @@ def build_pr_body(
         *intent.warnings,
         *validation.warnings,
         *validation.structural,
-        *_structure_only_warnings(generated_files),
+        *_structure_only_warnings(structure_only),
     ]
     return f"""## Source issue
 

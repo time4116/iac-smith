@@ -22,6 +22,7 @@ class IaCSmithState(TypedDict, total=False):
     change_plan: ChangePlan
     blackboard: RunBlackboard
     generated_files: dict[str, str]
+    structure_only: bool
     validation: ValidationResult
     pr_body: str | None
     status: str

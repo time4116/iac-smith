@@ -182,6 +182,7 @@ def make_code_generator(file_generator_fn: FileGenerator):
         return {
             **state,
             "generated_files": generated_files,
+            "structure_only": bool(getattr(generated_files, "structure_only", False)),
             "status": "generated",
         }
 
@@ -262,7 +263,7 @@ def pr_writer(state: IaCSmithState) -> IaCSmithState:
             intent=state["intent"],
             change_plan=state["change_plan"],
             validation=state["validation"],
-            generated_files=state.get("generated_files"),
+            structure_only=state.get("structure_only", False),
         ),
         "status": "pr_ready",
     }
