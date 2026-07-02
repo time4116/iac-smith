@@ -18,6 +18,7 @@ Nothing is keyed to a service or provider.
 import json
 import os
 import re
+from collections.abc import Callable, Iterator
 from difflib import get_close_matches
 from typing import Any
 
@@ -51,6 +52,40 @@ class ComposedComponent(BaseModel):
 
 class SpecCompositionError(RuntimeError):
     """Composition could not produce a schema-valid typed implementation."""
+
+
+def _iter_string_leaves(value) -> Iterator[str]:
+    """Yield every string leaf of a native JSON argument value."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for entry in value.values():
+            yield from _iter_string_leaves(entry)
+    elif isinstance(value, list):
+        for entry in value:
+            yield from _iter_string_leaves(entry)
+
+
+def _shape_findings(exc: ValidationError, limit: int = 12) -> list[str]:
+    """Turn a pydantic shape mismatch into compact repair findings.
+
+    A wrong response shape must drive a repair round like any other violation,
+    not abort composition — and the raw pydantic report for a large document can
+    run to dozens of near-identical entries, so it is truncated for the prompt.
+    """
+    errors = exc.errors()
+    findings = [
+        (
+            f"Response field `{'.'.join(str(part) for part in err['loc'])}`: {err['msg']}. "
+            "Match the required JSON shape exactly."
+        )
+        for err in errors[:limit]
+    ]
+    if len(errors) > limit:
+        findings.append(
+            f"...and {len(errors) - limit} more fields with the same kinds of shape errors."
+        )
+    return findings
 
 
 def _reference_errors(
@@ -148,7 +183,10 @@ def validate_composed_component(
                         f"Allowed arguments and blocks from {contract.source}: "
                         f"{', '.join(contract.allowed_arguments)}."
                     )
-        text = "\n".join([*resource.arguments.values(), *resource.blocks])
+        argument_leaves = [
+            leaf for value in resource.arguments.values() for leaf in _iter_string_leaves(value)
+        ]
+        text = "\n".join([*argument_leaves, *resource.blocks])
         errors.extend(
             _reference_errors(
                 text,
@@ -203,6 +241,7 @@ class SpecComposer:
         max_attempts: int = 2,
         max_tokens: int = 32768,
         max_repair_rounds: int = 2,
+        logger: Callable[[str], None] | None = None,
     ) -> None:
         self.model_id = model_id or os.getenv("BEDROCK_MODEL_ID", "")
         if not self.model_id:
@@ -217,6 +256,11 @@ class SpecComposer:
         # both. Truncation raises instead of parsing a cut-off document.
         self.max_tokens = _int_env("IAC_SMITH_COMPOSER_MAX_TOKENS", max_tokens)
         self.max_repair_rounds = max_repair_rounds
+        self.logger = logger
+
+    def _log(self, message: str) -> None:
+        if self.logger:
+            self.logger(message)
 
     @property
     def bedrock_runtime(self) -> BedrockRuntime:
@@ -411,7 +455,7 @@ class SpecComposer:
         contracts: dict[str, TerraformContract],
         negative_patterns: list[str] | None,
         findings: list[str],
-    ) -> ComposedComponent:
+    ) -> dict[str, Any]:
         lines = [
             *self._context_lines(
                 intent=intent,
@@ -428,9 +472,11 @@ class SpecComposer:
             '  "<expression>"}, "blocks": ["<nested block HCL>"]}, ...],',
             '  "outputs": [{"name": "...", "description": "...", "value": "..."}],',
             '  "assumptions": ["..."]}',
-            "- Every `arguments` value is a Terraform expression rendered verbatim into",
-            '  HCL: quote string literals (e.g. "\\"example\\""), leave numbers, booleans,',
-            "  lists, and references bare.",
+            "- `arguments` values are native JSON: numbers, booleans, lists, and objects",
+            "  are rendered to HCL as-is. String values are Terraform expressions",
+            '  rendered verbatim: quote string literals (e.g. "\\"example\\"", including',
+            "  strings nested inside objects) and write references bare",
+            "  (var.environment, aws_kms_key.this.arn).",
             "- Use only argument names from a type's allowed list; include every required",
             "  argument.",
             "- `blocks` entries are complete nested HCL blocks; each must start with a",
@@ -454,13 +500,7 @@ class SpecComposer:
                     *(f"- {finding}" for finding in findings),
                 ]
             )
-        payload = self._invoke_json("\n".join(lines))
-        try:
-            return ComposedComponent.model_validate(payload)
-        except ValidationError as exc:
-            raise SpecCompositionError(
-                f"Composition response did not match the expected JSON shape: {exc}"
-            ) from exc
+        return self._invoke_json("\n".join(lines))
 
     def compose(
         self,
@@ -481,10 +521,13 @@ class SpecComposer:
             known_resource_types=known_resource_types,
             negative_patterns=negative_patterns,
         )
+        self._log(
+            f"IaC Smith: composer selected {len(selected)} resource type(s): " + ", ".join(selected)
+        )
         contracts = {name: provider_contracts[name] for name in selected}
         findings: list[str] = []
-        for _ in range(self.max_repair_rounds + 1):
-            composed = self._compose_once(
+        for round_number in range(1, self.max_repair_rounds + 2):
+            payload = self._compose_once(
                 intent=intent,
                 component_name=component_name,
                 allowed_inputs=allowed_inputs,
@@ -493,6 +536,15 @@ class SpecComposer:
                 negative_patterns=negative_patterns,
                 findings=findings,
             )
+            try:
+                composed = ComposedComponent.model_validate(payload)
+            except ValidationError as exc:
+                findings = _shape_findings(exc)
+                self._log(
+                    f"IaC Smith: composition round {round_number} response shape was "
+                    f"invalid ({len(exc.errors())} field error(s)); repairing."
+                )
+                continue
             findings = validate_composed_component(
                 composed,
                 provider_contracts=provider_contracts,
@@ -501,8 +553,16 @@ class SpecComposer:
                 component_name=component_name,
             )
             if not findings:
+                self._log(
+                    f"IaC Smith: composed {len(composed.resources)} provider resource(s) "
+                    f"for `{component_name}`."
+                )
                 composed.assumptions.extend(selection_warnings)
                 return composed
+            self._log(
+                f"IaC Smith: composition round {round_number} failed deterministic "
+                f"validation with {len(findings)} finding(s); repairing."
+            )
         raise SpecCompositionError(
             "Composed resources failed deterministic schema validation after "
             f"{self.max_repair_rounds + 1} attempts: " + "; ".join(findings)

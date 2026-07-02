@@ -13,7 +13,11 @@ from iac_smith.spec_composer import (
     SpecCompositionError,
     validate_composed_component,
 )
-from iac_smith.spec_renderer import SpecRendererGenerator, render_provider_resources
+from iac_smith.spec_renderer import (
+    SpecRendererGenerator,
+    render_hcl_value,
+    render_provider_resources,
+)
 
 CONTRACTS = {
     "customcloud_network": TerraformContract(
@@ -26,7 +30,7 @@ CONTRACTS = {
     "customcloud_database": TerraformContract(
         kind="provider_resource",
         name="customcloud_database",
-        allowed_arguments=["engine", "name", "network_ref", "settings"],
+        allowed_arguments=["engine", "name", "network_ref", "port", "public", "settings", "tags"],
         required_arguments=["engine"],
         source="fixture schema",
     ),
@@ -202,6 +206,96 @@ def test_compose_repairs_unsupported_argument_with_gate_finding():
 
     assert len(composed.resources) == 2
     assert "unsupported argument `publicly_visible`" in runtime.prompts[2]
+
+
+def test_compose_accepts_native_json_argument_values():
+    composition = {
+        "resources": [
+            {
+                "type": "customcloud_database",
+                "name": "db",
+                "arguments": {
+                    "engine": '"postgres"',
+                    "port": 5432,
+                    "public": False,
+                    "tags": {"Environment": "var.environment", "ManagedBy": '"IaC Smith"'},
+                },
+            }
+        ],
+        "outputs": [],
+        "assumptions": [],
+    }
+    composer, _ = _composer([{"resource_types": ["customcloud_database"]}, composition])
+
+    composed = composer.compose(
+        intent=_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    rendered = render_provider_resources(composed.resources)
+    assert "port = 5432" in rendered
+    assert "public = false" in rendered
+    assert "Environment = var.environment" in rendered
+    assert 'ManagedBy = "IaC Smith"' in rendered
+
+
+def test_compose_repairs_invalid_response_shape():
+    missing_name = {"resources": [{"type": "customcloud_database"}], "outputs": []}
+    valid = {
+        "resources": [
+            {"type": "customcloud_database", "name": "db", "arguments": {"engine": '"postgres"'}}
+        ],
+        "outputs": [],
+        "assumptions": [],
+    }
+    composer, runtime = _composer(
+        [{"resource_types": ["customcloud_database"]}, missing_name, valid]
+    )
+
+    composed = composer.compose(
+        intent=_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    assert len(composed.resources) == 1
+    assert "Response field `resources.0.name`" in runtime.prompts[2]
+
+
+def test_validation_flags_undeclared_variable_inside_nested_value():
+    composed = ComposedComponent(
+        resources=[
+            ResourceSpec(
+                type="customcloud_database",
+                name="db",
+                arguments={"engine": '"postgres"', "tags": {"Vpc": "var.vpc_id"}},
+            )
+        ]
+    )
+
+    errors = _validate(composed)
+
+    assert any("undeclared variable `var.vpc_id`" in e for e in errors)
+
+
+def test_render_hcl_value_renders_nested_structures():
+    rendered = render_hcl_value(
+        {
+            "kubernetes.io/cluster": '"owned"',
+            "ports": [5432, 5433],
+            "nested": {"enabled": True, "ratio": 1.5},
+        }
+    )
+
+    assert '"kubernetes.io/cluster" = "owned"' in rendered
+    assert "ports = [\n      5432,\n      5433\n    ]" in rendered
+    assert "enabled = true" in rendered
+    assert "ratio = 1.5" in rendered
 
 
 def test_compose_raises_clear_error_when_response_hits_token_cap():

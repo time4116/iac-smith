@@ -542,7 +542,7 @@ def _run_iac_smith_core(
         runtime_repairer = generator
         escalation_repairer = _build_escalation_repairer(env, generator.model_id)
     else:
-        generator = SpecRendererGenerator()
+        generator = SpecRendererGenerator(logger=_log)
         selected_file_generator = generator.generate_files
     graph = (
         build_graph(
