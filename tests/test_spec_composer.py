@@ -203,9 +203,7 @@ def test_compose_repairs_unsupported_argument_with_gate_finding():
 
 def test_compose_raises_after_bounded_repair_rounds():
     bad = {
-        "resources": [
-            {"type": "customcloud_database", "name": "this", "arguments": {}}
-        ],
+        "resources": [{"type": "customcloud_database", "name": "this", "arguments": {}}],
         "outputs": [],
         "assumptions": [],
     }
@@ -294,7 +292,7 @@ def test_render_provider_resources_indents_multiline_blocks():
     )
 
     assert 'resource "customcloud_database" "db" {' in rendered
-    assert "\n  settings {\n    tier = \"small\"\n  }\n" in rendered
+    assert '\n  settings {\n    tier = "small"\n  }\n' in rendered
 
 
 class FakeSpecComposer:
@@ -320,9 +318,7 @@ def _patch_resolver(monkeypatch, contracts=CONTRACTS):
 
 def test_generator_renders_composed_resources(monkeypatch):
     _patch_resolver(monkeypatch)
-    composer = FakeSpecComposer(
-        composed=ComposedComponent.model_validate(_VALID_COMPOSITION)
-    )
+    composer = FakeSpecComposer(composed=ComposedComponent.model_validate(_VALID_COMPOSITION))
 
     files = SpecRendererGenerator(composer=composer).generate_files(
         intent=_intent(),
