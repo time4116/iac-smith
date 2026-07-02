@@ -80,4 +80,6 @@ class InfrastructureSpec(BaseModel):
     files_to_generate: list[str]
     assumptions: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
-    rendering_policy: Literal["deterministic_structure_only"] = "deterministic_structure_only"
+    rendering_policy: Literal["deterministic_structure_only", "composed_provider_resources"] = (
+        "deterministic_structure_only"
+    )
