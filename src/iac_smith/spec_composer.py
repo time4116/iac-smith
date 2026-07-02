@@ -201,7 +201,7 @@ class SpecComposer:
         *,
         read_timeout_seconds: int = 180,
         max_attempts: int = 2,
-        max_tokens: int = 8192,
+        max_tokens: int = 32768,
         max_repair_rounds: int = 2,
     ) -> None:
         self.model_id = model_id or os.getenv("BEDROCK_MODEL_ID", "")
@@ -210,6 +210,11 @@ class SpecComposer:
         self._bedrock_runtime = bedrock_runtime
         self.read_timeout_seconds = _int_env("IAC_SMITH_BEDROCK_READ_TIMEOUT", read_timeout_seconds)
         self.max_attempts = _int_env("IAC_SMITH_BEDROCK_MAX_ATTEMPTS", max_attempts)
+        # A platform-sized composition (dozens of resources with full argument
+        # maps) is a large JSON document; with temperature 0 the model stops at
+        # end_turn, so this cap bounds the worst case, not typical cost. Claude
+        # Sonnet/Haiku on Bedrock support 64K output, so 32K leaves headroom on
+        # both. Truncation raises instead of parsing a cut-off document.
         self.max_tokens = _int_env("IAC_SMITH_COMPOSER_MAX_TOKENS", max_tokens)
         self.max_repair_rounds = max_repair_rounds
 
@@ -437,6 +442,8 @@ class SpecComposer:
             "  certain the provider defines them; they are validated the same way.",
             "- Resource and output names are lowercase snake_case identifiers.",
             "- `outputs` expose the identifiers consumers of this stack need.",
+            "- Return minified JSON without indentation or line breaks between keys;",
+            "  every wasted token risks truncating the document.",
         ]
         if findings:
             lines.extend(
