@@ -436,6 +436,54 @@ def test_validation_flags_invalid_and_duplicate_output_names():
     assert any("Duplicate output name `ref`" in e for e in errors)
 
 
+def test_validation_rejects_bare_references_in_argument_strings():
+    composed = ComposedComponent(
+        resources=[
+            ResourceSpec(
+                type="customcloud_network", name="net", arguments={"cidr_block": "10.0.0.0/16"}
+            ),
+            ResourceSpec(
+                type="customcloud_database",
+                name="db",
+                arguments={
+                    "engine": "postgres",
+                    "network_ref": "customcloud_network.net.id",
+                    "name": "var.environment",
+                },
+            ),
+        ]
+    )
+
+    errors = _validate(composed)
+
+    assert any(
+        "bare Terraform reference" in e and "customcloud_network.net.id" in e for e in errors
+    )
+    assert any("bare Terraform reference" in e and "var.environment" in e for e in errors)
+
+
+def test_validation_accepts_interpolated_references_in_argument_strings():
+    composed = ComposedComponent(
+        resources=[
+            ResourceSpec(
+                type="customcloud_network", name="net", arguments={"cidr_block": "10.0.0.0/16"}
+            ),
+            ResourceSpec(
+                type="customcloud_database",
+                name="db",
+                arguments={
+                    "engine": "postgres",
+                    "network_ref": "${customcloud_network.net.id}",
+                    "name": "${var.environment}",
+                    "tags": {"Network": "${customcloud_network.net.id}", "Team": "data"},
+                },
+            ),
+        ]
+    )
+
+    assert _validate(composed) == []
+
+
 def test_validation_requires_at_least_one_resource():
     assert _validate(ComposedComponent(resources=[])) == [
         "Composition must select at least one provider resource."

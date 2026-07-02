@@ -38,6 +38,7 @@ from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.validation import ValidationStatus
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+_BARE_REFERENCE_HEAD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\.[A-Za-z_]")
 _VAR_REF_RE = re.compile(r"\bvar\.([A-Za-z_][A-Za-z0-9_]*)")
 _FORBIDDEN_ROOT_RE = re.compile(r"\b(local|data|module)\.")
 _RESOURCE_REF_RE = re.compile(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\.([a-z][a-z0-9_]*)\b")
@@ -86,6 +87,33 @@ def _shape_findings(exc: ValidationError, limit: int = 12) -> list[str]:
             f"...and {len(errors) - limit} more fields with the same kinds of shape errors."
         )
     return findings
+
+
+def _bare_reference_errors(
+    leaves: list[str], *, scope: str, known_resource_types: set[str]
+) -> list[str]:
+    """Reject argument strings that are bare Terraform references.
+
+    Argument strings render as quoted templates, so a bare ``var.foo`` or
+    ``aws_kms_key.db.arn`` value would become a *literal string* — syntactically
+    valid HCL that silently wires the wrong value. The reference must ride
+    inside ``${...}`` interpolation. Blocks and output values are exempt: they
+    render as raw HCL where bare references are correct.
+    """
+    errors: list[str] = []
+    for leaf in leaves:
+        candidate = leaf.strip()
+        match = _BARE_REFERENCE_HEAD_RE.match(candidate)
+        if not match:
+            continue
+        head = match.group(1)
+        if head == "var" or head in known_resource_types:
+            errors.append(
+                f"`{scope}` argument value `{candidate}` is a bare Terraform reference, "
+                f"but argument strings render as literal text. Wrap it in interpolation: "
+                f'"${{{candidate}}}".'
+            )
+    return errors
 
 
 def _hcl_parse_errors(rendered: str, *, scope: str) -> list[str]:
@@ -215,6 +243,11 @@ def validate_composed_component(
         argument_leaves = [
             leaf for value in resource.arguments.values() for leaf in _iter_string_leaves(value)
         ]
+        errors.extend(
+            _bare_reference_errors(
+                argument_leaves, scope=scope, known_resource_types=known_resource_types
+            )
+        )
         text = "\n".join([*argument_leaves, *resource.blocks])
         errors.extend(
             _reference_errors(
@@ -505,7 +538,8 @@ class SpecComposer:
             "  semantics: numbers, booleans, lists, and objects render to HCL as-is;",
             "  strings are quoted string templates — write plain text directly",
             '  (e.g. "IaC Smith") and wrap Terraform expressions in interpolation',
-            '  (e.g. "${var.environment}", "${aws_kms_key.this.arn}").',
+            '  (e.g. "${var.environment}", "${aws_kms_key.this.arn}"). Never write a',
+            "  bare reference as a string value — it would render as literal text.",
             "- Use only argument names from a type's allowed list; include every required",
             "  argument.",
             "- `blocks` entries are complete nested HCL blocks; each must start with a",
