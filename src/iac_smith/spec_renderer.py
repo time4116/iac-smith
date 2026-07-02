@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from iac_smith.models.change_plan import ChangePlan
 from iac_smith.models.infrastructure_spec import (
@@ -17,7 +19,16 @@ from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
 from iac_smith.models.validation import ValidationResult, ValidationStatus
 
+if TYPE_CHECKING:
+    from iac_smith.blackboard import RunBlackboard
+    from iac_smith.spec_composer import ComposedComponent, SpecComposer
+
 _OUTPUT_RE = re.compile(r'output\s+"([^"]+)"\s*{')
+
+_STRUCTURE_ONLY_WARNING = (
+    "Spec renderer emitted deterministic structure only; no provider resources "
+    "were selected for this component."
+)
 
 
 class RenderedFiles(dict[str, str]):
@@ -127,11 +138,7 @@ def build_spec_from_intent(
     ]
     warnings = list(intent.warnings)
     if _planned_module_paths(change_plan) and not resources:
-        warnings.append(
-            "Spec renderer emitted deterministic structure only; no provider resources "
-            "were selected because registry/module or provider-schema composition is "
-            "not implemented in this mode."
-        )
+        warnings.append(_STRUCTURE_ONLY_WARNING)
 
     return InfrastructureSpec(
         raw_request=intent.raw_request,
@@ -478,6 +485,20 @@ def _render_module_file(spec: InfrastructureSpec, path: str) -> str:
     )
 
 
+def render_provider_resources(resources) -> str:
+    """Render ``ResourceSpec`` blocks to HCL. Shared with the composer's contract gate."""
+    blocks = []
+    for resource in resources:
+        lines = [f'resource "{resource.type}" "{resource.name}" {{']
+        for key, value in resource.arguments.items():
+            lines.append(f"  {key} = {value}")
+        for block in resource.blocks:
+            lines.extend(f"  {line}" for line in block.splitlines())
+        lines.append("}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks) + "\n"
+
+
 def _render_resources(component: ComponentSpec) -> str:
     implementation = component.implementation
     if implementation.kind != "provider_resources" or not implementation.resources:
@@ -485,16 +506,7 @@ def _render_resources(component: ComponentSpec) -> str:
             "# Deterministic skeleton generated from InfrastructureSpec.\n"
             "# No provider resources were selected for this component.\n"
         )
-    blocks = []
-    for resource in implementation.resources:
-        lines = [f'resource "{resource.type}" "{resource.name}" {{']
-        for key, value in resource.arguments.items():
-            lines.append(f"  {key} = {value}")
-        for block in resource.blocks:
-            lines.append(f"  {block}")
-        lines.append("}")
-        blocks.append("\n".join(lines))
-    return "\n\n".join(blocks) + "\n"
+    return render_provider_resources(implementation.resources)
 
 
 def _render_variables(component: ComponentSpec) -> str:
@@ -510,20 +522,83 @@ def _render_variables(component: ComponentSpec) -> str:
     return "\n".join(blocks)
 
 
+def _quote_hcl_string(value: str) -> str:
+    """Quote free text as an HCL string literal.
+
+    Escapes quotes/backslashes/newlines and neutralizes ``${``/``%{`` template
+    sequences, so model-authored text (e.g. a composed output description) can
+    never break out of the string literal or inject a template expression into
+    the generated Terraform.
+    """
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+        .replace("${", "$${")
+        .replace("%{", "%%{")
+    )
+    return f'"{escaped}"'
+
+
 def _render_outputs(component: ComponentSpec) -> str:
     if not component.outputs:
         return ""
     return "\n".join(
         f'output "{output.name}" {{\n'
-        f'  description = "{output.description}"\n'
+        f"  description = {_quote_hcl_string(output.description)}\n"
         f"  value       = {output.value}\n"
         "}\n"
         for output in component.outputs
     )
 
 
+def apply_composition(spec: InfrastructureSpec, composed: ComposedComponent) -> InfrastructureSpec:
+    """Fold a schema-validated composed implementation into the typed spec."""
+    component = _component(spec)
+    existing_output_names = {output.name for output in component.outputs}
+    merged_outputs = component.outputs + [
+        output for output in composed.outputs if output.name not in existing_output_names
+    ]
+    updated_component = component.model_copy(
+        update={
+            "implementation": ProviderResourcesSpec(resources=composed.resources),
+            "outputs": merged_outputs,
+        }
+    )
+    return spec.model_copy(
+        update={
+            "components": [updated_component, *spec.components[1:]],
+            "assumptions": [*spec.assumptions, *composed.assumptions],
+            "warnings": [w for w in spec.warnings if w != _STRUCTURE_ONLY_WARNING],
+            "rendering_policy": "composed_provider_resources",
+        }
+    )
+
+
+def default_spec_composer() -> SpecComposer | None:
+    """Composer used when none is injected; None disables composition.
+
+    Composition needs a model (``BEDROCK_MODEL_ID``) and can be turned off with
+    ``IAC_SMITH_SPEC_COMPOSER=0`` — both cases degrade to the structure-only
+    renderer, so offline runs (tests, eval --replay) behave exactly as before.
+    """
+    if os.getenv("IAC_SMITH_SPEC_COMPOSER") == "0" or not os.getenv("BEDROCK_MODEL_ID"):
+        return None
+    from iac_smith.spec_composer import SpecComposer
+
+    return SpecComposer()
+
+
+def _with_warning(spec: InfrastructureSpec, warning: str) -> InfrastructureSpec:
+    return spec.model_copy(update={"warnings": [*spec.warnings, warning]})
+
+
 class SpecRendererGenerator:
     """File-generator adapter used by graph.default_file_generator."""
+
+    def __init__(self, composer: SpecComposer | None = None):
+        self._composer = composer
 
     def generate_files(
         self,
@@ -534,7 +609,7 @@ class SpecRendererGenerator:
         ruleset=None,
         target_repo: str,
         repo_path=None,
-        blackboard=None,
+        blackboard: RunBlackboard | None = None,
     ) -> dict[str, str]:
         spec = build_spec_from_intent(
             intent=intent,
@@ -543,4 +618,38 @@ class SpecRendererGenerator:
             target_repo=target_repo,
             repo_path=Path(repo_path) if repo_path else None,
         )
-        return render_spec(spec)
+        files = render_spec(spec)
+        component = _component(spec)
+        needs_composition = (
+            bool(_planned_module_paths(change_plan))
+            and component.implementation.kind == "provider_resources"
+            and not component.implementation.resources
+        )
+        if not needs_composition:
+            return files
+        composer = self._composer or default_spec_composer()
+        if composer is None:
+            return files
+
+        from iac_smith.provider_schema import build_schema_resolver
+        from iac_smith.spec_composer import SpecCompositionError
+
+        resolver = build_schema_resolver(files)
+        if not resolver.provider_contracts:
+            spec = _with_warning(
+                spec, "Provider schema harvest was unavailable; rendered structure only."
+            )
+            return render_spec(spec)
+        try:
+            composed = composer.compose(
+                intent=intent,
+                component_name=component.name,
+                allowed_inputs=sorted(component.inputs),
+                environments=spec.environments,
+                provider_contracts=resolver.provider_contracts,
+                negative_patterns=blackboard.negative_patterns if blackboard else None,
+            )
+        except (SpecCompositionError, ValueError) as exc:
+            spec = _with_warning(spec, f"Spec composition failed; rendered structure only: {exc}")
+            return render_spec(spec)
+        return render_spec(apply_composition(spec, composed))
