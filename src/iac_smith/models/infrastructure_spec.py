@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, JsonValue
 
 
 class ValueExpression(BaseModel):
@@ -31,7 +31,11 @@ class OutputSpec(BaseModel):
 class ResourceSpec(BaseModel):
     type: str
     name: str
-    arguments: dict[str, str] = Field(default_factory=dict)
+    # Values are native JSON: strings are verbatim Terraform expressions; numbers,
+    # booleans, lists, and objects are rendered to HCL deterministically. Demanding
+    # stringified HCL for everything made the model's natural (and unambiguous)
+    # JSON typing a schema violation.
+    arguments: dict[str, JsonValue] = Field(default_factory=dict)
     blocks: list[str] = Field(default_factory=list)
 
 

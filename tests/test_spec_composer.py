@@ -1,5 +1,6 @@
 import json
 
+import hcl2
 import pytest
 
 from iac_smith.blackboard import ContractResolver, TerraformContract
@@ -13,7 +14,11 @@ from iac_smith.spec_composer import (
     SpecCompositionError,
     validate_composed_component,
 )
-from iac_smith.spec_renderer import SpecRendererGenerator, render_provider_resources
+from iac_smith.spec_renderer import (
+    SpecRendererGenerator,
+    render_hcl_value,
+    render_provider_resources,
+)
 
 CONTRACTS = {
     "customcloud_network": TerraformContract(
@@ -26,7 +31,7 @@ CONTRACTS = {
     "customcloud_database": TerraformContract(
         kind="provider_resource",
         name="customcloud_database",
-        allowed_arguments=["engine", "name", "network_ref", "settings"],
+        allowed_arguments=["engine", "name", "network_ref", "port", "public", "settings", "tags"],
         required_arguments=["engine"],
         source="fixture schema",
     ),
@@ -113,14 +118,14 @@ _VALID_COMPOSITION = {
         {
             "type": "customcloud_network",
             "name": "this",
-            "arguments": {"cidr_block": '"10.0.0.0/16"', "name": "var.environment"},
+            "arguments": {"cidr_block": "10.0.0.0/16", "name": "${var.environment}"},
         },
         {
             "type": "customcloud_database",
             "name": "this",
             "arguments": {
-                "engine": '"postgres"',
-                "network_ref": "customcloud_network.this.id",
+                "engine": "postgres",
+                "network_ref": "${customcloud_network.this.id}",
             },
             "blocks": ['settings {\n  tier = "small"\n}'],
         },
@@ -184,7 +189,7 @@ def test_compose_repairs_unsupported_argument_with_gate_finding():
             {
                 "type": "customcloud_database",
                 "name": "this",
-                "arguments": {"engine": '"postgres"', "publicly_visible": "true"},
+                "arguments": {"engine": "postgres", "publicly_visible": "true"},
             }
         ],
         "outputs": [],
@@ -202,6 +207,130 @@ def test_compose_repairs_unsupported_argument_with_gate_finding():
 
     assert len(composed.resources) == 2
     assert "unsupported argument `publicly_visible`" in runtime.prompts[2]
+
+
+def test_compose_accepts_native_json_argument_values():
+    composition = {
+        "resources": [
+            {
+                "type": "customcloud_database",
+                "name": "db",
+                "arguments": {
+                    "engine": "postgres",
+                    "port": 5432,
+                    "public": False,
+                    "tags": {"Environment": "${var.environment}", "ManagedBy": "IaC Smith"},
+                },
+            }
+        ],
+        "outputs": [],
+        "assumptions": [],
+    }
+    composer, _ = _composer([{"resource_types": ["customcloud_database"]}, composition])
+
+    composed = composer.compose(
+        intent=_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    rendered = render_provider_resources(composed.resources)
+    assert 'engine = "postgres"' in rendered
+    assert "port = 5432" in rendered
+    assert "public = false" in rendered
+    assert 'Environment = "${var.environment}"' in rendered
+    assert 'ManagedBy = "IaC Smith"' in rendered
+    hcl2.loads(rendered)
+
+
+def test_compose_repairs_invalid_response_shape():
+    missing_name = {"resources": [{"type": "customcloud_database"}], "outputs": []}
+    valid = {
+        "resources": [
+            {"type": "customcloud_database", "name": "db", "arguments": {"engine": "postgres"}}
+        ],
+        "outputs": [],
+        "assumptions": [],
+    }
+    composer, runtime = _composer(
+        [{"resource_types": ["customcloud_database"]}, missing_name, valid]
+    )
+
+    composed = composer.compose(
+        intent=_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    assert len(composed.resources) == 1
+    assert "Response field `resources.0.name`" in runtime.prompts[2]
+
+
+def test_validation_flags_undeclared_variable_inside_nested_value():
+    composed = ComposedComponent(
+        resources=[
+            ResourceSpec(
+                type="customcloud_database",
+                name="db",
+                arguments={"engine": "postgres", "tags": {"Vpc": "${var.vpc_id}"}},
+            )
+        ]
+    )
+
+    errors = _validate(composed)
+
+    assert any("undeclared variable `var.vpc_id`" in e for e in errors)
+
+
+def test_render_hcl_value_renders_nested_structures():
+    rendered = render_hcl_value(
+        {
+            "kubernetes.io/cluster": "owned",
+            "ports": [5432, 5433],
+            "nested": {"enabled": True, "ratio": 1.5},
+        }
+    )
+
+    assert '"kubernetes.io/cluster" = "owned"' in rendered
+    assert "ports = [\n      5432,\n      5433\n    ]" in rendered
+    assert "enabled = true" in rendered
+    assert "ratio = 1.5" in rendered
+
+
+def test_render_hcl_value_escapes_keys_and_plain_text_to_parseable_hcl():
+    rendered = (
+        'resource "customcloud_database" "db" {\n  tags = '
+        + render_hcl_value({'bad"key': "value", "multi\nline": "x", "ManagedBy": "IaC Smith"})
+        + "\n}\n"
+    )
+
+    assert '"bad\\"key" = "value"' in rendered
+    assert '"multi\\nline" = "x"' in rendered
+    assert 'ManagedBy = "IaC Smith"' in rendered
+    hcl2.loads(rendered)
+
+
+def test_validation_rejects_unparseable_rendered_hcl():
+    composed = ComposedComponent(
+        resources=[
+            ResourceSpec(
+                type="customcloud_database",
+                name="db",
+                arguments={"engine": "postgres"},
+                blocks=["settings {"],
+            )
+        ],
+        outputs=[OutputSpec(name="broken", description="Bad.", value=")))")],
+    )
+
+    errors = _validate(composed)
+
+    assert any("rendered module resources do not parse as valid HCL" in e for e in errors)
+    assert any("output broken do not parse as valid HCL" in e for e in errors)
 
 
 def test_compose_raises_clear_error_when_response_hits_token_cap():
@@ -252,7 +381,7 @@ def test_validation_flags_hallucinated_type_argument_and_block():
             ResourceSpec(
                 type="customcloud_database",
                 name="db",
-                arguments={"engine": '"postgres"'},
+                arguments={"engine": "postgres"},
                 blocks=["replication {\n  copies = 2\n}"],
             ),
         ]
@@ -271,9 +400,9 @@ def test_validation_flags_reference_violations():
                 type="customcloud_database",
                 name="db",
                 arguments={
-                    "engine": '"postgres"',
-                    "name": "var.vpc_id",
-                    "network_ref": "customcloud_network.missing.id",
+                    "engine": "postgres",
+                    "name": "${var.vpc_id}",
+                    "network_ref": "${customcloud_network.missing.id}",
                 },
             )
         ],
@@ -307,6 +436,54 @@ def test_validation_flags_invalid_and_duplicate_output_names():
     assert any("Duplicate output name `ref`" in e for e in errors)
 
 
+def test_validation_rejects_bare_references_in_argument_strings():
+    composed = ComposedComponent(
+        resources=[
+            ResourceSpec(
+                type="customcloud_network", name="net", arguments={"cidr_block": "10.0.0.0/16"}
+            ),
+            ResourceSpec(
+                type="customcloud_database",
+                name="db",
+                arguments={
+                    "engine": "postgres",
+                    "network_ref": "customcloud_network.net.id",
+                    "name": "var.environment",
+                },
+            ),
+        ]
+    )
+
+    errors = _validate(composed)
+
+    assert any(
+        "bare Terraform reference" in e and "customcloud_network.net.id" in e for e in errors
+    )
+    assert any("bare Terraform reference" in e and "var.environment" in e for e in errors)
+
+
+def test_validation_accepts_interpolated_references_in_argument_strings():
+    composed = ComposedComponent(
+        resources=[
+            ResourceSpec(
+                type="customcloud_network", name="net", arguments={"cidr_block": "10.0.0.0/16"}
+            ),
+            ResourceSpec(
+                type="customcloud_database",
+                name="db",
+                arguments={
+                    "engine": "postgres",
+                    "network_ref": "${customcloud_network.net.id}",
+                    "name": "${var.environment}",
+                    "tags": {"Network": "${customcloud_network.net.id}", "Team": "data"},
+                },
+            ),
+        ]
+    )
+
+    assert _validate(composed) == []
+
+
 def test_validation_requires_at_least_one_resource():
     assert _validate(ComposedComponent(resources=[])) == [
         "Composition must select at least one provider resource."
@@ -319,7 +496,7 @@ def test_render_provider_resources_indents_multiline_blocks():
             ResourceSpec(
                 type="customcloud_database",
                 name="db",
-                arguments={"engine": '"postgres"'},
+                arguments={"engine": "postgres"},
                 blocks=['settings {\n  tier = "small"\n}'],
             )
         ]

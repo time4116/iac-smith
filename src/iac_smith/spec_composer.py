@@ -18,6 +18,7 @@ Nothing is keyed to a service or provider.
 import json
 import os
 import re
+from collections.abc import Callable, Iterator
 from difflib import get_close_matches
 from typing import Any
 
@@ -37,6 +38,7 @@ from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.validation import ValidationStatus
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+_BARE_REFERENCE_HEAD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\.[A-Za-z_]")
 _VAR_REF_RE = re.compile(r"\bvar\.([A-Za-z_][A-Za-z0-9_]*)")
 _FORBIDDEN_ROOT_RE = re.compile(r"\b(local|data|module)\.")
 _RESOURCE_REF_RE = re.compile(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\.([a-z][a-z0-9_]*)\b")
@@ -51,6 +53,88 @@ class ComposedComponent(BaseModel):
 
 class SpecCompositionError(RuntimeError):
     """Composition could not produce a schema-valid typed implementation."""
+
+
+def _iter_string_leaves(value) -> Iterator[str]:
+    """Yield every string leaf of a native JSON argument value."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for entry in value.values():
+            yield from _iter_string_leaves(entry)
+    elif isinstance(value, list):
+        for entry in value:
+            yield from _iter_string_leaves(entry)
+
+
+def _shape_findings(exc: ValidationError, limit: int = 12) -> list[str]:
+    """Turn a pydantic shape mismatch into compact repair findings.
+
+    A wrong response shape must drive a repair round like any other violation,
+    not abort composition — and the raw pydantic report for a large document can
+    run to dozens of near-identical entries, so it is truncated for the prompt.
+    """
+    errors = exc.errors()
+    findings = [
+        (
+            f"Response field `{'.'.join(str(part) for part in err['loc'])}`: {err['msg']}. "
+            "Match the required JSON shape exactly."
+        )
+        for err in errors[:limit]
+    ]
+    if len(errors) > limit:
+        findings.append(
+            f"...and {len(errors) - limit} more fields with the same kinds of shape errors."
+        )
+    return findings
+
+
+def _bare_reference_errors(
+    leaves: list[str], *, scope: str, known_resource_types: set[str]
+) -> list[str]:
+    """Reject argument strings that are bare Terraform references.
+
+    Argument strings render as quoted templates, so a bare ``var.foo`` or
+    ``aws_kms_key.db.arn`` value would become a *literal string* — syntactically
+    valid HCL that silently wires the wrong value. The reference must ride
+    inside ``${...}`` interpolation. Blocks and output values are exempt: they
+    render as raw HCL where bare references are correct.
+    """
+    errors: list[str] = []
+    for leaf in leaves:
+        candidate = leaf.strip()
+        match = _BARE_REFERENCE_HEAD_RE.match(candidate)
+        if not match:
+            continue
+        head = match.group(1)
+        if head == "var" or head in known_resource_types:
+            errors.append(
+                f"`{scope}` argument value `{candidate}` is a bare Terraform reference, "
+                f"but argument strings render as literal text. Wrap it in interpolation: "
+                f'"${{{candidate}}}".'
+            )
+    return errors
+
+
+def _hcl_parse_errors(rendered: str, *, scope: str) -> list[str]:
+    """Reject rendered HCL that does not parse.
+
+    The contract gate and reference scans are regex-level; a raw ``blocks``
+    string or an expression the model wrote can still be syntactically invalid
+    HCL that Terraform would only reject at runtime. Parsing the rendered text
+    turns that into a pre-render repair finding.
+    """
+    import hcl2
+
+    try:
+        hcl2.loads(rendered)
+    except Exception as exc:  # lark surfaces several exception types
+        detail = " ".join(str(exc).split())[:300]
+        return [
+            f"The {scope} do not parse as valid HCL: {detail} — fix the syntax "
+            "(quote string literals, balance braces, close every block)."
+        ]
+    return []
 
 
 def _reference_errors(
@@ -125,6 +209,14 @@ def validate_composed_component(
     )
     if gate.status == ValidationStatus.FAILED:
         errors.extend(gate.errors)
+    errors.extend(_hcl_parse_errors(rendered, scope="rendered module resources"))
+    for output in composed.outputs:
+        errors.extend(
+            _hcl_parse_errors(
+                f'output "{output.name}" {{\n  value = {output.value}\n}}\n',
+                scope=f"output {output.name}",
+            )
+        )
 
     for resource in composed.resources:
         scope = f"{resource.type}.{resource.name}"
@@ -148,7 +240,15 @@ def validate_composed_component(
                         f"Allowed arguments and blocks from {contract.source}: "
                         f"{', '.join(contract.allowed_arguments)}."
                     )
-        text = "\n".join([*resource.arguments.values(), *resource.blocks])
+        argument_leaves = [
+            leaf for value in resource.arguments.values() for leaf in _iter_string_leaves(value)
+        ]
+        errors.extend(
+            _bare_reference_errors(
+                argument_leaves, scope=scope, known_resource_types=known_resource_types
+            )
+        )
+        text = "\n".join([*argument_leaves, *resource.blocks])
         errors.extend(
             _reference_errors(
                 text,
@@ -203,6 +303,7 @@ class SpecComposer:
         max_attempts: int = 2,
         max_tokens: int = 32768,
         max_repair_rounds: int = 2,
+        logger: Callable[[str], None] | None = None,
     ) -> None:
         self.model_id = model_id or os.getenv("BEDROCK_MODEL_ID", "")
         if not self.model_id:
@@ -217,6 +318,11 @@ class SpecComposer:
         # both. Truncation raises instead of parsing a cut-off document.
         self.max_tokens = _int_env("IAC_SMITH_COMPOSER_MAX_TOKENS", max_tokens)
         self.max_repair_rounds = max_repair_rounds
+        self.logger = logger
+
+    def _log(self, message: str) -> None:
+        if self.logger:
+            self.logger(message)
 
     @property
     def bedrock_runtime(self) -> BedrockRuntime:
@@ -411,7 +517,7 @@ class SpecComposer:
         contracts: dict[str, TerraformContract],
         negative_patterns: list[str] | None,
         findings: list[str],
-    ) -> ComposedComponent:
+    ) -> dict[str, Any]:
         lines = [
             *self._context_lines(
                 intent=intent,
@@ -428,20 +534,26 @@ class SpecComposer:
             '  "<expression>"}, "blocks": ["<nested block HCL>"]}, ...],',
             '  "outputs": [{"name": "...", "description": "...", "value": "..."}],',
             '  "assumptions": ["..."]}',
-            "- Every `arguments` value is a Terraform expression rendered verbatim into",
-            '  HCL: quote string literals (e.g. "\\"example\\""), leave numbers, booleans,',
-            "  lists, and references bare.",
+            "- `arguments` values are native JSON following Terraform JSON configuration",
+            "  semantics: numbers, booleans, lists, and objects render to HCL as-is;",
+            "  strings are quoted string templates — write plain text directly",
+            '  (e.g. "IaC Smith") and wrap Terraform expressions in interpolation',
+            '  (e.g. "${var.environment}", "${aws_kms_key.this.arn}"). Never write a',
+            "  bare reference as a string value — it would render as literal text.",
             "- Use only argument names from a type's allowed list; include every required",
             "  argument.",
             "- `blocks` entries are complete nested HCL blocks; each must start with a",
             "  nested block name from the type's allowed list.",
-            "- Reference sibling resources as <type>.<name>.<attribute>.",
+            "- Reference sibling resources as <type>.<name>.<attribute> — inside",
+            "  ${...} in argument strings; bare in nested blocks and output values.",
             f"- Reference only these input variables: {', '.join(allowed_inputs)}. Never",
             "  reference local., data., or module. values — they do not exist here.",
             "- You may add resource types beyond the contracts above only if you are",
             "  certain the provider defines them; they are validated the same way.",
             "- Resource and output names are lowercase snake_case identifiers.",
-            "- `outputs` expose the identifiers consumers of this stack need.",
+            "- `outputs` expose the identifiers consumers of this stack need; each",
+            "  output `value` is a bare Terraform expression",
+            "  (e.g. aws_db_instance.this.arn), not a JSON template.",
             "- Return minified JSON without indentation or line breaks between keys;",
             "  every wasted token risks truncating the document.",
         ]
@@ -454,13 +566,7 @@ class SpecComposer:
                     *(f"- {finding}" for finding in findings),
                 ]
             )
-        payload = self._invoke_json("\n".join(lines))
-        try:
-            return ComposedComponent.model_validate(payload)
-        except ValidationError as exc:
-            raise SpecCompositionError(
-                f"Composition response did not match the expected JSON shape: {exc}"
-            ) from exc
+        return self._invoke_json("\n".join(lines))
 
     def compose(
         self,
@@ -481,10 +587,13 @@ class SpecComposer:
             known_resource_types=known_resource_types,
             negative_patterns=negative_patterns,
         )
+        self._log(
+            f"IaC Smith: composer selected {len(selected)} resource type(s): " + ", ".join(selected)
+        )
         contracts = {name: provider_contracts[name] for name in selected}
         findings: list[str] = []
-        for _ in range(self.max_repair_rounds + 1):
-            composed = self._compose_once(
+        for round_number in range(1, self.max_repair_rounds + 2):
+            payload = self._compose_once(
                 intent=intent,
                 component_name=component_name,
                 allowed_inputs=allowed_inputs,
@@ -493,6 +602,15 @@ class SpecComposer:
                 negative_patterns=negative_patterns,
                 findings=findings,
             )
+            try:
+                composed = ComposedComponent.model_validate(payload)
+            except ValidationError as exc:
+                findings = _shape_findings(exc)
+                self._log(
+                    f"IaC Smith: composition round {round_number} response shape was "
+                    f"invalid ({len(exc.errors())} field error(s)); repairing."
+                )
+                continue
             findings = validate_composed_component(
                 composed,
                 provider_contracts=provider_contracts,
@@ -501,8 +619,16 @@ class SpecComposer:
                 component_name=component_name,
             )
             if not findings:
+                self._log(
+                    f"IaC Smith: composed {len(composed.resources)} provider resource(s) "
+                    f"for `{component_name}`."
+                )
                 composed.assumptions.extend(selection_warnings)
                 return composed
+            self._log(
+                f"IaC Smith: composition round {round_number} failed deterministic "
+                f"validation with {len(findings)} finding(s); repairing."
+            )
         raise SpecCompositionError(
             "Composed resources failed deterministic schema validation after "
             f"{self.max_repair_rounds + 1} attempts: " + "; ".join(findings)

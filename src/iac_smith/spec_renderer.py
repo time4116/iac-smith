@@ -485,13 +485,63 @@ def _render_module_file(spec: InfrastructureSpec, path: str) -> str:
     )
 
 
+_HCL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
+
+
+def _escape_hcl_template(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "\\r").replace("\n", "\\n")
+
+
+def quote_hcl_template(value: str) -> str:
+    """Quote a JSON string as an HCL string template.
+
+    Terraform JSON configuration semantics: plain text becomes a quoted literal,
+    while ``${...}`` interpolation is preserved as the expression channel — so a
+    natural model value like ``"IaC Smith"`` renders as a valid literal and
+    ``"${var.environment}"`` stays an expression (a template that is exactly one
+    interpolation yields the referenced value's native type).
+    """
+    return f'"{_escape_hcl_template(value)}"'
+
+
+def render_hcl_value(value, indent: int = 1) -> str:
+    """Render a native JSON argument value to HCL.
+
+    Numbers and booleans render as literals; strings follow Terraform JSON
+    configuration semantics (see ``quote_hcl_template``); lists and objects
+    render recursively, so the model can express e.g. ``tags`` as a plain JSON
+    object instead of stringified HCL.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return quote_hcl_template(value)
+    if value is None:
+        return "null"
+    pad = "  " * indent
+    if isinstance(value, list):
+        if not value:
+            return "[]"
+        items = ",\n".join(f"{pad}  {render_hcl_value(item, indent + 1)}" for item in value)
+        return f"[\n{items}\n{pad}]"
+    if not value:
+        return "{}"
+    entries = []
+    for key, entry in value.items():
+        rendered_key = key if _HCL_IDENTIFIER_RE.match(key) else quote_hcl_template(key)
+        entries.append(f"{pad}  {rendered_key} = {render_hcl_value(entry, indent + 1)}")
+    return "{\n" + "\n".join(entries) + f"\n{pad}}}"
+
+
 def render_provider_resources(resources) -> str:
     """Render ``ResourceSpec`` blocks to HCL. Shared with the composer's contract gate."""
     blocks = []
     for resource in resources:
         lines = [f'resource "{resource.type}" "{resource.name}" {{']
         for key, value in resource.arguments.items():
-            lines.append(f"  {key} = {value}")
+            lines.append(f"  {key} = {render_hcl_value(value)}")
         for block in resource.blocks:
             lines.extend(f"  {line}" for line in block.splitlines())
         lines.append("}")
@@ -530,14 +580,7 @@ def _quote_hcl_string(value: str) -> str:
     never break out of the string literal or inject a template expression into
     the generated Terraform.
     """
-    escaped = (
-        value.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\r", "\\r")
-        .replace("\n", "\\n")
-        .replace("${", "$${")
-        .replace("%{", "%%{")
-    )
+    escaped = _escape_hcl_template(value).replace("${", "$${").replace("%{", "%%{")
     return f'"{escaped}"'
 
 
@@ -576,7 +619,7 @@ def apply_composition(spec: InfrastructureSpec, composed: ComposedComponent) -> 
     )
 
 
-def default_spec_composer() -> SpecComposer | None:
+def default_spec_composer(logger=None) -> SpecComposer | None:
     """Composer used when none is injected; None disables composition.
 
     Composition needs a model (``BEDROCK_MODEL_ID``) and can be turned off with
@@ -587,7 +630,7 @@ def default_spec_composer() -> SpecComposer | None:
         return None
     from iac_smith.spec_composer import SpecComposer
 
-    return SpecComposer()
+    return SpecComposer(logger=logger)
 
 
 def _with_warning(spec: InfrastructureSpec, warning: str) -> InfrastructureSpec:
@@ -597,8 +640,13 @@ def _with_warning(spec: InfrastructureSpec, warning: str) -> InfrastructureSpec:
 class SpecRendererGenerator:
     """File-generator adapter used by graph.default_file_generator."""
 
-    def __init__(self, composer: SpecComposer | None = None):
+    def __init__(self, composer: SpecComposer | None = None, logger=None):
         self._composer = composer
+        self._logger = logger
+
+    def _log(self, message: str) -> None:
+        if self._logger:
+            self._logger(message)
 
     def generate_files(
         self,
@@ -627,8 +675,9 @@ class SpecRendererGenerator:
         )
         if not needs_composition:
             return files
-        composer = self._composer or default_spec_composer()
+        composer = self._composer or default_spec_composer(self._logger)
         if composer is None:
+            self._log("IaC Smith: spec composition disabled or no model; rendering structure only.")
             return files
 
         from iac_smith.provider_schema import build_schema_resolver
@@ -636,6 +685,7 @@ class SpecRendererGenerator:
 
         resolver = build_schema_resolver(files)
         if not resolver.provider_contracts:
+            self._log("IaC Smith: provider schema harvest unavailable; rendering structure only.")
             spec = _with_warning(
                 spec, "Provider schema harvest was unavailable; rendered structure only."
             )
@@ -650,6 +700,7 @@ class SpecRendererGenerator:
                 negative_patterns=blackboard.negative_patterns if blackboard else None,
             )
         except (SpecCompositionError, ValueError) as exc:
+            self._log(f"IaC Smith: spec composition failed; rendering structure only: {exc}")
             spec = _with_warning(spec, f"Spec composition failed; rendered structure only: {exc}")
             return render_spec(spec)
         return render_spec(apply_composition(spec, composed))
