@@ -67,8 +67,9 @@ def _plan(stack_name: str = "database-platform") -> ChangePlan:
 class FakeStreamRuntime:
     """Bedrock runtime double replaying canned JSON payloads over the stream shape."""
 
-    def __init__(self, payloads: list[dict]):
+    def __init__(self, payloads: list[dict], stop_reason: str = "end_turn"):
         self.payloads = [json.dumps(payload) for payload in payloads]
+        self.stop_reason = stop_reason
         self.prompts: list[str] = []
 
     def invoke_model(self, **kwargs):
@@ -90,7 +91,7 @@ class FakeStreamRuntime:
                 {
                     "chunk": {
                         "bytes": json.dumps(
-                            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}}
+                            {"type": "message_delta", "delta": {"stop_reason": self.stop_reason}}
                         ).encode()
                     }
                 },
@@ -98,8 +99,10 @@ class FakeStreamRuntime:
         }
 
 
-def _composer(payloads: list[dict], **kwargs) -> tuple[SpecComposer, FakeStreamRuntime]:
-    runtime = FakeStreamRuntime(payloads)
+def _composer(
+    payloads: list[dict], stop_reason: str = "end_turn", **kwargs
+) -> tuple[SpecComposer, FakeStreamRuntime]:
+    runtime = FakeStreamRuntime(payloads, stop_reason=stop_reason)
     composer = SpecComposer(model_id="fixture-model", bedrock_runtime=runtime, **kwargs)
     return composer, runtime
 
@@ -199,6 +202,19 @@ def test_compose_repairs_unsupported_argument_with_gate_finding():
 
     assert len(composed.resources) == 2
     assert "unsupported argument `publicly_visible`" in runtime.prompts[2]
+
+
+def test_compose_raises_clear_error_when_response_hits_token_cap():
+    composer, _ = _composer([_VALID_SELECTION], stop_reason="max_tokens")
+
+    with pytest.raises(SpecCompositionError, match="truncated at the output token cap"):
+        composer.compose(
+            intent=_intent(),
+            component_name="database-platform",
+            allowed_inputs=ALLOWED_INPUTS,
+            environments=["non-prod"],
+            provider_contracts=CONTRACTS,
+        )
 
 
 def test_compose_raises_after_bounded_repair_rounds():
