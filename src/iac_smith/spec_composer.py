@@ -463,7 +463,7 @@ class SpecComposer:
                 *self._negative_pattern_lines(negative_patterns),
             ]
             if hint:
-                lines.extend(["", "Your previous selection contained invalid types:", hint])
+                lines.extend(["", "Your previous selection was invalid:", hint])
             lines.extend(
                 [
                     "",
@@ -473,7 +473,25 @@ class SpecComposer:
                     "you are certain the provider defines.",
                 ]
             )
-            payload = self._invoke_json("\n".join(lines))
+            try:
+                payload = self._invoke_json("\n".join(lines))
+            except ValueError as exc:
+                # Same rule as composition: an unparseable response is repairable,
+                # and restating the failure changes the prompt for the retry.
+                if attempt == 0:
+                    hint = (
+                        f"- Your previous response could not be parsed: {exc} Return "
+                        'exactly one minified JSON object of the form {"resource_types":'
+                        ' ["<type>", ...]} with no prose and no markdown fences.'
+                    )
+                    self._log(
+                        "IaC Smith: type selection response was not parseable JSON; "
+                        f"repairing. ({exc})"
+                    )
+                    continue
+                raise SpecCompositionError(
+                    f"Type selection response was not parseable JSON: {exc}"
+                ) from exc
             proposed = payload.get("resource_types")
             if not isinstance(proposed, list) or not all(isinstance(t, str) for t in proposed):
                 raise SpecCompositionError(

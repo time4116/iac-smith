@@ -357,6 +357,41 @@ def test_compose_tolerates_literal_newlines_inside_json_strings():
     assert composed.resources[0].blocks == ['settings {\n  tier = "small"\n}']
 
 
+def test_selection_repairs_unparseable_response():
+    composer, runtime = _composer(
+        [
+            "Here are the resources you should use for this platform.",
+            _VALID_SELECTION,
+            _VALID_COMPOSITION,
+        ]
+    )
+
+    composed = composer.compose(
+        intent=_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    assert len(composed.resources) == 2
+    assert "could not be parsed" in runtime.prompts[1]
+    assert "Response began: 'Here are the resources" in runtime.prompts[1]
+
+
+def test_selection_raises_when_both_responses_unparseable():
+    composer, _ = _composer(["not json", "still not json"])
+
+    with pytest.raises(SpecCompositionError, match="not parseable JSON"):
+        composer.compose(
+            intent=_intent(),
+            component_name="database-platform",
+            allowed_inputs=ALLOWED_INPUTS,
+            environments=["non-prod"],
+            provider_contracts=CONTRACTS,
+        )
+
+
 def test_compose_repairs_unparseable_response():
     composer, runtime = _composer(
         [
