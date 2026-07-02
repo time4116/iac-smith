@@ -72,8 +72,12 @@ def _plan(stack_name: str = "database-platform") -> ChangePlan:
 class FakeStreamRuntime:
     """Bedrock runtime double replaying canned JSON payloads over the stream shape."""
 
-    def __init__(self, payloads: list[dict], stop_reason: str = "end_turn"):
-        self.payloads = [json.dumps(payload) for payload in payloads]
+    def __init__(self, payloads: list[dict | str], stop_reason: str = "end_turn"):
+        # A str payload is replayed verbatim (malformed-response scenarios);
+        # dicts are serialized to JSON.
+        self.payloads = [
+            payload if isinstance(payload, str) else json.dumps(payload) for payload in payloads
+        ]
         self.stop_reason = stop_reason
         self.prompts: list[str] = []
 
@@ -105,7 +109,7 @@ class FakeStreamRuntime:
 
 
 def _composer(
-    payloads: list[dict], stop_reason: str = "end_turn", **kwargs
+    payloads: list[dict | str], stop_reason: str = "end_turn", **kwargs
 ) -> tuple[SpecComposer, FakeStreamRuntime]:
     runtime = FakeStreamRuntime(payloads, stop_reason=stop_reason)
     composer = SpecComposer(model_id="fixture-model", bedrock_runtime=runtime, **kwargs)
@@ -331,6 +335,48 @@ def test_validation_rejects_unparseable_rendered_hcl():
 
     assert any("rendered module resources do not parse as valid HCL" in e for e in errors)
     assert any("output broken do not parse as valid HCL" in e for e in errors)
+
+
+def test_compose_tolerates_literal_newlines_inside_json_strings():
+    raw = (
+        '{"resources": [{"type": "customcloud_database", "name": "db", '
+        '"arguments": {"engine": "postgres"}, '
+        '"blocks": ["settings {\n  tier = \\"small\\"\n}"]}], '
+        '"outputs": [], "assumptions": []}'
+    )
+    composer, _ = _composer([{"resource_types": ["customcloud_database"]}, raw])
+
+    composed = composer.compose(
+        intent=_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    assert composed.resources[0].blocks == ['settings {\n  tier = "small"\n}']
+
+
+def test_compose_repairs_unparseable_response():
+    composer, runtime = _composer(
+        [
+            _VALID_SELECTION,
+            "I could not produce the configuration you asked for.",
+            _VALID_COMPOSITION,
+        ]
+    )
+
+    composed = composer.compose(
+        intent=_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    assert len(composed.resources) == 2
+    assert "could not be parsed" in runtime.prompts[2]
+    assert "Response began: 'I could not produce" in runtime.prompts[2]
 
 
 def test_compose_raises_clear_error_when_response_hits_token_cap():

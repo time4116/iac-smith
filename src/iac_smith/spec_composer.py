@@ -380,7 +380,11 @@ class SpecComposer:
                         "Spec composition response was truncated at the output token cap; "
                         "raise IAC_SMITH_COMPOSER_MAX_TOKENS."
                     )
-                return _extract_json_object(text)
+                try:
+                    return _extract_json_object(text)
+                except ValueError as exc:
+                    snippet = " ".join(text.split())[:160]
+                    raise ValueError(f"{exc} Response began: {snippet!r}") from exc
             except transient as exc:
                 last_error = exc
             except BedrockStreamError as exc:
@@ -555,7 +559,8 @@ class SpecComposer:
             "  output `value` is a bare Terraform expression",
             "  (e.g. aws_db_instance.this.arn), not a JSON template.",
             "- Return minified JSON without indentation or line breaks between keys;",
-            "  every wasted token risks truncating the document.",
+            "  every wasted token risks truncating the document. JSON-escape newlines",
+            "  (\\n) inside string values — never emit a raw line break inside a string.",
         ]
         if findings:
             lines.extend(
@@ -593,15 +598,30 @@ class SpecComposer:
         contracts = {name: provider_contracts[name] for name in selected}
         findings: list[str] = []
         for round_number in range(1, self.max_repair_rounds + 2):
-            payload = self._compose_once(
-                intent=intent,
-                component_name=component_name,
-                allowed_inputs=allowed_inputs,
-                environments=environments,
-                contracts=contracts,
-                negative_patterns=negative_patterns,
-                findings=findings,
-            )
+            try:
+                payload = self._compose_once(
+                    intent=intent,
+                    component_name=component_name,
+                    allowed_inputs=allowed_inputs,
+                    environments=environments,
+                    contracts=contracts,
+                    negative_patterns=negative_patterns,
+                    findings=findings,
+                )
+            except ValueError as exc:
+                # An unparseable response is a repairable violation, not a dead
+                # end: re-stating the failure changes the prompt, so even at
+                # temperature 0 the retry is not a verbatim replay.
+                findings = [
+                    f"Your previous response could not be parsed: {exc} Return exactly "
+                    "one minified JSON object — no prose, no markdown fences, and "
+                    "JSON-escaped newlines (\\n) inside string values."
+                ]
+                self._log(
+                    f"IaC Smith: composition round {round_number} response was not "
+                    f"parseable JSON; repairing. ({exc})"
+                )
+                continue
             try:
                 composed = ComposedComponent.model_validate(payload)
             except ValidationError as exc:

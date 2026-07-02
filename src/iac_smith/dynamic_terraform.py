@@ -601,8 +601,12 @@ def _extract_text_from_bedrock_payload(payload: dict[str, Any]) -> str:
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
+    # strict=False tolerates literal control characters (real newlines/tabs)
+    # inside JSON strings — models emit them routinely in multi-line values
+    # (e.g. HCL block bodies), and rejecting the whole document over them
+    # turns an otherwise-valid response into a hard failure.
     try:
-        value = json.loads(text)
+        value = json.loads(text, strict=False)
     except json.JSONDecodeError:
         start = text.find("{")
         end = text.rfind("}")
@@ -611,7 +615,7 @@ def _extract_json_object(text: str) -> dict[str, Any]:
                 "Terraform generation response must contain a valid JSON object."
             ) from None
         try:
-            value = json.loads(text[start : end + 1])
+            value = json.loads(text[start : end + 1], strict=False)
         except json.JSONDecodeError as exc:
             raise ValueError(
                 "Terraform generation response must contain a valid JSON object."
