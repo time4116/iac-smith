@@ -488,11 +488,27 @@ def _render_module_file(spec: InfrastructureSpec, path: str) -> str:
 _HCL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 
 
+def _escape_hcl_template(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "\\r").replace("\n", "\\n")
+
+
+def quote_hcl_template(value: str) -> str:
+    """Quote a JSON string as an HCL string template.
+
+    Terraform JSON configuration semantics: plain text becomes a quoted literal,
+    while ``${...}`` interpolation is preserved as the expression channel — so a
+    natural model value like ``"IaC Smith"`` renders as a valid literal and
+    ``"${var.environment}"`` stays an expression (a template that is exactly one
+    interpolation yields the referenced value's native type).
+    """
+    return f'"{_escape_hcl_template(value)}"'
+
+
 def render_hcl_value(value, indent: int = 1) -> str:
     """Render a native JSON argument value to HCL.
 
-    Strings are verbatim Terraform expressions (the composer's contract quotes
-    string literals); numbers and booleans render as literals; lists and objects
+    Numbers and booleans render as literals; strings follow Terraform JSON
+    configuration semantics (see ``quote_hcl_template``); lists and objects
     render recursively, so the model can express e.g. ``tags`` as a plain JSON
     object instead of stringified HCL.
     """
@@ -501,7 +517,7 @@ def render_hcl_value(value, indent: int = 1) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, str):
-        return value
+        return quote_hcl_template(value)
     if value is None:
         return "null"
     pad = "  " * indent
@@ -514,7 +530,7 @@ def render_hcl_value(value, indent: int = 1) -> str:
         return "{}"
     entries = []
     for key, entry in value.items():
-        rendered_key = key if _HCL_IDENTIFIER_RE.match(key) else f'"{key}"'
+        rendered_key = key if _HCL_IDENTIFIER_RE.match(key) else quote_hcl_template(key)
         entries.append(f"{pad}  {rendered_key} = {render_hcl_value(entry, indent + 1)}")
     return "{\n" + "\n".join(entries) + f"\n{pad}}}"
 
@@ -564,14 +580,7 @@ def _quote_hcl_string(value: str) -> str:
     never break out of the string literal or inject a template expression into
     the generated Terraform.
     """
-    escaped = (
-        value.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\r", "\\r")
-        .replace("\n", "\\n")
-        .replace("${", "$${")
-        .replace("%{", "%%{")
-    )
+    escaped = _escape_hcl_template(value).replace("${", "$${").replace("%{", "%%{")
     return f'"{escaped}"'
 
 

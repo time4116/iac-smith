@@ -1,5 +1,6 @@
 import json
 
+import hcl2
 import pytest
 
 from iac_smith.blackboard import ContractResolver, TerraformContract
@@ -117,14 +118,14 @@ _VALID_COMPOSITION = {
         {
             "type": "customcloud_network",
             "name": "this",
-            "arguments": {"cidr_block": '"10.0.0.0/16"', "name": "var.environment"},
+            "arguments": {"cidr_block": "10.0.0.0/16", "name": "${var.environment}"},
         },
         {
             "type": "customcloud_database",
             "name": "this",
             "arguments": {
-                "engine": '"postgres"',
-                "network_ref": "customcloud_network.this.id",
+                "engine": "postgres",
+                "network_ref": "${customcloud_network.this.id}",
             },
             "blocks": ['settings {\n  tier = "small"\n}'],
         },
@@ -188,7 +189,7 @@ def test_compose_repairs_unsupported_argument_with_gate_finding():
             {
                 "type": "customcloud_database",
                 "name": "this",
-                "arguments": {"engine": '"postgres"', "publicly_visible": "true"},
+                "arguments": {"engine": "postgres", "publicly_visible": "true"},
             }
         ],
         "outputs": [],
@@ -215,10 +216,10 @@ def test_compose_accepts_native_json_argument_values():
                 "type": "customcloud_database",
                 "name": "db",
                 "arguments": {
-                    "engine": '"postgres"',
+                    "engine": "postgres",
                     "port": 5432,
                     "public": False,
-                    "tags": {"Environment": "var.environment", "ManagedBy": '"IaC Smith"'},
+                    "tags": {"Environment": "${var.environment}", "ManagedBy": "IaC Smith"},
                 },
             }
         ],
@@ -236,17 +237,19 @@ def test_compose_accepts_native_json_argument_values():
     )
 
     rendered = render_provider_resources(composed.resources)
+    assert 'engine = "postgres"' in rendered
     assert "port = 5432" in rendered
     assert "public = false" in rendered
-    assert "Environment = var.environment" in rendered
+    assert 'Environment = "${var.environment}"' in rendered
     assert 'ManagedBy = "IaC Smith"' in rendered
+    hcl2.loads(rendered)
 
 
 def test_compose_repairs_invalid_response_shape():
     missing_name = {"resources": [{"type": "customcloud_database"}], "outputs": []}
     valid = {
         "resources": [
-            {"type": "customcloud_database", "name": "db", "arguments": {"engine": '"postgres"'}}
+            {"type": "customcloud_database", "name": "db", "arguments": {"engine": "postgres"}}
         ],
         "outputs": [],
         "assumptions": [],
@@ -273,7 +276,7 @@ def test_validation_flags_undeclared_variable_inside_nested_value():
             ResourceSpec(
                 type="customcloud_database",
                 name="db",
-                arguments={"engine": '"postgres"', "tags": {"Vpc": "var.vpc_id"}},
+                arguments={"engine": "postgres", "tags": {"Vpc": "${var.vpc_id}"}},
             )
         ]
     )
@@ -286,7 +289,7 @@ def test_validation_flags_undeclared_variable_inside_nested_value():
 def test_render_hcl_value_renders_nested_structures():
     rendered = render_hcl_value(
         {
-            "kubernetes.io/cluster": '"owned"',
+            "kubernetes.io/cluster": "owned",
             "ports": [5432, 5433],
             "nested": {"enabled": True, "ratio": 1.5},
         }
@@ -296,6 +299,38 @@ def test_render_hcl_value_renders_nested_structures():
     assert "ports = [\n      5432,\n      5433\n    ]" in rendered
     assert "enabled = true" in rendered
     assert "ratio = 1.5" in rendered
+
+
+def test_render_hcl_value_escapes_keys_and_plain_text_to_parseable_hcl():
+    rendered = (
+        'resource "customcloud_database" "db" {\n  tags = '
+        + render_hcl_value({'bad"key': "value", "multi\nline": "x", "ManagedBy": "IaC Smith"})
+        + "\n}\n"
+    )
+
+    assert '"bad\\"key" = "value"' in rendered
+    assert '"multi\\nline" = "x"' in rendered
+    assert 'ManagedBy = "IaC Smith"' in rendered
+    hcl2.loads(rendered)
+
+
+def test_validation_rejects_unparseable_rendered_hcl():
+    composed = ComposedComponent(
+        resources=[
+            ResourceSpec(
+                type="customcloud_database",
+                name="db",
+                arguments={"engine": "postgres"},
+                blocks=["settings {"],
+            )
+        ],
+        outputs=[OutputSpec(name="broken", description="Bad.", value=")))")],
+    )
+
+    errors = _validate(composed)
+
+    assert any("rendered module resources do not parse as valid HCL" in e for e in errors)
+    assert any("output broken do not parse as valid HCL" in e for e in errors)
 
 
 def test_compose_raises_clear_error_when_response_hits_token_cap():
@@ -346,7 +381,7 @@ def test_validation_flags_hallucinated_type_argument_and_block():
             ResourceSpec(
                 type="customcloud_database",
                 name="db",
-                arguments={"engine": '"postgres"'},
+                arguments={"engine": "postgres"},
                 blocks=["replication {\n  copies = 2\n}"],
             ),
         ]
@@ -365,9 +400,9 @@ def test_validation_flags_reference_violations():
                 type="customcloud_database",
                 name="db",
                 arguments={
-                    "engine": '"postgres"',
-                    "name": "var.vpc_id",
-                    "network_ref": "customcloud_network.missing.id",
+                    "engine": "postgres",
+                    "name": "${var.vpc_id}",
+                    "network_ref": "${customcloud_network.missing.id}",
                 },
             )
         ],
@@ -413,7 +448,7 @@ def test_render_provider_resources_indents_multiline_blocks():
             ResourceSpec(
                 type="customcloud_database",
                 name="db",
-                arguments={"engine": '"postgres"'},
+                arguments={"engine": "postgres"},
                 blocks=['settings {\n  tier = "small"\n}'],
             )
         ]

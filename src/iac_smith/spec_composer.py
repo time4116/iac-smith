@@ -88,6 +88,27 @@ def _shape_findings(exc: ValidationError, limit: int = 12) -> list[str]:
     return findings
 
 
+def _hcl_parse_errors(rendered: str, *, scope: str) -> list[str]:
+    """Reject rendered HCL that does not parse.
+
+    The contract gate and reference scans are regex-level; a raw ``blocks``
+    string or an expression the model wrote can still be syntactically invalid
+    HCL that Terraform would only reject at runtime. Parsing the rendered text
+    turns that into a pre-render repair finding.
+    """
+    import hcl2
+
+    try:
+        hcl2.loads(rendered)
+    except Exception as exc:  # lark surfaces several exception types
+        detail = " ".join(str(exc).split())[:300]
+        return [
+            f"The {scope} do not parse as valid HCL: {detail} — fix the syntax "
+            "(quote string literals, balance braces, close every block)."
+        ]
+    return []
+
+
 def _reference_errors(
     text: str,
     *,
@@ -160,6 +181,14 @@ def validate_composed_component(
     )
     if gate.status == ValidationStatus.FAILED:
         errors.extend(gate.errors)
+    errors.extend(_hcl_parse_errors(rendered, scope="rendered module resources"))
+    for output in composed.outputs:
+        errors.extend(
+            _hcl_parse_errors(
+                f'output "{output.name}" {{\n  value = {output.value}\n}}\n',
+                scope=f"output {output.name}",
+            )
+        )
 
     for resource in composed.resources:
         scope = f"{resource.type}.{resource.name}"
@@ -472,22 +501,25 @@ class SpecComposer:
             '  "<expression>"}, "blocks": ["<nested block HCL>"]}, ...],',
             '  "outputs": [{"name": "...", "description": "...", "value": "..."}],',
             '  "assumptions": ["..."]}',
-            "- `arguments` values are native JSON: numbers, booleans, lists, and objects",
-            "  are rendered to HCL as-is. String values are Terraform expressions",
-            '  rendered verbatim: quote string literals (e.g. "\\"example\\"", including',
-            "  strings nested inside objects) and write references bare",
-            "  (var.environment, aws_kms_key.this.arn).",
+            "- `arguments` values are native JSON following Terraform JSON configuration",
+            "  semantics: numbers, booleans, lists, and objects render to HCL as-is;",
+            "  strings are quoted string templates — write plain text directly",
+            '  (e.g. "IaC Smith") and wrap Terraform expressions in interpolation',
+            '  (e.g. "${var.environment}", "${aws_kms_key.this.arn}").',
             "- Use only argument names from a type's allowed list; include every required",
             "  argument.",
             "- `blocks` entries are complete nested HCL blocks; each must start with a",
             "  nested block name from the type's allowed list.",
-            "- Reference sibling resources as <type>.<name>.<attribute>.",
+            "- Reference sibling resources as <type>.<name>.<attribute> — inside",
+            "  ${...} in argument strings; bare in nested blocks and output values.",
             f"- Reference only these input variables: {', '.join(allowed_inputs)}. Never",
             "  reference local., data., or module. values — they do not exist here.",
             "- You may add resource types beyond the contracts above only if you are",
             "  certain the provider defines them; they are validated the same way.",
             "- Resource and output names are lowercase snake_case identifiers.",
-            "- `outputs` expose the identifiers consumers of this stack need.",
+            "- `outputs` expose the identifiers consumers of this stack need; each",
+            "  output `value` is a bare Terraform expression",
+            "  (e.g. aws_db_instance.this.arn), not a JSON template.",
             "- Return minified JSON without indentation or line breaks between keys;",
             "  every wasted token risks truncating the document.",
         ]
