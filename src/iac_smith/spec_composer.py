@@ -158,7 +158,13 @@ def validate_composed_component(
                 addresses=addresses,
             )
         )
+    seen_output_names: set[str] = set()
     for output in composed.outputs:
+        if not _IDENTIFIER_RE.match(output.name):
+            errors.append(f"Output name `{output.name}` must be a lowercase snake_case identifier.")
+        if output.name in seen_output_names:
+            errors.append(f"Duplicate output name `{output.name}`.")
+        seen_output_names.add(output.name)
         errors.extend(
             _reference_errors(
                 output.value,
@@ -429,7 +435,7 @@ class SpecComposer:
             "  reference local., data., or module. values — they do not exist here.",
             "- You may add resource types beyond the contracts above only if you are",
             "  certain the provider defines them; they are validated the same way.",
-            "- Resource names are lowercase snake_case.",
+            "- Resource and output names are lowercase snake_case identifiers.",
             "- `outputs` expose the identifiers consumers of this stack need.",
         ]
         if findings:

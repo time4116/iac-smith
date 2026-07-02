@@ -522,12 +522,31 @@ def _render_variables(component: ComponentSpec) -> str:
     return "\n".join(blocks)
 
 
+def _quote_hcl_string(value: str) -> str:
+    """Quote free text as an HCL string literal.
+
+    Escapes quotes/backslashes/newlines and neutralizes ``${``/``%{`` template
+    sequences, so model-authored text (e.g. a composed output description) can
+    never break out of the string literal or inject a template expression into
+    the generated Terraform.
+    """
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+        .replace("${", "$${")
+        .replace("%{", "%%{")
+    )
+    return f'"{escaped}"'
+
+
 def _render_outputs(component: ComponentSpec) -> str:
     if not component.outputs:
         return ""
     return "\n".join(
         f'output "{output.name}" {{\n'
-        f'  description = "{output.description}"\n'
+        f"  description = {_quote_hcl_string(output.description)}\n"
         f"  value       = {output.value}\n"
         "}\n"
         for output in component.outputs

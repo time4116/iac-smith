@@ -273,6 +273,24 @@ def test_validation_flags_reference_violations():
     assert any("references `local.`" in e for e in errors)
 
 
+def test_validation_flags_invalid_and_duplicate_output_names():
+    composed = ComposedComponent(
+        resources=[
+            ResourceSpec(type="customcloud_database", name="db", arguments={"engine": '"postgres"'})
+        ],
+        outputs=[
+            OutputSpec(name="bad-name", description="Ref.", value="customcloud_database.db.id"),
+            OutputSpec(name="ref", description="Ref.", value="customcloud_database.db.id"),
+            OutputSpec(name="ref", description="Again.", value="customcloud_database.db.id"),
+        ],
+    )
+
+    errors = _validate(composed)
+
+    assert any("Output name `bad-name`" in e for e in errors)
+    assert any("Duplicate output name `ref`" in e for e in errors)
+
+
 def test_validation_requires_at_least_one_resource():
     assert _validate(ComposedComponent(resources=[])) == [
         "Composition must select at least one provider resource."
@@ -334,6 +352,28 @@ def test_generator_renders_composed_resources(monkeypatch):
     assert 'output "database_ref"' in files["modules/database-platform/outputs.tf"]
     assert "structure only" not in files["README.md"]
     assert composer.kwargs["allowed_inputs"] == ["aws_region", "environment"]
+
+
+def test_generator_escapes_composed_output_descriptions(monkeypatch):
+    _patch_resolver(monkeypatch)
+    composed = ComposedComponent.model_validate(_VALID_COMPOSITION)
+    composed.outputs[0] = OutputSpec(
+        name="database_ref",
+        description='Identifier "quoted"\nwith ${var.environment} template',
+        value="customcloud_database.this.id",
+    )
+
+    files = SpecRendererGenerator(composer=FakeSpecComposer(composed=composed)).generate_files(
+        intent=_intent(),
+        change_plan=_plan(),
+        repo_patterns=RepoPatterns(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+
+    outputs_tf = files["modules/database-platform/outputs.tf"]
+    assert (
+        'description = "Identifier \\"quoted\\"\\nwith $${var.environment} template"' in outputs_tf
+    )
 
 
 def test_generator_falls_back_to_structure_only_when_composition_fails(monkeypatch):
