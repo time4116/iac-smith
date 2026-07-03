@@ -1,5 +1,6 @@
 import re
 
+from iac_smith.legitimacy import resource_inventory
 from iac_smith.models.change_plan import ChangePlan
 from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.validation import ValidationResult
@@ -32,6 +33,46 @@ def _structure_only_warnings(structure_only: bool) -> list[str]:
     ]
 
 
+def _split_inventory(
+    generated_files: dict[str, str],
+) -> tuple[dict[str, list[tuple[str, str]]], dict[str, list[tuple[str, str]]]]:
+    inventory = resource_inventory(generated_files)
+    workload = {p: r for p, r in inventory.items() if not p.startswith("bootstrap/")}
+    backend = {p: r for p, r in inventory.items() if p.startswith("bootstrap/")}
+    return workload, backend
+
+
+def _inventory_summary(generated_files: dict[str, str]) -> list[str]:
+    """Summary bullets computed from the rendered Terraform, never from intent."""
+    workload, backend = _split_inventory(generated_files)
+    workload_count = sum(len(records) for records in workload.values())
+    backend_count = sum(len(records) for records in backend.values())
+    lines: list[str] = []
+    if workload_count:
+        lines.append(
+            f"{workload_count} provider resource(s) rendered across "
+            f"{len(workload)} module/stack file(s)"
+        )
+    else:
+        lines.append(
+            "No provider resources were generated outside the backend bootstrap — "
+            "module bodies are structural placeholders"
+        )
+    if backend_count:
+        lines.append(f"{backend_count} backend bootstrap resource(s) for Terraform state")
+    return lines
+
+
+def _resource_listing(generated_files: dict[str, str]) -> str:
+    inventory = resource_inventory(generated_files)
+    if not inventory:
+        return "None — no `resource` blocks exist in the rendered Terraform."
+    return "\n".join(
+        f"* `{path}`: " + ", ".join(f"`{rtype}.{rname}`" for rtype, rname in records)
+        for path, records in inventory.items()
+    )
+
+
 def build_pr_body(
     issue_url: str,
     intent: InfrastructureIntent,
@@ -39,8 +80,20 @@ def build_pr_body(
     validation: ValidationResult,
     runtime_checks: list[str] | None = None,
     structure_only: bool = False,
+    generated_files: dict[str, str] | None = None,
 ) -> str:
-    changed_files = "\n".join(f"* `{path}`" for path in change_plan.files_to_generate)
+    # Every claim below is derived from what was actually rendered whenever the
+    # rendered files are available; the planned file list is only the fallback
+    # for legacy callers. Summarizing parsed intent as if it were implemented is
+    # exactly the failure mode the legitimacy gate exists to block.
+    if generated_files is not None:
+        summary = _inventory_summary(generated_files)
+        changed_files = "\n".join(f"* `{path}`" for path in sorted(generated_files))
+        resources_section = f"\n## Generated resources\n\n{_resource_listing(generated_files)}\n"
+    else:
+        summary = change_plan.summary
+        changed_files = "\n".join(f"* `{path}`" for path in change_plan.files_to_generate)
+        resources_section = ""
     backend_lines = "\n".join(
         f"* `{env}`: S3 `{resource.bucket}`, DynamoDB `{resource.lock_table}`"
         for env, resource in change_plan.backend_resources.items()
@@ -51,6 +104,11 @@ def build_pr_body(
             "\n\n**Terraform / Terragrunt validation**\n\n"
             "IaC Smith ran these commands locally before opening this PR:\n\n"
             f"{_checks(runtime_checks)}"
+        )
+    if structure_only:
+        validation_block += (
+            "\n\n**Validation scope**: these checks ran against structural placeholders "
+            "only — no workload provider resources were validated."
         )
     warnings = [
         *intent.warnings,
@@ -64,12 +122,12 @@ def build_pr_body(
 
 ## Generated infrastructure summary
 
-{_bullets(change_plan.summary)}
+{_bullets(summary)}
 
 Target environments: {", ".join(change_plan.environments)}
 Region: `{intent.region}`
 Stack: `{change_plan.stack_name}`
-
+{resources_section}
 ## Assumptions and defaults
 
 {_bullets(intent.assumptions)}

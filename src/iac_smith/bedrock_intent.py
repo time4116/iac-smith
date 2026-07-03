@@ -12,6 +12,7 @@ INTENT_SCHEMA = """
   "region": "us-west-2",
   "requires_new_vpc": true,
   "features": ["encryption", "private_subnets", "logging"],
+  "depends_on_existing": ["foundation"],
   "assumptions": ["short factual assumption"],
   "warnings": [
     "short risk/gap/security concern — state what is absent or risky, not future actions"
@@ -37,6 +38,7 @@ INTENT_JSON_SCHEMA: dict[str, Any] = {
         "region": {"type": "string"},
         "requires_new_vpc": {"type": "boolean"},
         "features": {"type": "array", "items": {"type": "string"}},
+        "depends_on_existing": {"type": "array", "items": {"type": "string"}},
         "assumptions": {"type": "array", "items": {"type": "string"}},
         "warnings": {"type": "array", "items": {"type": "string"}},
         "blocked": {"type": "boolean"},
@@ -49,6 +51,7 @@ INTENT_JSON_SCHEMA: dict[str, Any] = {
         "region",
         "requires_new_vpc",
         "features",
+        "depends_on_existing",
         "assumptions",
         "warnings",
         "blocked",
@@ -178,6 +181,9 @@ Rules:
 * Warnings must describe a risk, gap, or security concern — not promise future actions.
   Write "No HTTPS listener configured; a certificate ARN is required to enable TLS" not
   "IaC Smith will add an HTTPS listener stub." If something is missing, say it is absent.
+* If the issue asks to consume, wire into, or depend on a stack it treats as already existing
+  (e.g. "use the existing foundation networking outputs"), list each such stack name in
+  depends_on_existing. Leave it empty when the issue asks to create everything it needs.
 * Existing repository conventions are inspected later. Do not invent file paths.
 * If no AWS region is specified, use us-west-2 and add a warning.
 * If no environment is specified, use environment_scope=both and environments=["non-prod", "prod"].

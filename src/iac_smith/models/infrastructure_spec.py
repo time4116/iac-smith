@@ -36,6 +36,12 @@ class ResourceSpec(BaseModel):
     # stringified HCL for everything made the model's natural (and unambiguous)
     # JSON typing a schema violation.
     arguments: dict[str, JsonValue] = Field(default_factory=dict)
+    # Structured nested blocks following Terraform JSON configuration semantics:
+    # each key is a provider-declared nested block name, each list entry is one
+    # block instance rendered deterministically to `name { ... }` HCL. This keeps
+    # the model out of raw-HCL authoring entirely.
+    nested_blocks: dict[str, list[dict[str, JsonValue]]] = Field(default_factory=dict)
+    # Raw nested-block HCL strings; legacy channel superseded by nested_blocks.
     blocks: list[str] = Field(default_factory=list)
 
 

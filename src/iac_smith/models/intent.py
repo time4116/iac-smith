@@ -19,6 +19,10 @@ class InfrastructureIntent(BaseModel):
     region: str = "us-west-2"
     requires_new_vpc: bool = False
     features: list[str] = Field(default_factory=list)
+    # Names of stacks the issue treats as already existing in the target repo
+    # (e.g. "foundation" when the request says to consume existing networking
+    # outputs). Feasibility is checked against the repo before generation.
+    depends_on_existing: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     blocked: bool = False

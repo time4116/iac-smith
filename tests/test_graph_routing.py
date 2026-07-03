@@ -355,3 +355,37 @@ def test_graph_validation_runner_successfully_repairs_transient_failure():
     assert result["validation"].status.value == "passed"
     assert result["repair_attempts"] == 1
     assert attempts_called == 2
+
+
+def test_graph_blocks_when_required_existing_stack_is_missing(tmp_path):
+    def prerequisite_intent_parser(issue_text: str) -> InfrastructureIntent:
+        return InfrastructureIntent(
+            raw_request=issue_text,
+            resource_type="data_platform",
+            environment_scope=EnvironmentScope.NON_PROD_ONLY,
+            environments=["non-prod"],
+            region="us-west-2",
+            depends_on_existing=["foundation"],
+        )
+
+    graph = build_graph(
+        intent_parser_fn=prerequisite_intent_parser,
+        file_generator_fn=_fake_graph_file_generator,
+    )
+    result = graph.invoke(
+        IaCSmithState(
+            issue_number=59,
+            issue_title="Aurora data platform on existing foundation",
+            issue_body="Provision Aurora consuming the existing foundation networking.",
+            issue_url="https://github.com/time4116/iac-smith/issues/59",
+            labels=["iac-smith"],
+            target_repo="time4116/iac-smith-demo-infra",
+            target_repo_path=str(tmp_path),
+        )
+    )
+
+    assert result["status"] == "blocked"
+    assert "foundation" in result["block_reason"]
+    assert "prerequisite" in result["block_reason"]
+    assert "generated_files" not in result
+    assert "pr_body" not in result

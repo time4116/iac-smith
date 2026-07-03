@@ -67,3 +67,77 @@ def test_pr_body_surfaces_structure_only_spec_renderer_warning():
 
     assert "Structure-only PR" in body
     assert "selected no provider resources" in body
+
+
+def test_pr_body_claims_are_derived_from_rendered_inventory():
+    intent = InfrastructureIntent(
+        raw_request="Create an Aurora data platform",
+        resource_type="aurora_postgresql",
+        environment_scope=EnvironmentScope.NON_PROD_ONLY,
+        environments=["non-prod"],
+        region="us-west-2",
+    )
+    plan = ChangePlan(
+        stack_name="data-platform",
+        environments=["non-prod"],
+        files_to_generate=["modules/data-platform/main.tf"],
+        backend_resources={
+            "non-prod": BackendResource(bucket="iac-smith-state", lock_table="iac-smith-lock")
+        },
+        summary=["Planned intent that must NOT be echoed as implemented."],
+    )
+    generated_files = {
+        "modules/data-platform/main.tf": (
+            'resource "aws_rds_cluster" "this" {\n  engine = "aurora-postgresql"\n}\n'
+        ),
+        "bootstrap/backend/non-prod/main.tf": (
+            'resource "aws_s3_bucket" "terraform_state" {\n  bucket = "b"\n}\n'
+        ),
+        "environments/non-prod/data-platform/terragrunt.hcl": "include {}\n",
+    }
+
+    body = build_pr_body(
+        issue_url="https://github.com/time4116/iac-smith/issues/59",
+        intent=intent,
+        change_plan=plan,
+        validation=ValidationResult(status=ValidationStatus.PASSED),
+        generated_files=generated_files,
+    )
+
+    assert "## Generated resources" in body
+    assert "`aws_rds_cluster.this`" in body
+    assert "`aws_s3_bucket.terraform_state`" in body
+    assert "1 provider resource(s) rendered" in body
+    assert "Planned intent that must NOT be echoed" not in body
+    # File claims come from what was actually rendered, not the plan.
+    assert "`environments/non-prod/data-platform/terragrunt.hcl`" in body
+
+
+def test_pr_body_says_structure_only_validation_scope_when_placeholder():
+    intent = InfrastructureIntent(
+        raw_request="Create infrastructure",
+        resource_type="example",
+        environment_scope=EnvironmentScope.NON_PROD_ONLY,
+        environments=["non-prod"],
+        region="us-west-2",
+    )
+    plan = ChangePlan(
+        stack_name="example",
+        environments=["non-prod"],
+        files_to_generate=["modules/example/main.tf"],
+        backend_resources={"non-prod": BackendResource(bucket="b", lock_table="l")},
+        summary=[],
+    )
+
+    body = build_pr_body(
+        issue_url="https://github.com/time4116/iac-smith/issues/1",
+        intent=intent,
+        change_plan=plan,
+        validation=ValidationResult(status=ValidationStatus.PASSED),
+        runtime_checks=["terragrunt validate passed."],
+        structure_only=True,
+        generated_files={"modules/example/main.tf": "# placeholder\n"},
+    )
+
+    assert "structural placeholders" in body
+    assert "No provider resources were generated outside the backend bootstrap" in body

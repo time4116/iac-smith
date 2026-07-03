@@ -31,6 +31,15 @@ _STRUCTURE_ONLY_WARNING = (
 )
 
 
+class StructureOnlyBlocked(RuntimeError):
+    """Planned workload modules would be placeholders and the opt-in is not set.
+
+    Raised instead of degrading to a structure-only render: a PR whose modules
+    contain no provider resources misleads reviewers, so the default is to fail
+    closed (``IAC_SMITH_ALLOW_STRUCTURE_ONLY=1`` re-enables the old fallback).
+    """
+
+
 class RenderedFiles(dict[str, str]):
     """Generated file mapping with renderer metadata carried out of the spec layer."""
 
@@ -58,21 +67,38 @@ def _planned_module_paths_from_files(files_to_generate: list[str]) -> set[str]:
     return {path for path in files_to_generate if path.startswith("modules/")}
 
 
-def discover_foundation_outputs(repo_path: Path | None) -> list[str]:
-    """Discover foundation outputs from the target repo instead of assuming names."""
+def discover_stack_outputs(repo_path: Path | None, stack_name: str) -> list[str]:
+    """Discover an existing stack's outputs from the target repo instead of assuming names."""
 
     if repo_path is None:
         return []
-    candidates = [
-        repo_path / "modules/foundation/outputs.tf",
-        repo_path / "modules/vpc-foundation/outputs.tf",
-    ]
+    candidates = [repo_path / f"modules/{stack_name}/outputs.tf"]
+    if stack_name == "foundation":
+        candidates.append(repo_path / "modules/vpc-foundation/outputs.tf")
     for path in candidates:
         if path.exists():
             outputs = _OUTPUT_RE.findall(path.read_text(encoding="utf-8"))
             if outputs:
                 return outputs
     return []
+
+
+def discover_foundation_outputs(repo_path: Path | None) -> list[str]:
+    return discover_stack_outputs(repo_path, "foundation")
+
+
+def _normalized_stack_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def _repo_stack_names(repo_patterns: RepoPatterns | None) -> set[str]:
+    if not repo_patterns:
+        return set()
+    return {
+        _normalized_stack_name(path.rstrip("/").split("/")[-1])
+        for path in repo_patterns.existing_stack_paths
+        if path.strip("/")
+    }
 
 
 def _fallback_foundation_outputs() -> list[str]:
@@ -103,19 +129,44 @@ def build_spec_from_intent(
         "environment": ValueExpression(expression="local.environment"),
         "aws_region": ValueExpression(expression="local.aws_region"),
     }
+    warnings = list(intent.warnings)
     dependencies: list[DependencySpec] = []
+    producers: list[str] = []
     if _repo_has_foundation(repo_patterns):
-        outputs = discover_foundation_outputs(repo_path) or _fallback_foundation_outputs()
+        producers.append("foundation")
+    # The issue may require consuming other stacks that already exist in the
+    # target repo; wire every one that is really there. Missing ones were
+    # already blocked by the prerequisite gate before generation.
+    repo_stacks = _repo_stack_names(repo_patterns)
+    for name in intent.depends_on_existing:
+        normalized = _normalized_stack_name(name)
+        if (
+            normalized
+            and normalized != change_plan.stack_name
+            and normalized in repo_stacks
+            and normalized not in producers
+        ):
+            producers.append(normalized)
+    for producer in producers:
+        outputs = discover_stack_outputs(repo_path, producer)
+        if not outputs and producer == "foundation":
+            outputs = _fallback_foundation_outputs()
+        if not outputs:
+            warnings.append(
+                f"Existing stack `{producer}` exposes no discoverable outputs; "
+                "its dependency was not wired."
+            )
+            continue
         dependencies.append(
             DependencySpec(
                 consumer=change_plan.stack_name,
-                producer="foundation",
+                producer=producer,
                 outputs=outputs,
             )
         )
         component_inputs.update(
             {
-                output: ValueExpression(expression=f"dependency.foundation.outputs.{output}")
+                output: ValueExpression(expression=f"dependency.{producer}.outputs.{output}")
                 for output in outputs
             }
         )
@@ -136,7 +187,6 @@ def build_spec_from_intent(
             ],
         )
     ]
-    warnings = list(intent.warnings)
     if _planned_module_paths(change_plan) and not resources:
         warnings.append(_STRUCTURE_ONLY_WARNING)
 
@@ -535,6 +585,15 @@ def render_hcl_value(value, indent: int = 1) -> str:
     return "{\n" + "\n".join(entries) + f"\n{pad}}}"
 
 
+def _render_nested_block(name: str, entry: dict, indent: int = 1) -> list[str]:
+    pad = "  " * indent
+    lines = [f"{pad}{name} {{"]
+    for key, value in entry.items():
+        lines.append(f"{pad}  {key} = {render_hcl_value(value, indent + 1)}")
+    lines.append(f"{pad}}}")
+    return lines
+
+
 def render_provider_resources(resources) -> str:
     """Render ``ResourceSpec`` blocks to HCL. Shared with the composer's contract gate."""
     blocks = []
@@ -542,6 +601,9 @@ def render_provider_resources(resources) -> str:
         lines = [f'resource "{resource.type}" "{resource.name}" {{']
         for key, value in resource.arguments.items():
             lines.append(f"  {key} = {render_hcl_value(value)}")
+        for name, entries in resource.nested_blocks.items():
+            for entry in entries:
+                lines.extend(_render_nested_block(name, entry))
         for block in resource.blocks:
             lines.extend(f"  {line}" for line in block.splitlines())
         lines.append("}")
@@ -640,9 +702,23 @@ def _with_warning(spec: InfrastructureSpec, warning: str) -> InfrastructureSpec:
 class SpecRendererGenerator:
     """File-generator adapter used by graph.default_file_generator."""
 
-    def __init__(self, composer: SpecComposer | None = None, logger=None):
+    def __init__(
+        self,
+        composer: SpecComposer | None = None,
+        logger=None,
+        *,
+        allow_structure_only: bool | None = None,
+    ):
         self._composer = composer
         self._logger = logger
+        self._allow_structure_only = allow_structure_only
+
+    def _structure_only_allowed(self) -> bool:
+        if self._allow_structure_only is not None:
+            return self._allow_structure_only
+        from iac_smith.legitimacy import allow_structure_only
+
+        return allow_structure_only()
 
     def _log(self, message: str) -> None:
         if self._logger:
@@ -675,8 +751,16 @@ class SpecRendererGenerator:
         )
         if not needs_composition:
             return files
+        allow_structure_only = self._structure_only_allowed()
         composer = self._composer or default_spec_composer(self._logger)
         if composer is None:
+            if not allow_structure_only:
+                raise StructureOnlyBlocked(
+                    "Spec composition is disabled or has no model, so the planned "
+                    "workload modules would contain no provider resources. Structure-"
+                    "only PRs are blocked by default; set IAC_SMITH_ALLOW_STRUCTURE_ONLY=1 "
+                    "to explicitly allow placeholder output."
+                )
             self._log("IaC Smith: spec composition disabled or no model; rendering structure only.")
             return files
 
@@ -685,6 +769,13 @@ class SpecRendererGenerator:
 
         resolver = build_schema_resolver(files)
         if not resolver.provider_contracts:
+            if not allow_structure_only:
+                raise StructureOnlyBlocked(
+                    "Provider schema harvest was unavailable, so composed resources "
+                    "cannot be validated and the workload modules would be placeholders. "
+                    "Structure-only PRs are blocked by default; set "
+                    "IAC_SMITH_ALLOW_STRUCTURE_ONLY=1 to explicitly allow them."
+                )
             self._log("IaC Smith: provider schema harvest unavailable; rendering structure only.")
             spec = _with_warning(
                 spec, "Provider schema harvest was unavailable; rendered structure only."
@@ -700,6 +791,11 @@ class SpecRendererGenerator:
                 negative_patterns=blackboard.negative_patterns if blackboard else None,
             )
         except (SpecCompositionError, ValueError) as exc:
+            if not allow_structure_only:
+                self._log(f"IaC Smith: spec composition failed; blocking PR creation: {exc}")
+                raise SpecCompositionError(
+                    f"Spec composition failed and structure-only fallback is disabled: {exc}"
+                ) from exc
             self._log(f"IaC Smith: spec composition failed; rendering structure only: {exc}")
             spec = _with_warning(spec, f"Spec composition failed; rendered structure only: {exc}")
             return render_spec(spec)

@@ -605,3 +605,125 @@ def test_run_deadline_raises_after_short_budget():
 
     with pytest.raises(cli._RunTimeout), cli._run_deadline(1):
         time.sleep(5)
+
+
+def _init_target_repo(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    (tmp_path / "README.md").write_text("# existing\n")
+    subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "chore: init"], cwd=tmp_path, check=True, capture_output=True
+    )
+
+
+_GATE_ENV = {
+    "IAC_SMITH_SOURCE_REPO": "time4116/iac-smith",
+    "IAC_SMITH_ISSUE_NUMBER": "42",
+    "IAC_SMITH_TARGET_REPO": "time4116/iac-smith-demo-infra",
+    "IAC_SMITH_ALLOWED_TARGET_REPO": "time4116/iac-smith-demo-infra",
+    "IAC_SMITH_SKIP_PUSH": "1",
+    "IAC_SMITH_SKIP_RUNTIME_VALIDATION": "1",
+}
+
+
+def _structure_only_file_generator(
+    *, intent, change_plan, repo_patterns, ruleset, target_repo, repo_path=None
+):
+    # The PR #65 failure shape: real backend bootstrap resources, placeholder
+    # workload module carrying the renderer's failure banner.
+    return {
+        "bootstrap/backend/non-prod/main.tf": (
+            'resource "aws_s3_bucket" "terraform_state" {\n  bucket = "b"\n}\n\n'
+            'resource "aws_dynamodb_table" "terraform_locks" {\n  name = "l"\n}\n'
+        ),
+        "modules/vpc-foundation/main.tf": (
+            "# Deterministic skeleton generated from InfrastructureSpec.\n"
+            "# No provider resources were selected for this component.\n"
+        ),
+        "modules/vpc-foundation/variables.tf": "",
+        "modules/vpc-foundation/outputs.tf": "",
+        "modules/vpc-foundation/versions.tf": "",
+        "modules/vpc-foundation/README.md": "# vpc-foundation\n",
+    }
+
+
+def test_run_iac_smith_blocks_backend_only_structure_pr(tmp_path: Path):
+    _init_target_repo(tmp_path)
+    pr_client = FakePullRequestClient()
+
+    result = run_iac_smith(
+        env={**_GATE_ENV, "IAC_SMITH_TARGET_REPO_PATH": str(tmp_path)},
+        issue_client=FakeIssueClient(),
+        pr_client=pr_client,
+        intent_parser_fn=_fake_intent_parser,
+        file_generator_fn=_structure_only_file_generator,
+    )
+
+    assert result.status == "blocked"
+    assert "Only backend bootstrap resources" in result.block_reason
+    assert "failure banner" in result.block_reason
+    assert pr_client.calls == []
+
+
+def test_run_iac_smith_allows_structure_only_pr_with_explicit_opt_in(tmp_path: Path):
+    _init_target_repo(tmp_path)
+    pr_client = FakePullRequestClient()
+
+    result = run_iac_smith(
+        env={
+            **_GATE_ENV,
+            "IAC_SMITH_TARGET_REPO_PATH": str(tmp_path),
+            "IAC_SMITH_ALLOW_STRUCTURE_ONLY": "1",
+        },
+        issue_client=FakeIssueClient(),
+        pr_client=pr_client,
+        intent_parser_fn=_fake_intent_parser,
+        file_generator_fn=_structure_only_file_generator,
+    )
+
+    assert result.status == "pr_created"
+    assert len(pr_client.calls) == 1
+
+
+def test_run_iac_smith_pr_body_lists_actual_rendered_resources(tmp_path: Path):
+    _init_target_repo(tmp_path)
+    pr_client = FakePullRequestClient()
+
+    result = run_iac_smith(
+        env={**_GATE_ENV, "IAC_SMITH_TARGET_REPO_PATH": str(tmp_path)},
+        issue_client=FakeIssueClient(),
+        pr_client=pr_client,
+        intent_parser_fn=_fake_intent_parser,
+        file_generator_fn=_fake_file_generator,
+    )
+
+    assert result.status == "pr_created"
+    body = pr_client.calls[0]["body"]
+    assert "## Generated resources" in body
+    assert "`aws_vpc.this`" in body
+
+
+def test_run_iac_smith_blocks_composition_failure_from_generator(tmp_path: Path):
+    from iac_smith.spec_composer import SpecCompositionError
+
+    _init_target_repo(tmp_path)
+    pr_client = FakePullRequestClient()
+
+    def failing_generator(**kwargs):
+        raise SpecCompositionError(
+            "Spec composition failed and structure-only fallback is disabled: boom"
+        )
+
+    result = run_iac_smith(
+        env={**_GATE_ENV, "IAC_SMITH_TARGET_REPO_PATH": str(tmp_path)},
+        issue_client=FakeIssueClient(),
+        pr_client=pr_client,
+        intent_parser_fn=_fake_intent_parser,
+        file_generator_fn=failing_generator,
+    )
+
+    assert result.status == "blocked"
+    assert "structure-only fallback is disabled" in result.block_reason
+    assert pr_client.calls == []
