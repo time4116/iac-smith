@@ -16,6 +16,7 @@ from iac_smith.spec_composer import (
 )
 from iac_smith.spec_renderer import (
     SpecRendererGenerator,
+    StructureOnlyBlocked,
     render_hcl_value,
     render_provider_resources,
 )
@@ -131,7 +132,7 @@ _VALID_COMPOSITION = {
                 "engine": "postgres",
                 "network_ref": "${customcloud_network.this.id}",
             },
-            "blocks": ['settings {\n  tier = "small"\n}'],
+            "nested_blocks": {"settings": [{"tier": "small"}]},
         },
     ],
     "outputs": [
@@ -325,7 +326,6 @@ def test_validation_rejects_unparseable_rendered_hcl():
                 type="customcloud_database",
                 name="db",
                 arguments={"engine": "postgres"},
-                blocks=["settings {"],
             )
         ],
         outputs=[OutputSpec(name="broken", description="Bad.", value=")))")],
@@ -333,15 +333,13 @@ def test_validation_rejects_unparseable_rendered_hcl():
 
     errors = _validate(composed)
 
-    assert any("rendered module resources do not parse as valid HCL" in e for e in errors)
     assert any("output broken do not parse as valid HCL" in e for e in errors)
 
 
 def test_compose_tolerates_literal_newlines_inside_json_strings():
     raw = (
         '{"resources": [{"type": "customcloud_database", "name": "db", '
-        '"arguments": {"engine": "postgres"}, '
-        '"blocks": ["settings {\n  tier = \\"small\\"\n}"]}], '
+        '"arguments": {"engine": "postgres", "name": "primary\n  replica"}}], '
         '"outputs": [], "assumptions": []}'
     )
     composer, _ = _composer([{"resource_types": ["customcloud_database"]}, raw])
@@ -354,7 +352,7 @@ def test_compose_tolerates_literal_newlines_inside_json_strings():
         provider_contracts=CONTRACTS,
     )
 
-    assert composed.resources[0].blocks == ['settings {\n  tier = "small"\n}']
+    assert composed.resources[0].arguments["name"] == "primary\n  replica"
 
 
 def test_selection_repairs_unparseable_response():
@@ -463,7 +461,7 @@ def test_validation_flags_hallucinated_type_argument_and_block():
                 type="customcloud_database",
                 name="db",
                 arguments={"engine": "postgres"},
-                blocks=["replication {\n  copies = 2\n}"],
+                nested_blocks={"replication": [{"copies": 2}]},
             ),
         ]
     )
@@ -578,7 +576,7 @@ def test_render_provider_resources_indents_multiline_blocks():
                 type="customcloud_database",
                 name="db",
                 arguments={"engine": "postgres"},
-                blocks=['settings {\n  tier = "small"\n}'],
+                nested_blocks={"settings": [{"tier": "small"}]},
             )
         ]
     )
@@ -654,7 +652,7 @@ def test_generator_falls_back_to_structure_only_when_composition_fails(monkeypat
     _patch_resolver(monkeypatch)
     composer = FakeSpecComposer(error=SpecCompositionError("no valid types"))
 
-    files = SpecRendererGenerator(composer=composer).generate_files(
+    files = SpecRendererGenerator(composer=composer, allow_structure_only=True).generate_files(
         intent=_intent(),
         change_plan=_plan(),
         repo_patterns=RepoPatterns(),
@@ -670,7 +668,7 @@ def test_generator_falls_back_when_schema_harvest_unavailable(monkeypatch):
     _patch_resolver(monkeypatch, contracts={})
     composer = FakeSpecComposer()
 
-    files = SpecRendererGenerator(composer=composer).generate_files(
+    files = SpecRendererGenerator(composer=composer, allow_structure_only=True).generate_files(
         intent=_intent(),
         change_plan=_plan(),
         repo_patterns=RepoPatterns(),
@@ -685,7 +683,7 @@ def test_generator_falls_back_when_schema_harvest_unavailable(monkeypatch):
 def test_generator_skips_composition_without_model(monkeypatch):
     monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
 
-    files = SpecRendererGenerator().generate_files(
+    files = SpecRendererGenerator(allow_structure_only=True).generate_files(
         intent=_intent(),
         change_plan=_plan(),
         repo_patterns=RepoPatterns(),
@@ -693,3 +691,264 @@ def test_generator_skips_composition_without_model(monkeypatch):
     )
 
     assert files.structure_only is True
+
+
+# --- Issue #108 regressions: fail closed, nested blocks, staged rejection ---
+
+
+def test_generator_blocks_composition_failure_by_default(monkeypatch):
+    _patch_resolver(monkeypatch)
+    monkeypatch.delenv("IAC_SMITH_ALLOW_STRUCTURE_ONLY", raising=False)
+    composer = FakeSpecComposer(error=SpecCompositionError("no valid types"))
+
+    with pytest.raises(SpecCompositionError, match="structure-only fallback is disabled"):
+        SpecRendererGenerator(composer=composer).generate_files(
+            intent=_intent(),
+            change_plan=_plan(),
+            repo_patterns=RepoPatterns(),
+            target_repo="time4116/iac-smith-demo-infra",
+        )
+
+
+def test_generator_blocks_structure_only_without_model_by_default(monkeypatch):
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("IAC_SMITH_ALLOW_STRUCTURE_ONLY", raising=False)
+
+    with pytest.raises(StructureOnlyBlocked, match="IAC_SMITH_ALLOW_STRUCTURE_ONLY"):
+        SpecRendererGenerator().generate_files(
+            intent=_intent(),
+            change_plan=_plan(),
+            repo_patterns=RepoPatterns(),
+            target_repo="time4116/iac-smith-demo-infra",
+        )
+
+
+def test_generator_blocks_when_schema_harvest_unavailable_by_default(monkeypatch):
+    _patch_resolver(monkeypatch, contracts={})
+    monkeypatch.delenv("IAC_SMITH_ALLOW_STRUCTURE_ONLY", raising=False)
+
+    with pytest.raises(StructureOnlyBlocked, match="schema harvest"):
+        SpecRendererGenerator(composer=FakeSpecComposer()).generate_files(
+            intent=_intent(),
+            change_plan=_plan(),
+            repo_patterns=RepoPatterns(),
+            target_repo="time4116/iac-smith-demo-infra",
+        )
+
+
+def test_nested_blocks_render_structured_hcl_blocks():
+    composition = {
+        "resources": [
+            {
+                "type": "customcloud_database",
+                "name": "db",
+                "arguments": {"engine": "postgres"},
+                "nested_blocks": {
+                    "settings": [
+                        {"tier": "small", "port": 5432},
+                        {"tier": "large", "public": False},
+                    ]
+                },
+            }
+        ],
+        "outputs": [],
+        "assumptions": [],
+    }
+    composer, _ = _composer([{"resource_types": ["customcloud_database"]}, composition])
+
+    composed = composer.compose(
+        intent=_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    rendered = render_provider_resources(composed.resources)
+    assert rendered.count("settings {") == 2
+    assert 'tier = "small"' in rendered
+    assert "port = 5432" in rendered
+    assert "public = false" in rendered
+    assert "blocks" not in rendered
+    hcl2.loads(rendered)
+
+
+def test_unsupported_nested_block_gets_actionable_finding():
+    composed = ComposedComponent(
+        resources=[
+            ResourceSpec(
+                type="customcloud_database",
+                name="db",
+                arguments={"engine": "postgres"},
+                nested_blocks={"parameter_group": [{"name": "force_ssl", "value": "1"}]},
+            )
+        ]
+    )
+
+    errors = validate_composed_component(
+        composed,
+        provider_contracts=CONTRACTS,
+        known_resource_types=set(CONTRACTS),
+        allowed_inputs=ALLOWED_INPUTS,
+        component_name="database-platform",
+    )
+
+    assert any(
+        "unsupported nested block `parameter_group`" in error and "provider-declared names" in error
+        for error in errors
+    )
+
+
+def test_nested_block_string_values_reject_bare_references():
+    composed = ComposedComponent(
+        resources=[
+            ResourceSpec(
+                type="customcloud_database",
+                name="db",
+                arguments={"engine": "postgres"},
+                nested_blocks={"settings": [{"tier": "customcloud_database.db.id"}]},
+            )
+        ]
+    )
+
+    errors = validate_composed_component(
+        composed,
+        provider_contracts=CONTRACTS,
+        known_resource_types=set(CONTRACTS),
+        allowed_inputs=ALLOWED_INPUTS,
+        component_name="database-platform",
+    )
+
+    assert any("bare Terraform reference" in error for error in errors)
+
+
+def test_nested_block_entry_keys_must_be_identifiers():
+    composed = ComposedComponent(
+        resources=[
+            ResourceSpec(
+                type="customcloud_database",
+                name="db",
+                arguments={"engine": "postgres"},
+                nested_blocks={"settings": [{"bad-key": "x"}]},
+            )
+        ]
+    )
+
+    errors = validate_composed_component(
+        composed,
+        provider_contracts=CONTRACTS,
+        known_resource_types=set(CONTRACTS),
+        allowed_inputs=ALLOWED_INPUTS,
+        component_name="database-platform",
+    )
+
+    assert any("not a valid identifier" in error for error in errors)
+
+
+def test_compose_prompt_requests_nested_blocks_not_raw_hcl():
+    composer, runtime = _composer([_VALID_SELECTION, _VALID_COMPOSITION])
+
+    composer.compose(
+        intent=_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    assert "nested_blocks" in runtime.prompts[1]
+    assert "never raw HCL" in runtime.prompts[1]
+    assert '"blocks": ["<nested block HCL>"]' not in runtime.prompts[1]
+
+
+def test_compose_carries_findings_as_negative_patterns_across_rounds():
+    bad = {
+        "resources": [
+            {
+                "type": "customcloud_database",
+                "name": "this",
+                "arguments": {"engine": "postgres", "publicly_visible": "true"},
+            }
+        ],
+        "outputs": [],
+        "assumptions": [],
+    }
+    composer, runtime = _composer([_VALID_SELECTION, bad, _VALID_COMPOSITION])
+
+    composer.compose(
+        intent=_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    repair_prompt = runtime.prompts[2]
+    assert "Known invalid patterns from earlier validation of this run" in repair_prompt
+    assert "Correction" in repair_prompt
+    assert "publicly_visible" in repair_prompt
+
+
+def test_compose_rejects_oversized_selection_with_staged_plan(monkeypatch):
+    monkeypatch.delenv("IAC_SMITH_MAX_RESOURCE_TYPES", raising=False)
+    contracts = {
+        f"customcloud_svc{i}_thing": TerraformContract(
+            kind="provider_resource",
+            name=f"customcloud_svc{i}_thing",
+            allowed_arguments=["name"],
+            source="fixture schema",
+        )
+        for i in range(13)
+    }
+    selection = {"resource_types": sorted(contracts)}
+    composer, _ = _composer([selection])
+
+    with pytest.raises(SpecCompositionError) as excinfo:
+        composer.compose(
+            intent=_intent(),
+            component_name="database-platform",
+            allowed_inputs=ALLOWED_INPUTS,
+            environments=["non-prod"],
+            provider_contracts=contracts,
+        )
+
+    message = str(excinfo.value)
+    assert "too broad" in message
+    assert "stage 1:" in message
+    assert "IAC_SMITH_MAX_RESOURCE_TYPES" in message
+
+
+def test_compose_rejects_legacy_raw_blocks_channel_with_actionable_finding():
+    legacy = {
+        "resources": [
+            {
+                "type": "customcloud_database",
+                "name": "db",
+                "arguments": {"engine": "postgres"},
+                "blocks": ['settings {\n  tier = "small"\n}'],
+            }
+        ],
+        "outputs": [],
+        "assumptions": [],
+    }
+    composer, runtime = _composer([_VALID_SELECTION, legacy, _VALID_COMPOSITION])
+
+    composed = composer.compose(
+        intent=_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    assert len(composed.resources) == 2
+    repair_prompt = runtime.prompts[2]
+    assert "raw-HCL `blocks` channel does not exist" in repair_prompt
+    assert "nested_blocks" in repair_prompt
+
+
+def test_resource_spec_has_no_raw_blocks_field():
+    with pytest.raises(Exception, match="[Ee]xtra"):
+        ResourceSpec.model_validate(
+            {"type": "customcloud_database", "name": "db", "blocks": ["settings {}"]}
+        )

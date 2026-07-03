@@ -86,6 +86,38 @@ def _module_already_exists(stack: str, repo_patterns: RepoPatterns | None) -> bo
     )
 
 
+def missing_prerequisite_stacks(
+    intent: InfrastructureIntent,
+    repo_patterns: RepoPatterns | None,
+) -> list[str]:
+    """Required existing stacks the target repo does not actually contain.
+
+    When the issue asks to consume a stack that should already exist (parsed into
+    ``intent.depends_on_existing``), generation must not proceed on a missing
+    producer: silently omitting the dependency or inventing wiring with no real
+    producer both yield an illegitimate PR.
+    """
+    existing = [
+        path.lower().replace("_", "-")
+        for path in (repo_patterns.existing_stack_paths if repo_patterns else [])
+    ]
+    missing = []
+    for name in intent.depends_on_existing:
+        normalized = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+        if not normalized:
+            continue
+        found = any(
+            path == normalized
+            or path.endswith(f"/{normalized}")
+            or f"/{normalized}/" in path
+            or path.startswith(f"{normalized}/")
+            for path in existing
+        )
+        if not found:
+            missing.append(name)
+    return missing
+
+
 def plan_changes(
     intent: InfrastructureIntent,
     target_repo: str,

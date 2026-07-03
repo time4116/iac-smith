@@ -42,7 +42,7 @@ _BARE_REFERENCE_HEAD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\.[A-Za-z_]")
 _VAR_REF_RE = re.compile(r"\bvar\.([A-Za-z_][A-Za-z0-9_]*)")
 _FORBIDDEN_ROOT_RE = re.compile(r"\b(local|data|module)\.")
 _RESOURCE_REF_RE = re.compile(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\.([a-z][a-z0-9_]*)\b")
-_BLOCK_NAME_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_-]*)")
+_NESTED_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class ComposedComponent(BaseModel):
@@ -77,6 +77,13 @@ def _shape_findings(exc: ValidationError, limit: int = 12) -> list[str]:
     errors = exc.errors()
     findings = [
         (
+            f"Response field `{'.'.join(str(part) for part in err['loc'])}`: the raw-HCL "
+            "`blocks` channel does not exist. Express every nested block as a structured "
+            '`nested_blocks` entry, e.g. {"nested_blocks": {"<block name>": [{"<arg>": '
+            "<value>}]}}."
+        )
+        if err["type"] == "extra_forbidden" and err["loc"] and err["loc"][-1] == "blocks"
+        else (
             f"Response field `{'.'.join(str(part) for part in err['loc'])}`: {err['msg']}. "
             "Match the required JSON shape exactly."
         )
@@ -119,9 +126,9 @@ def _bare_reference_errors(
 def _hcl_parse_errors(rendered: str, *, scope: str) -> list[str]:
     """Reject rendered HCL that does not parse.
 
-    The contract gate and reference scans are regex-level; a raw ``blocks``
-    string or an expression the model wrote can still be syntactically invalid
-    HCL that Terraform would only reject at runtime. Parsing the rendered text
+    The contract gate and reference scans are regex-level; an expression the
+    model wrote (e.g. an output value) can still be syntactically invalid HCL
+    that Terraform would only reject at runtime. Parsing the rendered text
     turns that into a pre-render repair finding.
     """
     import hcl2
@@ -229,26 +236,38 @@ def validate_composed_component(
                         f"(required by {contract.source})."
                     )
             allowed_args = set(contract.allowed_arguments)
-            for block in resource.blocks:
-                match = _BLOCK_NAME_RE.match(block)
-                if not match:
-                    errors.append(f"`{scope}` has a nested block without a parseable name.")
-                    continue
-                if allowed_args and match.group(1) not in allowed_args:
+            for block_name in resource.nested_blocks:
+                if allowed_args and block_name not in allowed_args:
                     errors.append(
-                        f"`{scope}` uses unsupported nested block `{match.group(1)}`. "
-                        f"Allowed arguments and blocks from {contract.source}: "
-                        f"{', '.join(contract.allowed_arguments)}."
+                        f"`{scope}` uses unsupported nested block `{block_name}`. Use one "
+                        f"of the provider-declared names from {contract.source}: "
+                        f"{', '.join(contract.allowed_arguments)} — or drop the block if "
+                        f"no name fits; never invent one."
                     )
+        for block_name, entries in resource.nested_blocks.items():
+            for entry in entries:
+                for key in entry:
+                    if not _NESTED_KEY_RE.match(key):
+                        errors.append(
+                            f"`{scope}` nested block `{block_name}` has argument name "
+                            f"`{key}` that is not a valid identifier."
+                        )
         argument_leaves = [
             leaf for value in resource.arguments.values() for leaf in _iter_string_leaves(value)
         ]
+        argument_leaves.extend(
+            leaf
+            for entries in resource.nested_blocks.values()
+            for entry in entries
+            for value in entry.values()
+            for leaf in _iter_string_leaves(value)
+        )
         errors.extend(
             _bare_reference_errors(
                 argument_leaves, scope=scope, known_resource_types=known_resource_types
             )
         )
-        text = "\n".join([*argument_leaves, *resource.blocks])
+        text = "\n".join(argument_leaves)
         errors.extend(
             _reference_errors(
                 text,
@@ -275,6 +294,33 @@ def validate_composed_component(
             )
         )
     return errors
+
+
+def _staged_groups(selected: list[str]) -> list[list[str]]:
+    """Group selected types by their service token (second underscore segment).
+
+    Purely lexical, so it stays provider-generic: ``aws_rds_cluster`` and
+    ``aws_rds_cluster_instance`` land in one stage, ``aws_kms_key`` in another.
+    """
+    groups: dict[str, list[str]] = {}
+    for rtype in selected:
+        parts = rtype.split("_")
+        service = parts[1] if len(parts) > 1 else parts[0]
+        groups.setdefault(service, []).append(rtype)
+    return list(groups.values())
+
+
+def _oversized_request_message(selected: list[str], cap: int) -> str:
+    stages = "; ".join(
+        f"stage {index}: {', '.join(group)}"
+        for index, group in enumerate(_staged_groups(selected), start=1)
+    )
+    return (
+        f"The request needs {len(selected)} provider resource types, above the "
+        f"{cap}-type reliability cap (IAC_SMITH_MAX_RESOURCE_TYPES). It is too broad to "
+        "implement as one trustworthy PR. File it as staged issues in dependency "
+        f"order, one PR each: {stages}."
+    )
 
 
 def _nearest_types_hint(unknown: list[str], known_resource_types: set[str]) -> str:
@@ -553,9 +599,9 @@ class SpecComposer:
             "Compose the resources implementing the request. Rules:",
             "- Return ONLY JSON:",
             '  {"resources": [{"type": "...", "name": "...", "arguments": {"<arg>":',
-            '  "<expression>"}, "blocks": ["<nested block HCL>"]}, ...],',
-            '  "outputs": [{"name": "...", "description": "...", "value": "..."}],',
-            '  "assumptions": ["..."]}',
+            '  <value>}, "nested_blocks": {"<block name>": [{"<arg>": <value>}]}},',
+            '  ...], "outputs": [{"name": "...", "description": "...",',
+            '  "value": "..."}], "assumptions": ["..."]}',
             "- `arguments` values are native JSON following Terraform JSON configuration",
             "  semantics: numbers, booleans, lists, and objects render to HCL as-is;",
             "  strings are quoted string templates — write plain text directly",
@@ -564,10 +610,14 @@ class SpecComposer:
             "  bare reference as a string value — it would render as literal text.",
             "- Use only argument names from a type's allowed list; include every required",
             "  argument.",
-            "- `blocks` entries are complete nested HCL blocks; each must start with a",
-            "  nested block name from the type's allowed list.",
+            "- `nested_blocks` are structured JSON, never raw HCL: each key must be a",
+            "  nested block name from the type's allowed list; each list entry is one",
+            "  block instance whose arguments follow the same value semantics as",
+            "  `arguments`. Repeatable blocks (e.g. `parameter`) are multiple entries",
+            "  in the list. Never pass a block name as a top-level argument and never",
+            "  emit a literal `blocks` argument.",
             "- Reference sibling resources as <type>.<name>.<attribute> — inside",
-            "  ${...} in argument strings; bare in nested blocks and output values.",
+            "  ${...} in argument and nested-block strings; bare in output values.",
             f"- Reference only these input variables: {', '.join(allowed_inputs)}. Never",
             "  reference local., data., or module. values — they do not exist here.",
             "- You may add resource types beyond the contracts above only if you are",
@@ -585,7 +635,13 @@ class SpecComposer:
                 [
                     "",
                     "Your previous composition failed deterministic validation. Fix every",
-                    "finding below without introducing new violations:",
+                    "finding below without introducing new violations. Correction",
+                    "patterns: an unsupported argument must be removed or moved to the",
+                    "resource type that owns it — never renamed blindly; an unsupported",
+                    "nested block must use a provider-declared block name via",
+                    "`nested_blocks`; behaviour a type does not expose (e.g. network",
+                    "placement) is enforced through the resources that own it, not by",
+                    "inventing arguments:",
                     *(f"- {finding}" for finding in findings),
                 ]
             )
@@ -613,8 +669,15 @@ class SpecComposer:
         self._log(
             f"IaC Smith: composer selected {len(selected)} resource type(s): " + ", ".join(selected)
         )
+        max_types = _int_env("IAC_SMITH_MAX_RESOURCE_TYPES", 12)
+        if max_types > 0 and len(selected) > max_types:
+            raise SpecCompositionError(_oversized_request_message(selected, max_types))
         contracts = {name: provider_contracts[name] for name in selected}
         findings: list[str] = []
+        # Schema mistakes already rejected this run must not be rediscovered in a
+        # later round, so every failed round's findings ride along as negative
+        # patterns for the rest of the composition (bounded to keep the prompt sane).
+        carried_negatives: list[str] = []
         for round_number in range(1, self.max_repair_rounds + 2):
             try:
                 payload = self._compose_once(
@@ -623,7 +686,7 @@ class SpecComposer:
                     allowed_inputs=allowed_inputs,
                     environments=environments,
                     contracts=contracts,
-                    negative_patterns=negative_patterns,
+                    negative_patterns=[*(negative_patterns or []), *carried_negatives],
                     findings=findings,
                 )
             except ValueError as exc:
@@ -663,6 +726,10 @@ class SpecComposer:
                 )
                 composed.assumptions.extend(selection_warnings)
                 return composed
+            carried_negatives.extend(
+                finding for finding in findings if finding not in carried_negatives
+            )
+            del carried_negatives[24:]
             self._log(
                 f"IaC Smith: composition round {round_number} failed deterministic "
                 f"validation with {len(findings)} finding(s); repairing."

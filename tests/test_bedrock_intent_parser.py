@@ -179,6 +179,7 @@ def test_bedrock_client_streams_with_structured_json_output():
         "region",
         "requires_new_vpc",
         "features",
+        "depends_on_existing",
         "assumptions",
         "warnings",
         "blocked",

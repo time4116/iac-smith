@@ -216,3 +216,48 @@ def test_plan_existing_foundation_applies_to_arbitrary_workload_stack():
     assert "modules/foundation/main.tf" not in plan.files_to_generate
     assert "environments/non-prod/worker-service/terragrunt.hcl" in plan.files_to_generate
     assert any("foundation" in item.lower() for item in plan.summary)
+
+
+def test_missing_prerequisite_stacks_flags_absent_required_stack():
+    from iac_smith.nodes.change_planner import missing_prerequisite_stacks
+
+    intent = InfrastructureIntent(
+        raw_request="Consume the existing foundation networking",
+        resource_type="data_platform",
+        environment_scope=EnvironmentScope.NON_PROD_ONLY,
+        environments=["non-prod"],
+        region="us-west-2",
+        depends_on_existing=["foundation"],
+    )
+
+    missing_when_absent = missing_prerequisite_stacks(intent, RepoPatterns())
+    missing_when_present = missing_prerequisite_stacks(
+        intent, RepoPatterns(existing_stack_paths=["modules/foundation"])
+    )
+    missing_when_nested = missing_prerequisite_stacks(
+        intent, RepoPatterns(existing_stack_paths=["environments/non-prod/foundation"])
+    )
+
+    assert missing_when_absent == ["foundation"]
+    assert missing_when_present == []
+    assert missing_when_nested == []
+
+
+def test_missing_prerequisite_stacks_normalizes_names():
+    from iac_smith.nodes.change_planner import missing_prerequisite_stacks
+
+    intent = InfrastructureIntent(
+        raw_request="Use the existing VPC foundation",
+        resource_type="data_platform",
+        environment_scope=EnvironmentScope.NON_PROD_ONLY,
+        environments=["non-prod"],
+        region="us-west-2",
+        depends_on_existing=["VPC_Foundation"],
+    )
+
+    assert (
+        missing_prerequisite_stacks(
+            intent, RepoPatterns(existing_stack_paths=["modules/vpc-foundation"])
+        )
+        == []
+    )

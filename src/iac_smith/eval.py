@@ -138,7 +138,10 @@ def evaluate_fixture(
     if parser is None:
         raise ValueError("evaluate_fixture requires parse_intent or replay_path.")
     planner = plan_changes or default_plan_changes
-    generator = generate_files or SpecRendererGenerator().generate_files
+    # The harness measures render variance offline (no model, no composer), so
+    # structure-only output is its deterministic baseline — opt in explicitly
+    # rather than tripping the fail-closed production default.
+    generator = generate_files or SpecRendererGenerator(allow_structure_only=True).generate_files
     repo_patterns = RepoPatterns.model_validate(fixture.get("repo_patterns") or {})
     results: list[EvalRunResult] = []
     failures: Counter[str] = Counter()

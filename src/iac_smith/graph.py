@@ -19,7 +19,7 @@ from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
 from iac_smith.models.rules import Ruleset
 from iac_smith.models.validation import ValidationResult, ValidationStatus
-from iac_smith.nodes.change_planner import plan_changes
+from iac_smith.nodes.change_planner import missing_prerequisite_stacks, plan_changes
 from iac_smith.nodes.intent_parser import parse_intent
 from iac_smith.nodes.pr_writer import build_pr_body
 from iac_smith.nodes.ruleset_loader import load_ruleset
@@ -130,6 +130,19 @@ def repo_pattern_scanner(state: IaCSmithState) -> IaCSmithState:
 
 
 def change_planner(state: IaCSmithState) -> IaCSmithState:
+    missing = missing_prerequisite_stacks(state["intent"], state.get("repo_patterns"))
+    if missing:
+        stacks = ", ".join(f"`{name}`" for name in missing)
+        return {
+            **state,
+            "status": "blocked",
+            "block_reason": (
+                f"The issue requires consuming existing stack(s) {stacks}, but the "
+                "target repository contains no such stack or output contract. Create "
+                "the prerequisite stack first (or amend the issue) — IaC Smith will "
+                "not invent dependency wiring that has no real producer."
+            ),
+        }
     return {
         **state,
         "change_plan": plan_changes(
@@ -264,6 +277,7 @@ def pr_writer(state: IaCSmithState) -> IaCSmithState:
             change_plan=state["change_plan"],
             validation=state["validation"],
             structure_only=state.get("structure_only", False),
+            generated_files=state.get("generated_files"),
         ),
         "status": "pr_ready",
     }
@@ -275,6 +289,10 @@ def route_after_intake(state: IaCSmithState) -> str:
 
 def route_after_intent(state: IaCSmithState) -> str:
     return "end" if state.get("status") == "blocked" else "ruleset_loader"
+
+
+def route_after_planning(state: IaCSmithState) -> str:
+    return "end" if state.get("status") == "blocked" else "blackboard_planner"
 
 
 def route_after_validation(state: IaCSmithState) -> str:
@@ -314,7 +332,11 @@ def build_graph(
     )
     graph.add_edge("ruleset_loader", "repo_pattern_scanner")
     graph.add_edge("repo_pattern_scanner", "change_planner")
-    graph.add_edge("change_planner", "blackboard_planner")
+    graph.add_conditional_edges(
+        "change_planner",
+        route_after_planning,
+        {"end": END, "blackboard_planner": "blackboard_planner"},
+    )
     graph.add_edge("blackboard_planner", "code_generator")
     graph.add_edge("code_generator", "validation_runner")
     graph.add_conditional_edges(

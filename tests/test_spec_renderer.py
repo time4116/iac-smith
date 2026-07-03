@@ -113,3 +113,51 @@ def test_render_spec_uses_only_planned_paths_when_module_already_exists():
         'source = "../../../modules/aurora-postgres"'
         in files["environments/non-prod/aurora-postgres/terragrunt.hcl"]
     )
+
+
+def test_required_existing_stack_dependency_is_wired_generically(tmp_path):
+    (tmp_path / "modules" / "networking").mkdir(parents=True)
+    (tmp_path / "modules" / "networking" / "outputs.tf").write_text(
+        'output "network_id" {\n  value = "n"\n}\n\noutput "subnet_ids" {\n  value = []\n}\n',
+        encoding="utf-8",
+    )
+    intent = InfrastructureIntent(
+        raw_request="Create a data platform on the existing networking stack",
+        resource_type="data_platform",
+        environment_scope=EnvironmentScope.NON_PROD_ONLY,
+        environments=["non-prod"],
+        region="us-west-2",
+        depends_on_existing=["networking"],
+    )
+    change_plan = ChangePlan(
+        stack_name="data-platform",
+        environments=["non-prod"],
+        files_to_generate=[
+            "environments/non-prod/root.hcl",
+            "environments/non-prod/data-platform/terragrunt.hcl",
+            "modules/data-platform/main.tf",
+            "modules/data-platform/variables.tf",
+        ],
+        backend_resources={
+            "non-prod": BackendResource(bucket="iac-smith-state", lock_table="iac-smith-lock")
+        },
+        summary=[],
+    )
+
+    spec = build_spec_from_intent(
+        intent=intent,
+        change_plan=change_plan,
+        repo_patterns=RepoPatterns(existing_stack_paths=["modules/networking"]),
+        target_repo="time4116/iac-smith-demo-infra",
+        repo_path=tmp_path,
+    )
+    files = render_spec(spec)
+
+    assert any(
+        dep.producer == "networking" and dep.outputs == ["network_id", "subnet_ids"]
+        for dep in spec.dependencies
+    )
+    stack_hcl = files["environments/non-prod/data-platform/terragrunt.hcl"]
+    assert 'dependency "networking"' in stack_hcl
+    assert "network_id = dependency.networking.outputs.network_id" in stack_hcl
+    assert 'variable "network_id"' in files["modules/data-platform/variables.tf"]

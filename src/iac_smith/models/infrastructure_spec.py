@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 
 class ValueExpression(BaseModel):
@@ -29,6 +29,11 @@ class OutputSpec(BaseModel):
 
 
 class ResourceSpec(BaseModel):
+    # Unknown fields are rejected, not ignored: the removed raw-HCL `blocks`
+    # channel (or any hallucinated key) must surface as a repair finding instead
+    # of being silently dropped from the rendered resource.
+    model_config = ConfigDict(extra="forbid")
+
     type: str
     name: str
     # Values are native JSON: strings are verbatim Terraform expressions; numbers,
@@ -36,7 +41,11 @@ class ResourceSpec(BaseModel):
     # stringified HCL for everything made the model's natural (and unambiguous)
     # JSON typing a schema violation.
     arguments: dict[str, JsonValue] = Field(default_factory=dict)
-    blocks: list[str] = Field(default_factory=list)
+    # Structured nested blocks following Terraform JSON configuration semantics:
+    # each key is a provider-declared nested block name, each list entry is one
+    # block instance rendered deterministically to `name { ... }` HCL. This keeps
+    # the model out of raw-HCL authoring entirely.
+    nested_blocks: dict[str, list[dict[str, JsonValue]]] = Field(default_factory=dict)
 
 
 class ProviderResourcesSpec(BaseModel):

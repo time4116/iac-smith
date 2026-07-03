@@ -19,6 +19,7 @@ from iac_smith.dynamic_terraform import (
     _wire_foundation_dependency,
 )
 from iac_smith.graph import FileGenerator, IntentParser, build_graph
+from iac_smith.legitimacy import allow_structure_only, check_pr_legitimacy
 from iac_smith.models.change_plan import ChangePlan
 from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
@@ -36,7 +37,8 @@ from iac_smith.services.github import (
     GitHubPullRequest,
     GitHubPullRequestClient,
 )
-from iac_smith.spec_renderer import SpecRendererGenerator
+from iac_smith.spec_composer import SpecCompositionError
+from iac_smith.spec_renderer import SpecRendererGenerator, StructureOnlyBlocked
 from iac_smith.state import IaCSmithState
 from iac_smith.version_detection import ensure_terraform_terragrunt
 from iac_smith.workspace import apply_generated_files, commit_generated_files, create_branch
@@ -555,6 +557,11 @@ def _run_iac_smith_core(
     _log("IaC Smith: running graph.")
     try:
         result = cast(IaCSmithState, graph.invoke(state))
+    except (SpecCompositionError, StructureOnlyBlocked) as exc:
+        # Failing closed beats opening a placeholder PR that claims infrastructure
+        # it does not contain; the block comment carries the reason to the issue.
+        _log(f"IaC Smith: generation cannot produce a legitimate PR; blocking: {exc}")
+        return IaCSmithRunResult(status="blocked", block_reason=str(exc))
     except Exception as exc:
         if _is_bedrock_throttle(exc):
             return IaCSmithRunResult(
@@ -679,6 +686,7 @@ def _run_iac_smith_core(
             validation=result["validation"],
             runtime_checks=runtime_validation.checks,
             structure_only=result.get("structure_only", False),
+            generated_files=result["generated_files"],
         )
 
         if env.get("IAC_SMITH_GENERATE_LOCKFILE") != "0":
@@ -686,6 +694,22 @@ def _run_iac_smith_core(
             locks = generate_provider_locks(repo_path, env=version_env, log=_log)
             if locks:
                 _log(f"IaC Smith: wrote {len(locks)} provider lockfile(s).")
+
+    # Final legitimacy gate: derive a resource inventory from the rendered (and
+    # possibly runtime-repaired) Terraform and refuse to publish a PR whose
+    # contents cannot satisfy the request — regardless of how it got this far.
+    legitimacy_errors = check_pr_legitimacy(
+        generated_files=result["generated_files"],
+        change_plan=result["change_plan"],
+        intent=result["intent"],
+        pr_body=result.get("pr_body"),
+        structure_only=result.get("structure_only", False),
+        allow_structure_only=allow_structure_only(env),
+    )
+    if legitimacy_errors:
+        reason = " ".join(legitimacy_errors)
+        _log(f"IaC Smith: PR legitimacy gate blocked PR creation: {reason}")
+        return IaCSmithRunResult(status="blocked", branch=branch, block_reason=reason)
 
     if ensure_terraform_gitignore(repo_path):
         _log("IaC Smith: added a Terraform .gitignore for the generated repo.")
