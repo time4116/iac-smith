@@ -952,3 +952,80 @@ def test_resource_spec_has_no_raw_blocks_field():
         ResourceSpec.model_validate(
             {"type": "customcloud_database", "name": "db", "blocks": ["settings {}"]}
         )
+
+
+# --- Live-run regression (issue #66): fenced/prose-wrapped JSON responses ---
+
+
+def test_extract_json_object_tolerates_markdown_fence_and_trailing_prose():
+    from iac_smith.dynamic_terraform import _extract_json_object
+
+    document = {"resources": [{"type": "aws_vpc", "name": "foundation"}]}
+    fenced = f"```json\n{json.dumps(document)}\n```"
+    fenced_with_tail = (
+        f"{fenced}\n\nThe composition above uses this pattern:\n"
+        '```hcl\nresource "aws_vpc" "foundation" {}\n```'
+    )
+    preamble = f"Here is the JSON (shape: {{...}}):\n{fenced}"
+    trailing_junk = f"{json.dumps(document)}\nNote: braces like }} are fine."
+
+    assert _extract_json_object(fenced) == document
+    assert _extract_json_object(fenced_with_tail) == document
+    assert _extract_json_object(preamble) == document
+    assert _extract_json_object(trailing_junk) == document
+
+
+def test_extract_json_object_still_rejects_garbage():
+    import pytest as _pytest
+
+    from iac_smith.dynamic_terraform import _extract_json_object
+
+    with _pytest.raises(ValueError):
+        _extract_json_object("no json here at all")
+    with _pytest.raises(ValueError):
+        _extract_json_object('```json\n{"unclosed": [\n```')
+
+
+def test_compose_accepts_fenced_response_like_live_issue_66_run():
+    # The live stage-1 run failed all composition rounds because the model
+    # wrapped its (otherwise valid) document in a ```json fence with content
+    # after it. The extractor must recover the document on round 1.
+    fenced = (
+        "```json\n"
+        + json.dumps(_VALID_COMPOSITION)
+        + "\n```\n\nThis composition follows the module's allowed inputs."
+    )
+    composer, runtime = _composer([_VALID_SELECTION, fenced])
+
+    composed = composer.compose(
+        intent=_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    assert [r.type for r in composed.resources] == [
+        "customcloud_network",
+        "customcloud_database",
+    ]
+    assert len(runtime.prompts) == 2  # no repair round was needed
+
+
+def test_unparseable_error_reports_head_and_tail_of_response():
+    body = "x" * 400
+    garbage = f"prose start {body} prose end, no json"
+    composer, _ = _composer([garbage, garbage])
+
+    with pytest.raises(SpecCompositionError) as excinfo:
+        composer.compose(
+            intent=_intent(),
+            component_name="database-platform",
+            allowed_inputs=ALLOWED_INPUTS,
+            environments=["non-prod"],
+            provider_contracts=CONTRACTS,
+        )
+
+    message = str(excinfo.value)
+    assert "Response began:" in message
+    assert "and ended:" in message

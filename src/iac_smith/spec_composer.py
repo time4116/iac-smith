@@ -429,8 +429,14 @@ class SpecComposer:
                 try:
                     return _extract_json_object(text)
                 except ValueError as exc:
-                    snippet = " ".join(text.split())[:160]
-                    raise ValueError(f"{exc} Response began: {snippet!r}") from exc
+                    flattened = " ".join(text.split())
+                    detail = f"Response began: {flattened[:160]!r}"
+                    if len(flattened) > 160:
+                        # The head of a malformed response is usually fine; the
+                        # defect (truncation, stray fence, trailing prose) lives
+                        # at the tail, so surface both for diagnosability.
+                        detail += f" and ended: {flattened[-160:]!r}"
+                    raise ValueError(f"{exc} {detail}") from exc
             except transient as exc:
                 last_error = exc
             except BedrockStreamError as exc:
