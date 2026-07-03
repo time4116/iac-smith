@@ -112,7 +112,7 @@ def test_pr_body_claims_are_derived_from_rendered_inventory():
     # File claims come from what was actually rendered, not the plan.
     assert "`environments/non-prod/data-platform/terragrunt.hcl`" in body
     # Scope monitoring is computed from the rendered files, not planned intent.
-    assert "## Scope monitoring" in body
+    assert "## Scope Monitoring" in body
     assert "Files created or changed: 3" in body
     assert "Workload provider resources: 1 across 1 file(s)" in body
     assert "Backend bootstrap resources: 1" in body

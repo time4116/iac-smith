@@ -125,7 +125,7 @@ def build_pr_body(
         summary = _inventory_summary(generated_files)
         changed_files = "\n".join(f"* `{path}`" for path in sorted(generated_files))
         resources_section = f"\n## Generated resources\n\n{_resource_listing(generated_files)}\n"
-        scope_section = f"\n## Scope monitoring\n\n{_scope_monitoring(generated_files)}\n"
+        scope_section = f"\n## Scope Monitoring\n\n{_scope_monitoring(generated_files)}\n"
     else:
         summary = change_plan.summary
         changed_files = "\n".join(f"* `{path}`" for path in change_plan.files_to_generate)
