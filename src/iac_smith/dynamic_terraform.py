@@ -600,29 +600,77 @@ def _extract_text_from_bedrock_payload(payload: dict[str, Any]) -> str:
     return json.dumps(payload)
 
 
+_FENCED_BLOCK_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL)
+
+
+def _balanced_object_span(text: str) -> str | None:
+    """The first complete top-level ``{...}`` object, respecting string literals.
+
+    A first-``{``-to-last-``}`` slice breaks whenever the model appends prose or
+    a second code block containing a brace after the JSON document (the live
+    issue #66 run failed all three composition rounds exactly this way). Walking
+    brace depth outside of strings isolates the document regardless of trailing
+    junk.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return None
+
+
 def _extract_json_object(text: str) -> dict[str, Any]:
     # strict=False tolerates literal control characters (real newlines/tabs)
     # inside JSON strings — models emit them routinely in multi-line values
     # (e.g. HCL block bodies), and rejecting the whole document over them
     # turns an otherwise-valid response into a hard failure.
-    try:
-        value = json.loads(text, strict=False)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            raise ValueError(
-                "Terraform generation response must contain a valid JSON object."
-            ) from None
+    #
+    # Candidate order matters: the whole text, then fenced ```json blocks (a
+    # fence with a prose preamble parses nowhere else), then the balanced
+    # first object (fence or junk after the document), then the legacy
+    # first-{-to-last-} slice.
+    candidates = [text]
+    candidates.extend(match.group(1) for match in _FENCED_BLOCK_RE.finditer(text))
+    balanced = _balanced_object_span(text)
+    if balanced is not None:
+        candidates.append(balanced)
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(text[start : end + 1])
+    last_error: json.JSONDecodeError | None = None
+    for candidate in candidates:
         try:
-            value = json.loads(text[start : end + 1], strict=False)
+            value = json.loads(candidate, strict=False)
         except json.JSONDecodeError as exc:
-            raise ValueError(
-                "Terraform generation response must contain a valid JSON object."
-            ) from exc
-    if not isinstance(value, dict):
+            last_error = exc
+            continue
+        if isinstance(value, dict):
+            return value
+    if last_error is None:
         raise ValueError("Terraform generation response must be a JSON object.")
-    return value
+    raise ValueError(
+        "Terraform generation response must contain a valid JSON object."
+    ) from last_error
 
 
 # Exception members of the Bedrock InvokeModelWithResponseStream response shape.
