@@ -604,8 +604,6 @@ def render_provider_resources(resources) -> str:
         for name, entries in resource.nested_blocks.items():
             for entry in entries:
                 lines.extend(_render_nested_block(name, entry))
-        for block in resource.blocks:
-            lines.extend(f"  {line}" for line in block.splitlines())
         lines.append("}")
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks) + "\n"

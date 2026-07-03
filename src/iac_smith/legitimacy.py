@@ -81,15 +81,54 @@ def find_failure_banner(text: str) -> str | None:
     return None
 
 
-def _intent_tokens(intent: InfrastructureIntent) -> list[str]:
+def _class_tokens(resource_type: str) -> list[str]:
     """Class tokens derived from the parsed request — never a hardcoded service list."""
-    raw = " ".join([intent.resource_type or "", *intent.features]).lower()
     tokens = [
         token
-        for token in re.split(r"[^a-z0-9]+", raw)
+        for token in re.split(r"[^a-z0-9]+", resource_type.lower())
         if len(token) >= 3 or any(char.isdigit() for char in token)
     ]
     return list(dict.fromkeys(tokens))
+
+
+def _body_strings(value):
+    if isinstance(value, dict):
+        for key, entry in value.items():
+            yield str(key)
+            yield from _body_strings(entry)
+    elif isinstance(value, list):
+        for entry in value:
+            yield from _body_strings(entry)
+    elif isinstance(value, str):
+        yield value
+
+
+def _workload_resource_corpus(files: Mapping[str, str]) -> str:
+    """Text that is verifiably part of workload ``resource`` blocks.
+
+    Parses each workload ``.tf`` file and collects resource types, names,
+    argument/nested-block names, and string values — so a request-class token
+    can only be satisfied by the actual resource inventory, never by a comment,
+    an output, a README, or a module filename. Files that do not parse
+    contribute nothing (strict: unparseable Terraform cannot vouch for anything).
+    """
+    import hcl2
+
+    fragments: list[str] = []
+    for path in sorted(files):
+        if not path.endswith(".tf") or path.startswith(_BOOTSTRAP_PREFIX):
+            continue
+        try:
+            parsed = hcl2.loads(files[path])
+        except Exception:
+            continue
+        for entry in parsed.get("resource", []):
+            for rtype, instances in entry.items():
+                fragments.append(rtype)
+                for rname, body in instances.items():
+                    fragments.append(rname)
+                    fragments.extend(_body_strings(body))
+    return "\n".join(fragments).lower()
 
 
 def _planned_module_dirs(change_plan: ChangePlan) -> list[str]:
@@ -144,14 +183,13 @@ def check_pr_legitimacy(
                     "no provider resources."
                 )
         else:
-            tokens = _intent_tokens(intent)
-            module_text = "\n".join(
-                content for path, content in generated_files.items() if path.startswith("modules/")
-            ).lower()
-            if tokens and not any(token in module_text for token in tokens):
+            tokens = _class_tokens(intent.resource_type or "")
+            corpus = _workload_resource_corpus(generated_files)
+            if tokens and not any(token in corpus for token in tokens):
                 errors.append(
-                    "None of the requested infrastructure classes appear in the "
-                    f"generated workload modules. Request tokens: {', '.join(tokens)}. "
+                    "The requested infrastructure class is absent from the generated "
+                    "resource inventory (resource types, names, arguments, and values "
+                    f"were checked). Request class tokens: {', '.join(tokens)}. "
                     f"Generated resources: {', '.join(workload)}."
                 )
 

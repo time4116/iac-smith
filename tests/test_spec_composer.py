@@ -132,7 +132,7 @@ _VALID_COMPOSITION = {
                 "engine": "postgres",
                 "network_ref": "${customcloud_network.this.id}",
             },
-            "blocks": ['settings {\n  tier = "small"\n}'],
+            "nested_blocks": {"settings": [{"tier": "small"}]},
         },
     ],
     "outputs": [
@@ -326,7 +326,6 @@ def test_validation_rejects_unparseable_rendered_hcl():
                 type="customcloud_database",
                 name="db",
                 arguments={"engine": "postgres"},
-                blocks=["settings {"],
             )
         ],
         outputs=[OutputSpec(name="broken", description="Bad.", value=")))")],
@@ -334,15 +333,13 @@ def test_validation_rejects_unparseable_rendered_hcl():
 
     errors = _validate(composed)
 
-    assert any("rendered module resources do not parse as valid HCL" in e for e in errors)
     assert any("output broken do not parse as valid HCL" in e for e in errors)
 
 
 def test_compose_tolerates_literal_newlines_inside_json_strings():
     raw = (
         '{"resources": [{"type": "customcloud_database", "name": "db", '
-        '"arguments": {"engine": "postgres"}, '
-        '"blocks": ["settings {\n  tier = \\"small\\"\n}"]}], '
+        '"arguments": {"engine": "postgres", "name": "primary\n  replica"}}], '
         '"outputs": [], "assumptions": []}'
     )
     composer, _ = _composer([{"resource_types": ["customcloud_database"]}, raw])
@@ -355,7 +352,7 @@ def test_compose_tolerates_literal_newlines_inside_json_strings():
         provider_contracts=CONTRACTS,
     )
 
-    assert composed.resources[0].blocks == ['settings {\n  tier = "small"\n}']
+    assert composed.resources[0].arguments["name"] == "primary\n  replica"
 
 
 def test_selection_repairs_unparseable_response():
@@ -464,7 +461,7 @@ def test_validation_flags_hallucinated_type_argument_and_block():
                 type="customcloud_database",
                 name="db",
                 arguments={"engine": "postgres"},
-                blocks=["replication {\n  copies = 2\n}"],
+                nested_blocks={"replication": [{"copies": 2}]},
             ),
         ]
     )
@@ -579,7 +576,7 @@ def test_render_provider_resources_indents_multiline_blocks():
                 type="customcloud_database",
                 name="db",
                 arguments={"engine": "postgres"},
-                blocks=['settings {\n  tier = "small"\n}'],
+                nested_blocks={"settings": [{"tier": "small"}]},
             )
         ]
     )
@@ -919,3 +916,39 @@ def test_compose_rejects_oversized_selection_with_staged_plan(monkeypatch):
     assert "too broad" in message
     assert "stage 1:" in message
     assert "IAC_SMITH_MAX_RESOURCE_TYPES" in message
+
+
+def test_compose_rejects_legacy_raw_blocks_channel_with_actionable_finding():
+    legacy = {
+        "resources": [
+            {
+                "type": "customcloud_database",
+                "name": "db",
+                "arguments": {"engine": "postgres"},
+                "blocks": ['settings {\n  tier = "small"\n}'],
+            }
+        ],
+        "outputs": [],
+        "assumptions": [],
+    }
+    composer, runtime = _composer([_VALID_SELECTION, legacy, _VALID_COMPOSITION])
+
+    composed = composer.compose(
+        intent=_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    assert len(composed.resources) == 2
+    repair_prompt = runtime.prompts[2]
+    assert "raw-HCL `blocks` channel does not exist" in repair_prompt
+    assert "nested_blocks" in repair_prompt
+
+
+def test_resource_spec_has_no_raw_blocks_field():
+    with pytest.raises(Exception, match="[Ee]xtra"):
+        ResourceSpec.model_validate(
+            {"type": "customcloud_database", "name": "db", "blocks": ["settings {}"]}
+        )

@@ -111,6 +111,13 @@ def test_pr_body_claims_are_derived_from_rendered_inventory():
     assert "Planned intent that must NOT be echoed" not in body
     # File claims come from what was actually rendered, not the plan.
     assert "`environments/non-prod/data-platform/terragrunt.hcl`" in body
+    # Scope monitoring is computed from the rendered files, not planned intent.
+    assert "## Scope monitoring" in body
+    assert "Files created or changed: 3" in body
+    assert "Workload provider resources: 1 across 1 file(s)" in body
+    assert "Backend bootstrap resources: 1" in body
+    assert "Module directories: `modules/data-platform`" in body
+    assert "Environment stacks: `environments/non-prod/data-platform`" in body
 
 
 def test_pr_body_says_structure_only_validation_scope_when_placeholder():

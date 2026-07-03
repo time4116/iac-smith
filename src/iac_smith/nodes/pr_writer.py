@@ -63,6 +63,41 @@ def _inventory_summary(generated_files: dict[str, str]) -> list[str]:
     return lines
 
 
+def _scope_monitoring(generated_files: dict[str, str]) -> str:
+    """Scope facts computed from the rendered files, never from planned intent."""
+    workload, backend = _split_inventory(generated_files)
+    module_dirs = sorted(
+        {"/".join(path.split("/")[:2]) for path in generated_files if path.startswith("modules/")}
+    )
+    env_stacks = sorted(
+        {
+            "/".join(path.split("/")[:3])
+            for path in generated_files
+            if path.startswith("environments/") and len(path.split("/")) > 3
+        }
+    )
+    workflow_files = sorted(
+        path for path in generated_files if path.startswith(".github/workflows/")
+    )
+    return "\n".join(
+        [
+            f"* Files created or changed: {len(generated_files)}",
+            (
+                f"* Workload provider resources: "
+                f"{sum(len(records) for records in workload.values())} "
+                f"across {len(workload)} file(s)"
+            ),
+            (f"* Backend bootstrap resources: {sum(len(records) for records in backend.values())}"),
+            f"* Module directories: {', '.join(f'`{d}`' for d in module_dirs) or 'none'}",
+            f"* Environment stacks: {', '.join(f'`{d}`' for d in env_stacks) or 'none'}",
+            f"* Workflow files: {', '.join(f'`{p}`' for p in workflow_files) or 'none'}",
+            "",
+            "All counts above are derived from the rendered files in this PR, not from "
+            "the parsed request.",
+        ]
+    )
+
+
 def _resource_listing(generated_files: dict[str, str]) -> str:
     inventory = resource_inventory(generated_files)
     if not inventory:
@@ -90,10 +125,12 @@ def build_pr_body(
         summary = _inventory_summary(generated_files)
         changed_files = "\n".join(f"* `{path}`" for path in sorted(generated_files))
         resources_section = f"\n## Generated resources\n\n{_resource_listing(generated_files)}\n"
+        scope_section = f"\n## Scope monitoring\n\n{_scope_monitoring(generated_files)}\n"
     else:
         summary = change_plan.summary
         changed_files = "\n".join(f"* `{path}`" for path in change_plan.files_to_generate)
         resources_section = ""
+        scope_section = ""
     backend_lines = "\n".join(
         f"* `{env}`: S3 `{resource.bucket}`, DynamoDB `{resource.lock_table}`"
         for env, resource in change_plan.backend_resources.items()
@@ -135,7 +172,7 @@ Stack: `{change_plan.stack_name}`
 ## Files created or changed
 
 {changed_files}
-
+{scope_section}
 ## Backend resources
 
 {backend_lines}

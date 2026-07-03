@@ -42,7 +42,6 @@ _BARE_REFERENCE_HEAD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\.[A-Za-z_]")
 _VAR_REF_RE = re.compile(r"\bvar\.([A-Za-z_][A-Za-z0-9_]*)")
 _FORBIDDEN_ROOT_RE = re.compile(r"\b(local|data|module)\.")
 _RESOURCE_REF_RE = re.compile(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\.([a-z][a-z0-9_]*)\b")
-_BLOCK_NAME_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_-]*)")
 _NESTED_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -78,6 +77,13 @@ def _shape_findings(exc: ValidationError, limit: int = 12) -> list[str]:
     errors = exc.errors()
     findings = [
         (
+            f"Response field `{'.'.join(str(part) for part in err['loc'])}`: the raw-HCL "
+            "`blocks` channel does not exist. Express every nested block as a structured "
+            '`nested_blocks` entry, e.g. {"nested_blocks": {"<block name>": [{"<arg>": '
+            "<value>}]}}."
+        )
+        if err["type"] == "extra_forbidden" and err["loc"] and err["loc"][-1] == "blocks"
+        else (
             f"Response field `{'.'.join(str(part) for part in err['loc'])}`: {err['msg']}. "
             "Match the required JSON shape exactly."
         )
@@ -120,9 +126,9 @@ def _bare_reference_errors(
 def _hcl_parse_errors(rendered: str, *, scope: str) -> list[str]:
     """Reject rendered HCL that does not parse.
 
-    The contract gate and reference scans are regex-level; a raw ``blocks``
-    string or an expression the model wrote can still be syntactically invalid
-    HCL that Terraform would only reject at runtime. Parsing the rendered text
+    The contract gate and reference scans are regex-level; an expression the
+    model wrote (e.g. an output value) can still be syntactically invalid HCL
+    that Terraform would only reject at runtime. Parsing the rendered text
     turns that into a pre-render repair finding.
     """
     import hcl2
@@ -238,17 +244,6 @@ def validate_composed_component(
                         f"{', '.join(contract.allowed_arguments)} — or drop the block if "
                         f"no name fits; never invent one."
                     )
-            for block in resource.blocks:
-                match = _BLOCK_NAME_RE.match(block)
-                if not match:
-                    errors.append(f"`{scope}` has a nested block without a parseable name.")
-                    continue
-                if allowed_args and match.group(1) not in allowed_args:
-                    errors.append(
-                        f"`{scope}` uses unsupported nested block `{match.group(1)}`. "
-                        f"Allowed arguments and blocks from {contract.source}: "
-                        f"{', '.join(contract.allowed_arguments)}."
-                    )
         for block_name, entries in resource.nested_blocks.items():
             for entry in entries:
                 for key in entry:
@@ -272,7 +267,7 @@ def validate_composed_component(
                 argument_leaves, scope=scope, known_resource_types=known_resource_types
             )
         )
-        text = "\n".join([*argument_leaves, *resource.blocks])
+        text = "\n".join(argument_leaves)
         errors.extend(
             _reference_errors(
                 text,

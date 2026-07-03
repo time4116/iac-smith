@@ -167,7 +167,39 @@ def test_requested_resource_class_absent_from_inventory_blocks():
 
     errors = check_pr_legitimacy(generated_files=files, change_plan=_plan(), intent=_intent())
 
-    assert any("requested infrastructure classes" in error for error in errors)
+    assert any("requested infrastructure class is absent" in error for error in errors)
+
+
+def test_class_tokens_in_comments_or_outputs_cannot_satisfy_the_gate():
+    # The class check operates on parsed resource blocks only: a token that
+    # appears in a comment or an output must not legitimize the inventory.
+    files = {
+        "modules/data-platform/main.tf": (
+            "# Aurora PostgreSQL data platform (comment only)\n"
+            'resource "null_resource" "noop" {\n  triggers = {}\n}\n'
+        ),
+        "modules/data-platform/outputs.tf": (
+            'output "aurora_postgresql_note" {\n  value = "aurora-postgresql"\n}\n'
+        ),
+    }
+
+    errors = check_pr_legitimacy(generated_files=files, change_plan=_plan(), intent=_intent())
+
+    assert any("requested infrastructure class is absent" in error for error in errors)
+
+
+def test_class_tokens_match_argument_values_inside_resources():
+    # "aurora" never appears in a resource *type*; the engine argument value is
+    # what carries the class, and it must count.
+    files = {
+        "modules/data-platform/main.tf": (
+            'resource "aws_rds_cluster" "this" {\n  engine = "aurora-postgresql"\n}\n'
+        ),
+    }
+
+    errors = check_pr_legitimacy(generated_files=files, change_plan=_plan(), intent=_intent())
+
+    assert errors == []
 
 
 def test_required_existing_dependency_must_be_wired_even_with_opt_in():
