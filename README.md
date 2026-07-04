@@ -120,6 +120,7 @@ IaC Smith turns those requests into reviewable pull requests while preserving pl
 - [docs/LAYOUT.md](docs/LAYOUT.md): Terraform/Terragrunt directory layout for greenfield projects
 - [AGENT_REFERENCE.md](AGENT_REFERENCE.md): architecture and implementation reference
 - [docs/ARCHITECTURE_FLOW.md](docs/ARCHITECTURE_FLOW.md): Mermaid architecture flow
+- [docs/PROJECT_BRIEF.md](docs/PROJECT_BRIEF.md): current product and portfolio positioning
 
 ## License
 

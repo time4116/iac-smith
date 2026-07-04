@@ -3,7 +3,7 @@
 IaC Smith requires two repositories:
 
 1. Controller repo: `time4116/iac-smith`
-2. Target demo infra repo: `time4116/iac-smith-demo-infra`
+2. Target infrastructure repo: a fixed, allowlisted Terraform/Terragrunt repository such as `<owner>/<target-infra-repo>`
 
 IaC Smith never applies infrastructure from the controller repo.
 
@@ -11,11 +11,12 @@ IaC Smith never applies infrastructure from the controller repo.
 
 Configure these in the controller repo:
 
-* Secret `IAC_SMITH_TARGET_REPO_PAT`: fine-grained PAT scoped only to `time4116/iac-smith-demo-infra` with contents and pull request write permissions.
-* Secret `BEDROCK_MODEL_ID`: Bedrock model ID or inference profile ARN. Do not hardcode this in source.
-* Secret `AWS_ROLE_ARN_NON_PROD`: non-production IAM role ARN used by the controller workflow to call Bedrock and by generated non-prod validation workflows.
-* Secret `AWS_ROLE_ARN_PROD`: production IAM role ARN used by generated production validation workflows.
-* Variable `AWS_REGION`: optional, defaults to `us-west-2`.
+- Secret `IAC_SMITH_TARGET_REPO_PAT`: fine-grained PAT scoped only to the target infrastructure repo with Contents and Pull requests write permissions.
+- Secret `BEDROCK_MODEL_ID`: Bedrock model ID or inference profile ARN. Do not hardcode this in source.
+- Secret `AWS_ROLE_ARN_NON_PROD`: non-production IAM role ARN used by the controller workflow to call Bedrock and by generated non-prod validation workflows.
+- Secret `AWS_ROLE_ARN_PROD`: production IAM role ARN used by generated production validation workflows.
+- Variable `AWS_REGION`: optional, defaults to `us-west-2`.
+- Variable or workflow env `IAC_SMITH_ALLOWED_TARGET_REPO`: exact `<owner>/<target-infra-repo>` value the controller is allowed to write to.
 
 The workflow only runs when the `iac-smith` label is applied by `time4116`. If ownership changes, update `.github/workflows/issue-to-pr.yml` deliberately instead of broadening this check to all users.
 
@@ -29,25 +30,25 @@ Do not expose the target repo PAT as a generic `GITHUB_TOKEN` unless a specific 
 
 ## Fine-grained PAT scope
 
-The target repo PAT should be restricted to this repository only:
+The target repo PAT should be restricted to the target infrastructure repository only:
 
 ```text
-time4116/iac-smith-demo-infra
+<owner>/<target-infra-repo>
 ```
 
 Required permissions:
 
-* Contents: read and write
-* Pull requests: read and write
-* Metadata: read
+- Contents: read and write
+- Pull requests: read and write
+- Metadata: read
 
 Do not grant organization-wide access. Do not reuse a personal all-repos token.
 
 ## Bedrock setup
 
-Bedrock is required for the MVP intent parser and the default dynamic Terraform/Terragrunt generator.
+Bedrock is required for intent parsing, typed-spec composition, and bounded repair. IaC Smith does not ask Bedrock to author arbitrary HCL by default: the default path asks the model for structured resource or module selections, validates those selections against harvested schemas, and renders Terraform/Terragrunt deterministically.
 
-The controller sends Bedrock structured issue intent, the planned file set, loaded rules, repo-scanned conventions, and bounded representative Terraform/Terragrunt snippets from the target repo. Generation must follow existing repo patterns unless the issue explicitly asks not to, and each generated file is rejected if it returns a path outside the plan. Generated files are statically reviewed immediately; on hard failures, IaC Smith sends the specific review errors back to Bedrock for one bounded repair attempt before moving to sibling files.
+The controller sends Bedrock structured issue intent, the planned file set, loaded rules, repo-scanned conventions, bounded representative Terraform/Terragrunt snippets from the target repo, provider or module contracts, and validation findings from previous attempts. Generation must follow existing repo patterns unless the issue explicitly asks not to. Generated paths are rejected if they fall outside the deterministic plan, and final output is rejected if the rendered resource inventory does not prove the requested infrastructure was created.
 
 Create IAM roles trusted by GitHub Actions OIDC and store their ARNs as `AWS_ROLE_ARN_NON_PROD` and `AWS_ROLE_ARN_PROD`. Restrict the controller trust policy to this controller repo and the `main` branch.
 
@@ -104,21 +105,22 @@ For early local testing, a broader Bedrock resource may be temporarily easier, b
 
 ## Target repo safety boundary
 
-The controller workflow sets:
+The controller workflow should set matching target and allowlist values:
 
 ```text
-IAC_SMITH_ALLOWED_TARGET_REPO=time4116/iac-smith-demo-infra
+IAC_SMITH_TARGET_REPO=<owner>/<target-infra-repo>
+IAC_SMITH_ALLOWED_TARGET_REPO=<owner>/<target-infra-repo>
 ```
 
-The CLI should fail closed if `IAC_SMITH_TARGET_REPO` does not exactly match that allowlist value.
+The CLI fails closed if `IAC_SMITH_TARGET_REPO` does not exactly match that allowlist value.
 
 ## Target repo apply workflow
 
-The controller only generates and opens PRs; the generated `.github/workflows/terraform-apply.yml` runs in the **target** repo after a PR is merged to `main`. For it to work — and to be safe to make public — configure the target repo (`time4116/iac-smith-demo-infra`):
+The controller only generates and opens PRs; the generated `.github/workflows/terraform-apply.yml` runs in the target repo after a PR is merged to `main`. For it to work safely, configure the target repo:
 
-1. **Approval gate (GitHub Environment).** The apply workflow gates every AWS-mutating job behind `environment: <env>` (e.g. `non-prod`). The workflow only *references* the environment by name; the protection is a repo setting. In the target repo, go to **Settings → Environments**, create an environment matching the generated name (e.g. `non-prod`), and add **Required reviewers**. Until you do this, GitHub auto-creates the environment with no protection on first run, so a merge would apply without sign-off. The gate becomes enforceable once the repo can use environment protection rules (public repos, or private repos on a plan that includes them).
+1. **Approval gate (GitHub Environment).** The apply workflow gates every AWS-mutating job behind `environment: <env>` (e.g. `non-prod`). The workflow only references the environment by name; the protection is a repo setting. In the target repo, go to **Settings → Environments**, create an environment matching the generated name (e.g. `non-prod`), and add **Required reviewers**. Until you do this, GitHub auto-creates the environment with no protection on first run, so a merge would apply without sign-off. The gate becomes enforceable once the repo can use environment protection rules (public repos, or private repos on a plan that includes them).
 
-2. **OIDC role + secret for applying.** The apply workflow assumes `${{ secrets.AWS_ROLE_ARN_NON_PROD }}` via GitHub Actions OIDC. Add that secret to the target repo and create/extend an IAM role whose trust policy allows the target repo's OIDC subject (`repo:time4116/iac-smith-demo-infra:ref:refs/heads/main`), with the permissions needed to apply the generated infrastructure. This is separate from the controller's Bedrock role.
+2. **OIDC role + secret for applying.** The apply workflow assumes `${{ secrets.AWS_ROLE_ARN_NON_PROD }}` via GitHub Actions OIDC. Add that secret to the target repo and create or extend an IAM role whose trust policy allows the target repo's OIDC subject (`repo:<owner>/<target-infra-repo>:ref:refs/heads/main`), with the permissions needed to apply the generated infrastructure. This is separate from the controller's Bedrock role.
 
 Making the target repo public exposes the generated Terraform/Terragrunt and the backend resource names it hardcodes (state bucket and lock-table names); confirm those contain nothing sensitive before flipping visibility. Secrets are never in the repo — they are referenced as `${{ secrets.* }}` and stored in repo settings.
 
