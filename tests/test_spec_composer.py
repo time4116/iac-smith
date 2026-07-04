@@ -34,6 +34,7 @@ CONTRACTS = {
         name="customcloud_database",
         allowed_arguments=["engine", "name", "network_ref", "port", "public", "settings", "tags"],
         required_arguments=["engine"],
+        block_names=["settings"],
         source="fixture schema",
     ),
 }
@@ -1396,3 +1397,74 @@ def test_compose_carries_block_names_for_the_renderer():
     rendered = render_provider_resources(composed.resources, composed.block_names)
     assert "settings {" in rendered
     assert 'tier = "small"' in rendered
+
+
+# --- Third showcase round (issue #70): bidirectional canonicalization, inner requirements ---
+
+
+_ALARM_CONTRACTS = {
+    "customcloud_alarm": TerraformContract(
+        kind="provider_resource",
+        name="customcloud_alarm",
+        allowed_arguments=["name", "dimensions", "index"],
+        required_arguments=["name"],
+        block_names=["index"],
+        block_required_arguments={"index": ["projection_type"]},
+        source="fixture schema",
+    )
+}
+
+
+def test_attribute_placed_in_nested_blocks_moves_back_to_arguments():
+    from iac_smith.spec_composer import normalize_composed_blocks
+
+    composed = ComposedComponent(
+        resources=[
+            ResourceSpec(
+                type="customcloud_alarm",
+                name="throttle",
+                arguments={"name": "throttle"},
+                # `dimensions` is a plain map attribute; the live #70 run put it
+                # in nested_blocks and Terraform rejected the rendered block.
+                nested_blocks={"dimensions": [{"TableName": "sessions"}]},
+            )
+        ]
+    )
+
+    normalized = normalize_composed_blocks(composed, _ALARM_CONTRACTS)
+    resource = normalized.resources[0]
+
+    assert "dimensions" not in resource.nested_blocks
+    assert resource.arguments["dimensions"] == {"TableName": "sessions"}
+    rendered = render_provider_resources(normalized.resources, {"customcloud_alarm": ["index"]})
+    assert "dimensions = {" in rendered
+    assert "dimensions {" not in rendered
+    hcl2.loads(rendered)
+
+
+def test_missing_required_argument_inside_nested_block_is_a_finding():
+    composed = ComposedComponent(
+        resources=[
+            ResourceSpec(
+                type="customcloud_alarm",
+                name="throttle",
+                arguments={"name": "throttle"},
+                # The live #70 GSI failure shape: block present, required inner
+                # argument absent.
+                nested_blocks={"index": [{"name": "by_entity"}]},
+            )
+        ]
+    )
+
+    errors = validate_composed_component(
+        composed,
+        provider_contracts=_ALARM_CONTRACTS,
+        known_resource_types=set(_ALARM_CONTRACTS),
+        allowed_inputs=ALLOWED_INPUTS,
+        component_name="session-store",
+    )
+
+    assert any(
+        "nested block `index` entry 1 is missing required argument `projection_type`" in error
+        for error in errors
+    )

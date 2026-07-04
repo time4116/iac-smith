@@ -21,6 +21,10 @@ class TerraformContract(BaseModel):
     # HCL, never `name = [...]` — Terraform rejects the latter as an unsupported
     # argument even though the name itself is schema-legal.
     block_names: list[str] = Field(default_factory=list)
+    # Per nested-block name (at any depth): the attributes the schema marks
+    # required inside it, so composition can reject e.g. a global_secondary_index
+    # missing projection_type before spending a terraform validate round on it.
+    block_required_arguments: dict[str, list[str]] = Field(default_factory=dict)
     source: str
 
 
@@ -243,6 +247,7 @@ def contracts_from_provider_schema(
                 allowed_arguments=allowed,
                 required_arguments=required,
                 block_names=sorted(_collect_block_names(block)),
+                block_required_arguments=_collect_block_required(block),
                 source=f"{source} ({provider_label})",
             )
     return contracts
@@ -259,6 +264,24 @@ def _collect_block_names(block: dict) -> set[str]:
         names.add(name)
         names |= _collect_block_names((spec or {}).get("block") or {})
     return names
+
+
+def _collect_block_required(block: dict) -> dict[str, list[str]]:
+    """Required attributes per nested-block name, flattened across the tree."""
+    result: dict[str, list[str]] = {}
+    for name, spec in (block.get("block_types") or {}).items():
+        inner = (spec or {}).get("block") or {}
+        attributes = inner.get("attributes") or {}
+        required = sorted(
+            attr
+            for attr, attr_spec in attributes.items()
+            if isinstance(attr_spec, dict) and attr_spec.get("required")
+        )
+        if required:
+            result.setdefault(name, required)
+        for inner_name, inner_required in _collect_block_required(inner).items():
+            result.setdefault(inner_name, inner_required)
+    return result
 
 
 _UNSUPPORTED_ARG_RE = re.compile(
