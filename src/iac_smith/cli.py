@@ -546,6 +546,10 @@ def _run_iac_smith_core(
     else:
         generator = SpecRendererGenerator(logger=_log)
         selected_file_generator = generator.generate_files
+        # Runtime repair in spec mode re-runs composition with the terraform
+        # validate/plan findings — the schema gate cannot see inside nested
+        # blocks, so the validator is the composer's second reviewer.
+        runtime_repairer = generator
     graph = (
         build_graph(
             intent_parser_fn=intent_parser_fn,

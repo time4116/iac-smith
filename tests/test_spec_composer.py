@@ -1137,3 +1137,93 @@ def test_compose_prompt_forbids_unquoted_output_tokens():
 
     assert "never emit an unquoted token" in runtime.prompts[1]
     assert "not a JSON template" not in runtime.prompts[1]
+
+
+# --- Live showcase-run regressions (issues #68/#69/#70) ---
+
+
+def test_spec_renderer_repair_files_recomposes_with_runtime_findings(monkeypatch):
+    _patch_resolver(monkeypatch)
+
+    class RecordingComposer:
+        def __init__(self):
+            self.negative_patterns_seen: list[list[str]] = []
+
+        def compose(self, **kwargs):
+            self.negative_patterns_seen.append(list(kwargs.get("negative_patterns") or []))
+            return ComposedComponent.model_validate(_VALID_COMPOSITION)
+
+    composer = RecordingComposer()
+    generator = SpecRendererGenerator(composer=composer)
+    ansi_error = (
+        "terraform validate failed:\n"
+        "\x1b[31m│\x1b[0m Error: Unsupported argument\n"
+        '\x1b[31m│\x1b[0m An argument named "index_name" is not expected here.'
+    )
+
+    files = generator.repair_files(
+        intent=_intent(),
+        change_plan=_plan(),
+        repo_patterns=RepoPatterns(),
+        target_repo="time4116/iac-smith-demo-infra",
+        generated_files={},
+        repair_errors=[ansi_error],
+    )
+
+    assert 'resource "customcloud_network" "this"' in files["modules/database-platform/main.tf"]
+    carried = composer.negative_patterns_seen[-1]
+    assert any("index_name" in pattern for pattern in carried)
+    # ANSI escapes must not reach the prompt.
+    assert all("\x1b" not in pattern for pattern in carried)
+
+    # A second repair round must still remember the first round's findings.
+    generator.repair_files(
+        intent=_intent(),
+        change_plan=_plan(),
+        repo_patterns=RepoPatterns(),
+        target_repo="time4116/iac-smith-demo-infra",
+        generated_files={},
+        repair_errors=["second failure"],
+    )
+    carried_second = composer.negative_patterns_seen[-1]
+    assert any("index_name" in pattern for pattern in carried_second)
+    assert any("second failure" in pattern for pattern in carried_second)
+
+
+def test_compose_prompt_forbids_minified_json_and_data_sources():
+    composer, runtime = _composer([_VALID_SELECTION, _VALID_COMPOSITION])
+
+    composer.compose(
+        intent=_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    prompt = runtime.prompts[1]
+    assert "do NOT" in prompt and "minify" in prompt
+    assert "Data sources do not exist here" in prompt
+    assert "omit its optional name argument" in prompt
+
+
+def test_data_reference_finding_names_the_unique_name_alternative():
+    composed = ComposedComponent(
+        resources=[
+            ResourceSpec(
+                type="customcloud_database",
+                name="db",
+                arguments={
+                    "engine": "postgres",
+                    "name": "app-${data.customcloud_caller.account_id}",
+                },
+            )
+        ]
+    )
+
+    errors = _validate(composed)
+
+    assert any(
+        "`data` values do not exist" in error and "omit the optional name argument" in error
+        for error in errors
+    )

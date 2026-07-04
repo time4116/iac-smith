@@ -154,11 +154,21 @@ def _reference_errors(
 ) -> list[str]:
     errors: list[str] = []
     for root in sorted({m.group(1) for m in _FORBIDDEN_ROOT_RE.finditer(text)}):
-        errors.append(
+        message = (
             f"`{scope}` references `{root}.` — `{root}` values do not exist in a "
             f"spec-rendered module. Use a literal, an allowed input variable, or a "
             f"sibling resource attribute instead."
         )
+        if root == "data":
+            # The live #68 run burned every round reaching for
+            # data.aws_caller_identity to build a unique bucket name; the
+            # finding must name the working alternative, not just reject.
+            message += (
+                " If this was for a globally unique name, omit the optional name "
+                "argument entirely (the provider generates one) or build the name "
+                "only from the allowed input variables."
+            )
+        errors.append(message)
     allowed = set(allowed_inputs)
     for name in sorted({m.group(1) for m in _VAR_REF_RE.finditer(text)}):
         if name not in allowed:
@@ -537,7 +547,7 @@ class SpecComposer:
                 if attempt == 0:
                     hint = (
                         f"- Your previous response could not be parsed: {exc} Return "
-                        'exactly one minified JSON object of the form {"resource_types":'
+                        'exactly one JSON object of the form {"resource_types":'
                         ' ["<type>", ...]} with no prose and no markdown fences.'
                     )
                     self._log(
@@ -633,14 +643,19 @@ class SpecComposer:
             "- You may add resource types beyond the contracts above only if you are",
             "  certain the provider defines them; they are validated the same way.",
             "- Resource and output names are lowercase snake_case identifiers.",
+            "- Data sources do not exist here. When a resource needs a globally",
+            "  unique name (e.g. an S3 bucket), omit its optional name argument so",
+            "  the provider generates one, or derive it only from the allowed input",
+            "  variables — never from account or caller identity.",
             "- `outputs` expose the identifiers consumers of this stack need; each",
             "  output `value` is a JSON string whose content is a plain Terraform",
             '  expression without ${...} interpolation — e.g. "value":',
             '  "aws_db_instance.this.arn". It must still be a quoted JSON string;',
             "  never emit an unquoted token as a JSON value.",
-            "- Return minified JSON without indentation or line breaks between keys;",
-            "  every wasted token risks truncating the document. JSON-escape newlines",
-            "  (\\n) inside string values — never emit a raw line break inside a string.",
+            "- Format the JSON with normal indentation and one key per line — do NOT",
+            "  minify: balanced braces matter far more than token count, and the",
+            "  output cap is generous. JSON-escape newlines (\\n) inside string",
+            "  values — never emit a raw line break inside a string.",
         ]
         if findings:
             lines.extend(
@@ -707,8 +722,9 @@ class SpecComposer:
                 # temperature 0 the retry is not a verbatim replay.
                 findings = [
                     f"Your previous response could not be parsed: {exc} Return exactly "
-                    "one minified JSON object — no prose, no markdown fences, and "
-                    "JSON-escaped newlines (\\n) inside string values."
+                    "one JSON object, formatted with normal indentation so every brace "
+                    "balances — no prose, no markdown fences, and JSON-escaped newlines "
+                    "(\\n) inside string values."
                 ]
                 self._log(
                     f"IaC Smith: composition round {round_number} response was not "
