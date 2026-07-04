@@ -42,7 +42,7 @@ All configuration is via environment variables. There are no CLI flags.
 | `IAC_SMITH_WORKDIR` | System temp | Dir to clone target repo into |
 | `IAC_SMITH_SKIP_RUNTIME_VALIDATION` | unset | Set to `1` to skip terraform/terragrunt validation |
 | `IAC_SMITH_SKIP_PUSH` | unset | Set to `1` to skip git push and PR creation |
-| `IAC_SMITH_RUNTIME_REPAIR_ATTEMPTS` | `3` | Max Bedrock repair attempts after runtime failures |
+| `IAC_SMITH_RUNTIME_REPAIR_ATTEMPTS` | `3` | Max Bedrock repair attempts after runtime failures (the workflow sets `5` unless the repo var overrides it) |
 | `BEDROCK_MODEL_ID` | (required) | Primary Bedrock model/inference-profile for generation and repair |
 | `BEDROCK_ESCALATION_MODEL_ID` | unset | Stronger model used for one penultimate repair attempt (failing files only) when the primary is stuck; unset or equal to `BEDROCK_MODEL_ID` disables escalation |
 | `IAC_SMITH_BEDROCK_CONCURRENCY` | `4` | Parallel file generation threads |
@@ -234,6 +234,18 @@ workload to it. When no foundation stack is present,
 block and the inputs that referenced `dependency.foundation.outputs.*`, so an orphan
 cross-stack reference can never reach `terragrunt plan` as a hard "no variable named
 dependency" error.
+
+Foundation naming is an alias family, not a single literal: `FOUNDATION_ALIASES`
+(`foundation`, `vpc`, `vpc-foundation`) drives detection (`_repo_has_foundation` matches
+the last path segment of existing stacks), wiring, and gating, so a repo whose network
+stack is called `vpc-foundation` is recognized the same as one called `foundation`.
+
+**Prerequisite gate:** when parsed intent declares `depends_on_existing` stacks,
+`missing_prerequisite_stacks` checks each (with alias matching for the foundation
+family) against the stacks that actually exist in the target repo. If any are missing,
+the change_planner node blocks the run with an explicit "create the prerequisite
+first" message instead of generating dependency wiring against stacks that do not
+exist.
 
 **If stack module does not exist yet:**
 ```
@@ -483,6 +495,15 @@ If no files match any criterion, all files are repaired as a fallback.
 - Each validation failure message
 - The previously generated content that failed
 
+**Spec mode repairs by recomposition, not file editing.** In the default typed-spec
+mode the runtime repairer is the `SpecRendererGenerator` itself: `repair_files`
+re-enters `compose()` with the previous `ComposedComponent` and the exact
+(ANSI-stripped, compacted) runtime findings, instructing the model to make the
+smallest change to its prior typed selections that addresses the errors. Resource-type
+selection is not re-run, negative patterns accumulate across attempts (capped at 16),
+and the repaired spec re-renders deterministically — so repairs stay inside the
+schema-validated JSON channel instead of free-editing HCL text.
+
 ---
 
 ## Repository Scanner
@@ -568,11 +589,16 @@ Sections in order:
 3. Target environments, region, stack name
 4. Assumptions and defaults
 5. Files created or changed
-6. Backend resources (S3 bucket + DynamoDB lock table per env)
-7. Validation results (status + check list)
-8. Warnings and risks
-9. Expected post-merge apply behavior
-10. Explicit confirmation: IaC Smith did not apply anything
+6. Generated resources (inventory derived from the rendered `resource` blocks, not from intent)
+7. Backend resources (S3 bucket + DynamoDB lock table per env)
+8. Validation results (status + check list)
+9. Scope Monitoring (rendered workload resource counts per module so reviewers can spot scope drift)
+10. Warnings and risks (includes an explicit validation-scope note when a PR is structure-only)
+11. Expected post-merge apply behavior
+12. Explicit confirmation: IaC Smith did not apply anything
+
+`build_pr_body` receives the final `generated_files` and derives the resource
+summary/inventory from them, so the body describes what was actually rendered.
 
 ---
 
