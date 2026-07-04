@@ -18,7 +18,9 @@ permissions:
   actions: read
   contents: read
   id-token: write
-  issues: read
+  # write: blocked runs post their block reason (prerequisite failures, staged
+  # too-broad plans) back to the source issue — read-only made that comment 403.
+  issues: write
 
 concurrency:
   group: iac-smith-issue-${{ inputs.issue_number || github.event.issue.number }}
