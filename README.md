@@ -1,6 +1,6 @@
 # IaC Smith
 
-IaC Smith turns natural-language infrastructure requests into reviewable Terraform/Terragrunt pull requests using AWS Bedrock and LangGraph. The model proposes typed resource specs; deterministic gates validate those specs against harvested provider schemas, render the IaC, run static and runtime validation, attempt bounded repair, and block instead of opening a misleading PR when correctness cannot be proven.
+IaC Smith turns natural-language infrastructure requests into reviewable Terraform/Terragrunt pull requests using AWS Bedrock and LangGraph. The model proposes typed resource specs; deterministic gates validate those specs against harvested provider schemas, render the IaC, run static and runtime validation, attempt bounded repair, and block instead of opening a misleading PR when correctness cannot be proven. The public demo runs on Claude Haiku 4.5 — a deliberately small model, because correctness is enforced by the deterministic gates rather than model scale — and escalates a stuck repair to Claude Sonnet for a single pass when Haiku cannot converge.
 
 When a GitHub issue is labeled `iac-smith`, a GitHub Actions workflow runs the LangGraph-based agent. The agent reads the issue, infers the AWS infrastructure intent, scans the target infrastructure repository for existing conventions, generates a Terraform/Terragrunt change, validates it with static and runtime checks, and opens a reviewable PR.
 
