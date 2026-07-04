@@ -563,20 +563,56 @@ def quote_hcl_template(value: str) -> str:
     return f'"{_escape_hcl_template(value)}"'
 
 
+def _sole_interpolation_expression(value: str) -> str | None:
+    """The inner expression when a string is exactly one ``${...}`` template.
+
+    Terraform JSON semantics give such a string the expression's native value,
+    and rendering the expression bare sidesteps quote-escaping entirely — a
+    template like ``${jsonencode({"Version":"2012-10-17"})}`` cannot survive as
+    a quoted HCL template because escaping its inner quotes breaks the
+    expression (the live issue #68 failure).
+    """
+    if not (value.startswith("${") and value.endswith("}")):
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(1, len(value)):
+        char = value[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return value[2:index] if index == len(value) - 1 else None
+    return None
+
+
 def render_hcl_value(value, indent: int = 1) -> str:
     """Render a native JSON argument value to HCL.
 
     Numbers and booleans render as literals; strings follow Terraform JSON
-    configuration semantics (see ``quote_hcl_template``); lists and objects
-    render recursively, so the model can express e.g. ``tags`` as a plain JSON
-    object instead of stringified HCL.
+    configuration semantics (see ``quote_hcl_template``), with a string that is
+    exactly one interpolation rendered as the bare expression; lists and
+    objects render recursively, so the model can express e.g. ``tags`` as a
+    plain JSON object instead of stringified HCL.
     """
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, str):
-        return quote_hcl_template(value)
+        expression = _sole_interpolation_expression(value)
+        return expression if expression is not None else quote_hcl_template(value)
     if value is None:
         return "null"
     pad = "  " * indent
@@ -594,25 +630,49 @@ def render_hcl_value(value, indent: int = 1) -> str:
     return "{\n" + "\n".join(entries) + f"\n{pad}}}"
 
 
-def _render_nested_block(name: str, entry: dict, indent: int = 1) -> list[str]:
+def _block_entries(value) -> list[dict] | None:
+    """The block instances a JSON value expresses, per Terraform JSON semantics."""
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
+        return value
+    return None
+
+
+def _render_entry(key: str, value, block_names: set[str], indent: int) -> list[str]:
+    """One key inside a resource or block: a nested block or an attribute.
+
+    A key the provider schema declares as a block must render as ``key { ... }``
+    at any depth — Terraform rejects ``key = [...]`` as an unsupported argument
+    even though the name is schema-legal (the live issue #69/#70 failure).
+    """
     pad = "  " * indent
-    lines = [f"{pad}{name} {{"]
-    for key, value in entry.items():
-        lines.append(f"{pad}  {key} = {render_hcl_value(value, indent + 1)}")
-    lines.append(f"{pad}}}")
+    entries = _block_entries(value) if key in block_names else None
+    if entries is None:
+        return [f"{pad}{key} = {render_hcl_value(value, indent)}"]
+    lines: list[str] = []
+    for entry in entries:
+        lines.append(f"{pad}{key} {{")
+        for inner_key, inner_value in entry.items():
+            lines.extend(_render_entry(inner_key, inner_value, block_names, indent + 1))
+        lines.append(f"{pad}}}")
     return lines
 
 
-def render_provider_resources(resources) -> str:
+def render_provider_resources(resources, block_names: dict[str, list[str]] | None = None) -> str:
     """Render ``ResourceSpec`` blocks to HCL. Shared with the composer's contract gate."""
     blocks = []
     for resource in resources:
+        type_blocks = set((block_names or {}).get(resource.type, []))
         lines = [f'resource "{resource.type}" "{resource.name}" {{']
         for key, value in resource.arguments.items():
-            lines.append(f"  {key} = {render_hcl_value(value)}")
+            lines.extend(_render_entry(key, value, type_blocks, 1))
         for name, entries in resource.nested_blocks.items():
             for entry in entries:
-                lines.extend(_render_nested_block(name, entry))
+                lines.append(f"  {name} {{")
+                for inner_key, inner_value in entry.items():
+                    lines.extend(_render_entry(inner_key, inner_value, type_blocks, 2))
+                lines.append("  }")
         lines.append("}")
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks) + "\n"
@@ -625,7 +685,7 @@ def _render_resources(component: ComponentSpec) -> str:
             "# Deterministic skeleton generated from InfrastructureSpec.\n"
             "# No provider resources were selected for this component.\n"
         )
-    return render_provider_resources(implementation.resources)
+    return render_provider_resources(implementation.resources, implementation.block_names)
 
 
 def _render_variables(component: ComponentSpec) -> str:
@@ -674,7 +734,9 @@ def apply_composition(spec: InfrastructureSpec, composed: ComposedComponent) -> 
     ]
     updated_component = component.model_copy(
         update={
-            "implementation": ProviderResourcesSpec(resources=composed.resources),
+            "implementation": ProviderResourcesSpec(
+                resources=composed.resources, block_names=composed.block_names
+            ),
             "outputs": merged_outputs,
         }
     )

@@ -16,6 +16,11 @@ class TerraformContract(BaseModel):
     version: str | None = None
     allowed_arguments: list[str] = Field(default_factory=list)
     required_arguments: list[str] = Field(default_factory=list)
+    # Names that are nested *blocks* (at any depth) rather than attributes.
+    # Rendering needs the distinction: a block-typed key must emit `name { ... }`
+    # HCL, never `name = [...]` — Terraform rejects the latter as an unsupported
+    # argument even though the name itself is schema-legal.
+    block_names: list[str] = Field(default_factory=list)
     source: str
 
 
@@ -237,9 +242,23 @@ def contracts_from_provider_schema(
                 name=resource_type,
                 allowed_arguments=allowed,
                 required_arguments=required,
+                block_names=sorted(_collect_block_names(block)),
                 source=f"{source} ({provider_label})",
             )
     return contracts
+
+
+def _collect_block_names(block: dict) -> set[str]:
+    """Every nested-block name in a resource schema's tree, at any depth.
+
+    Inner blocks (e.g. ``rule`` → ``apply_server_side_encryption_by_default``)
+    must render as blocks too, so the flat set covers the whole tree.
+    """
+    names: set[str] = set()
+    for name, spec in (block.get("block_types") or {}).items():
+        names.add(name)
+        names |= _collect_block_names((spec or {}).get("block") or {})
+    return names
 
 
 _UNSUPPORTED_ARG_RE = re.compile(
