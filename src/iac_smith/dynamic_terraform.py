@@ -648,29 +648,41 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     # fence with a prose preamble parses nowhere else), then the balanced
     # first object (fence or junk after the document), then the legacy
     # first-{-to-last-} slice.
-    candidates = [text]
-    candidates.extend(match.group(1) for match in _FENCED_BLOCK_RE.finditer(text))
+    candidates: list[tuple[str, str]] = [("response", text)]
+    candidates.extend(("fenced block", match.group(1)) for match in _FENCED_BLOCK_RE.finditer(text))
     balanced = _balanced_object_span(text)
     if balanced is not None:
-        candidates.append(balanced)
+        candidates.append(("first balanced object", balanced))
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end > start:
-        candidates.append(text[start : end + 1])
-    last_error: json.JSONDecodeError | None = None
-    for candidate in candidates:
+        candidates.append(("brace slice", text[start : end + 1]))
+    errors: dict[str, tuple[str, json.JSONDecodeError]] = {}
+    for kind, candidate in candidates:
         try:
             value = json.loads(candidate, strict=False)
         except json.JSONDecodeError as exc:
-            last_error = exc
+            errors.setdefault(kind, (candidate, exc))
             continue
         if isinstance(value, dict):
             return value
-    if last_error is None:
+    if not errors:
         raise ValueError("Terraform generation response must be a JSON object.")
-    raise ValueError(
-        "Terraform generation response must contain a valid JSON object."
-    ) from last_error
+    # Surface the most document-shaped candidate's decode error with position
+    # context: "invalid JSON somewhere" is undebuggable from a run log, while
+    # the decode message plus the surrounding characters pinpoints the defect
+    # (this is what makes the issue #66 composition failures diagnosable) and
+    # gives the repair round something concrete to fix.
+    for kind in ("first balanced object", "fenced block", "brace slice", "response"):
+        if kind not in errors:
+            continue
+        candidate, exc = errors[kind]
+        window = " ".join(candidate[max(0, exc.pos - 100) : exc.pos + 100].split())
+        raise ValueError(
+            "Terraform generation response must contain a valid JSON object "
+            f"({kind}: {exc.msg} at character {exc.pos}, near: ...{window}...)."
+        ) from exc
+    raise ValueError("Terraform generation response must contain a valid JSON object.")
 
 
 # Exception members of the Bedrock InvokeModelWithResponseStream response shape.

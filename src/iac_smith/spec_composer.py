@@ -430,11 +430,15 @@ class SpecComposer:
                     return _extract_json_object(text)
                 except ValueError as exc:
                     flattened = " ".join(text.split())
+                    # The extractor's error carries decode position context, but
+                    # a repeated live failure needs the whole document in the run
+                    # log to be diagnosable (bounded: compositions are a few KB).
+                    self._log(
+                        f"IaC Smith: unparseable model response ({len(flattened)} chars): "
+                        f"{flattened[:6000]}"
+                    )
                     detail = f"Response began: {flattened[:160]!r}"
                     if len(flattened) > 160:
-                        # The head of a malformed response is usually fine; the
-                        # defect (truncation, stray fence, trailing prose) lives
-                        # at the tail, so surface both for diagnosability.
                         detail += f" and ended: {flattened[-160:]!r}"
                     raise ValueError(f"{exc} {detail}") from exc
             except transient as exc:
