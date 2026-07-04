@@ -69,10 +69,11 @@ def normalize_composed_blocks(
     resources = []
     for resource in composed.resources:
         contract = provider_contracts.get(resource.type)
-        block_names = set(contract.block_names) if contract else set()
-        if not block_names:
+        if contract is None:
             resources.append(resource)
             continue
+        block_names = set(contract.block_names)
+        attribute_names = set(contract.allowed_arguments) - block_names
         arguments = dict(resource.arguments)
         nested_blocks = {name: list(entries) for name, entries in resource.nested_blocks.items()}
         for key in list(arguments):
@@ -90,6 +91,14 @@ def normalize_composed_blocks(
                 continue
             nested_blocks.setdefault(key, []).extend(entries)
             del arguments[key]
+        # The inverse direction too: an attribute placed in nested_blocks (the
+        # live issue #70 run put the alarm's `dimensions` map there) must render
+        # as an assignment, not a block Terraform will reject.
+        for key in list(nested_blocks):
+            if key not in attribute_names or key in block_names:
+                continue
+            entries = nested_blocks.pop(key)
+            arguments.setdefault(key, entries[0] if len(entries) == 1 else entries)
         resources.append(
             resource.model_copy(update={"arguments": arguments, "nested_blocks": nested_blocks})
         )
@@ -231,6 +240,50 @@ def _reference_errors(
     return errors
 
 
+def _nested_block_errors(
+    *,
+    scope: str,
+    block_name: str,
+    entries: list[dict],
+    block_required: dict[str, list[str]],
+    block_names: set[str],
+) -> list[str]:
+    """Validate one nested block's entries, recursing into inner blocks."""
+    errors: list[str] = []
+    for index, entry in enumerate(entries, start=1):
+        for required in block_required.get(block_name, []):
+            if required not in entry:
+                errors.append(
+                    f"`{scope}` nested block `{block_name}` entry {index} is missing "
+                    f"required argument `{required}` (required by the provider schema)."
+                )
+        for key, value in entry.items():
+            if not _NESTED_KEY_RE.match(key):
+                errors.append(
+                    f"`{scope}` nested block `{block_name}` has argument name "
+                    f"`{key}` that is not a valid identifier."
+                )
+            if key in block_names:
+                inner_entries = (
+                    [value]
+                    if isinstance(value, dict)
+                    else value
+                    if isinstance(value, list) and all(isinstance(v, dict) for v in value)
+                    else []
+                )
+                if inner_entries:
+                    errors.extend(
+                        _nested_block_errors(
+                            scope=scope,
+                            block_name=key,
+                            entries=inner_entries,
+                            block_required=block_required,
+                            block_names=block_names,
+                        )
+                    )
+    return errors
+
+
 def validate_composed_component(
     composed: ComposedComponent,
     *,
@@ -306,14 +359,18 @@ def validate_composed_component(
                         f"{', '.join(contract.allowed_arguments)} — or drop the block if "
                         f"no name fits; never invent one."
                     )
+        block_required = contract.block_required_arguments if contract else {}
+        deep_block_names = set(contract.block_names) if contract else set()
         for block_name, entries in resource.nested_blocks.items():
-            for entry in entries:
-                for key in entry:
-                    if not _NESTED_KEY_RE.match(key):
-                        errors.append(
-                            f"`{scope}` nested block `{block_name}` has argument name "
-                            f"`{key}` that is not a valid identifier."
-                        )
+            errors.extend(
+                _nested_block_errors(
+                    scope=scope,
+                    block_name=block_name,
+                    entries=entries,
+                    block_required=block_required,
+                    block_names=deep_block_names,
+                )
+            )
         argument_leaves = [
             leaf for value in resource.arguments.values() for leaf in _iter_string_leaves(value)
         ]
