@@ -227,3 +227,13 @@ def test_find_failure_banner_matches_case_insensitively():
         "response was truncated"
     )
     assert find_failure_banner("healthy terraform output") is None
+
+
+def test_foundation_requirement_satisfied_by_vpc_foundation_wiring():
+    files = _legitimate_files()
+    files["environments/non-prod/data-platform/terragrunt.hcl"] += (
+        '\ndependency "vpc-foundation" {\n  config_path = "../vpc-foundation"\n}\n'
+    )
+    intent = _intent(depends_on_existing=["foundation"])
+
+    assert check_pr_legitimacy(generated_files=files, change_plan=_plan(), intent=intent) == []

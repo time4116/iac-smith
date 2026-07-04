@@ -161,3 +161,51 @@ def test_required_existing_stack_dependency_is_wired_generically(tmp_path):
     assert 'dependency "networking"' in stack_hcl
     assert "network_id = dependency.networking.outputs.network_id" in stack_hcl
     assert 'variable "network_id"' in files["modules/data-platform/variables.tf"]
+
+
+def test_required_foundation_resolves_to_actual_vpc_foundation_stack(tmp_path):
+    (tmp_path / "modules" / "vpc-foundation").mkdir(parents=True)
+    (tmp_path / "modules" / "vpc-foundation" / "outputs.tf").write_text(
+        'output "vpc_id" {\n  value = "v"\n}\n\noutput "private_subnet_ids" {\n  value = []\n}\n',
+        encoding="utf-8",
+    )
+    intent = InfrastructureIntent(
+        raw_request="Aurora platform on the existing foundation networking",
+        resource_type="aurora_postgresql",
+        environment_scope=EnvironmentScope.NON_PROD_ONLY,
+        environments=["non-prod"],
+        region="us-west-2",
+        depends_on_existing=["foundation"],
+    )
+    change_plan = ChangePlan(
+        stack_name="aurora-postgresql",
+        environments=["non-prod"],
+        files_to_generate=[
+            "environments/non-prod/root.hcl",
+            "environments/non-prod/aurora-postgresql/terragrunt.hcl",
+            "modules/aurora-postgresql/main.tf",
+            "modules/aurora-postgresql/variables.tf",
+        ],
+        backend_resources={
+            "non-prod": BackendResource(bucket="iac-smith-state", lock_table="iac-smith-lock")
+        },
+        summary=[],
+    )
+
+    spec = build_spec_from_intent(
+        intent=intent,
+        change_plan=change_plan,
+        repo_patterns=RepoPatterns(existing_stack_paths=["modules/vpc-foundation"]),
+        target_repo="time4116/iac-smith-demo-infra",
+        repo_path=tmp_path,
+    )
+    files = render_spec(spec)
+
+    # The requirement said "foundation"; the wiring must target the stack that
+    # actually exists, with its discovered outputs.
+    assert [dep.producer for dep in spec.dependencies] == ["vpc-foundation"]
+    assert spec.dependencies[0].outputs == ["vpc_id", "private_subnet_ids"]
+    stack_hcl = files["environments/non-prod/aurora-postgresql/terragrunt.hcl"]
+    assert 'dependency "vpc-foundation"' in stack_hcl
+    assert 'config_path = "../vpc-foundation"' in stack_hcl
+    assert "vpc_id = dependency.vpc-foundation.outputs.vpc_id" in stack_hcl
