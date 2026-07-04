@@ -1029,3 +1029,38 @@ def test_unparseable_error_reports_head_and_tail_of_response():
     message = str(excinfo.value)
     assert "Response began:" in message
     assert "and ended:" in message
+
+
+def test_extract_json_object_error_pinpoints_decode_position():
+    from iac_smith.dynamic_terraform import _extract_json_object
+
+    # A defect *inside* the document (invalid escape) defeats every extraction
+    # candidate; the error must carry the decode position and surrounding text.
+    broken = '```json\n{"resources": [{"name": "bad \\x escape here"}]}\n```'
+
+    with pytest.raises(ValueError) as excinfo:
+        _extract_json_object(broken)
+
+    message = str(excinfo.value)
+    assert "at character" in message
+    assert "near:" in message
+    assert "escape" in message.lower()
+
+
+def test_composer_logs_full_response_when_unparseable():
+    logs: list[str] = []
+    garbage = '{"resources": [{"name": "bad \\x escape"}]}'
+    composer, _ = _composer([garbage, garbage], logger=logs.append)
+
+    with pytest.raises(SpecCompositionError):
+        composer.compose(
+            intent=_intent(),
+            component_name="database-platform",
+            allowed_inputs=ALLOWED_INPUTS,
+            environments=["non-prod"],
+            provider_contracts=CONTRACTS,
+        )
+
+    dumps = [line for line in logs if "unparseable model response" in line]
+    assert dumps
+    assert "bad \\x escape" in dumps[0]
