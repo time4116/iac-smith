@@ -18,6 +18,7 @@ from iac_smith.models.infrastructure_spec import (
 from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
 from iac_smith.models.validation import ValidationResult, ValidationStatus
+from iac_smith.nodes.change_planner import FOUNDATION_ALIASES
 
 if TYPE_CHECKING:
     from iac_smith.blackboard import RunBlackboard
@@ -46,17 +47,6 @@ class RenderedFiles(dict[str, str]):
     def __init__(self, files: dict[str, str], *, structure_only: bool = False):
         super().__init__(files)
         self.structure_only = structure_only
-
-
-def _repo_has_foundation(repo_patterns: RepoPatterns | None) -> bool:
-    if not repo_patterns:
-        return False
-    return any(
-        path == "modules/foundation"
-        or path.startswith("modules/foundation/")
-        or path.endswith("/foundation")
-        for path in repo_patterns.existing_stack_paths
-    )
 
 
 def _planned_module_paths(change_plan: ChangePlan) -> set[str]:
@@ -131,25 +121,44 @@ def build_spec_from_intent(
     }
     warnings = list(intent.warnings)
     dependencies: list[DependencySpec] = []
+    repo_stacks = _repo_stack_names(repo_patterns)
+
+    def _resolve_producer(required: str) -> str | None:
+        # An issue may say "foundation" while the repo's actual stack is named
+        # `vpc-foundation` (or vice versa); the alias family resolves to the
+        # stack that really exists so wiring uses real paths, never the label.
+        normalized = _normalized_stack_name(required)
+        if not normalized or normalized == change_plan.stack_name:
+            return None
+        candidates = [normalized]
+        if normalized in FOUNDATION_ALIASES:
+            candidates.extend(sorted(FOUNDATION_ALIASES - {normalized}))
+        for candidate in candidates:
+            if candidate in repo_stacks and candidate != change_plan.stack_name:
+                return candidate
+        return None
+
     producers: list[str] = []
-    if _repo_has_foundation(repo_patterns):
-        producers.append("foundation")
+    existing_foundation = next(
+        (
+            stack
+            for stack in sorted(repo_stacks & FOUNDATION_ALIASES)
+            if stack != change_plan.stack_name
+        ),
+        None,
+    )
+    if existing_foundation:
+        producers.append(existing_foundation)
     # The issue may require consuming other stacks that already exist in the
     # target repo; wire every one that is really there. Missing ones were
     # already blocked by the prerequisite gate before generation.
-    repo_stacks = _repo_stack_names(repo_patterns)
     for name in intent.depends_on_existing:
-        normalized = _normalized_stack_name(name)
-        if (
-            normalized
-            and normalized != change_plan.stack_name
-            and normalized in repo_stacks
-            and normalized not in producers
-        ):
-            producers.append(normalized)
+        resolved = _resolve_producer(name)
+        if resolved and resolved not in producers:
+            producers.append(resolved)
     for producer in producers:
         outputs = discover_stack_outputs(repo_path, producer)
-        if not outputs and producer == "foundation":
+        if not outputs and producer in FOUNDATION_ALIASES:
             outputs = _fallback_foundation_outputs()
         if not outputs:
             warnings.append(

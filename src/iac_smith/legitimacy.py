@@ -20,6 +20,7 @@ from collections.abc import Mapping
 
 from iac_smith.models.change_plan import ChangePlan
 from iac_smith.models.intent import InfrastructureIntent
+from iac_smith.nodes.change_planner import FOUNDATION_ALIASES
 
 _RESOURCE_RE = re.compile(r'^\s*resource\s+"([^"\s]+)"\s+"([^"\s]+)"', re.MULTILINE)
 
@@ -207,7 +208,12 @@ def check_pr_legitimacy(
         normalized = re.sub(r"[^a-z0-9]+", "-", producer.lower()).strip("-")
         if not normalized:
             continue
-        pattern = re.compile(rf'dependency\s+"{re.escape(normalized)}"')
+        # An issue's "foundation" may be wired as the repo's actual
+        # `vpc-foundation` stack (or vice versa); any family member satisfies it.
+        aliases = FOUNDATION_ALIASES if normalized in FOUNDATION_ALIASES else {normalized}
+        pattern = re.compile(
+            r'dependency\s+"(' + "|".join(re.escape(alias) for alias in sorted(aliases)) + r')"'
+        )
         wired = any(
             pattern.search(content)
             for path, content in generated_files.items()

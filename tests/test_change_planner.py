@@ -261,3 +261,30 @@ def test_missing_prerequisite_stacks_normalizes_names():
         )
         == []
     )
+
+
+def test_foundation_family_names_satisfy_prerequisites_interchangeably():
+    from iac_smith.nodes.change_planner import missing_prerequisite_stacks
+
+    intent = InfrastructureIntent(
+        raw_request="Aurora platform consuming the existing foundation networking",
+        resource_type="aurora_postgresql_data_platform",
+        environment_scope=EnvironmentScope.NON_PROD_ONLY,
+        environments=["non-prod"],
+        region="us-west-2",
+        depends_on_existing=["foundation"],
+    )
+
+    # The live stage-1 run produced modules/vpc-foundation; a requirement that
+    # says "foundation" must accept it (and any other family member).
+    assert (
+        missing_prerequisite_stacks(
+            intent, RepoPatterns(existing_stack_paths=["modules/vpc-foundation"])
+        )
+        == []
+    )
+    # Non-family names still require an exact stack.
+    intent_exact = intent.model_copy(update={"depends_on_existing": ["data-lake"]})
+    assert missing_prerequisite_stacks(
+        intent_exact, RepoPatterns(existing_stack_paths=["modules/vpc-foundation"])
+    ) == ["data-lake"]

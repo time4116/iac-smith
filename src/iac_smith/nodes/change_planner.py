@@ -17,10 +17,16 @@ def _backend_resource(env: str, repo_slug: str) -> BackendResource:
     )
 
 
+# Interchangeable names for the shared-networking layer: an issue may say
+# "foundation" while the parser derives a `vpc-foundation` stack (the live #66
+# run did exactly this), so requirement matching, dependency wiring, and the
+# legitimacy gate all treat these as one family.
+FOUNDATION_ALIASES = frozenset({"foundation", "vpc", "vpc-foundation"})
+
 # Stack names treated as a shared network/foundation layer. Single source of truth
 # so the dangling-dependency detector (static_review) and the planner agree on what
 # counts as "foundation" without keyword drift.
-FOUNDATION_STACK_NAMES = frozenset({"baseline", "foundation", "vpc", "vpc-foundation"})
+FOUNDATION_STACK_NAMES = FOUNDATION_ALIASES | {"baseline"}
 
 
 def _is_foundation_stack(stack_name: str) -> bool:
@@ -31,10 +37,9 @@ def _repo_has_foundation(repo_patterns: RepoPatterns | None) -> bool:
     if not repo_patterns:
         return False
     return any(
-        path == "modules/foundation"
-        or path.startswith("modules/foundation/")
-        or path.endswith("/foundation")
+        path.rstrip("/").split("/")[-1].lower().replace("_", "-") in FOUNDATION_ALIASES
         for path in repo_patterns.existing_stack_paths
+        if path.strip("/")
     )
 
 
@@ -101,19 +106,23 @@ def missing_prerequisite_stacks(
         path.lower().replace("_", "-")
         for path in (repo_patterns.existing_stack_paths if repo_patterns else [])
     ]
+
+    def _present(candidate: str) -> bool:
+        return any(
+            path == candidate
+            or path.endswith(f"/{candidate}")
+            or f"/{candidate}/" in path
+            or path.startswith(f"{candidate}/")
+            for path in existing
+        )
+
     missing = []
     for name in intent.depends_on_existing:
         normalized = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
         if not normalized:
             continue
-        found = any(
-            path == normalized
-            or path.endswith(f"/{normalized}")
-            or f"/{normalized}/" in path
-            or path.startswith(f"{normalized}/")
-            for path in existing
-        )
-        if not found:
+        aliases = FOUNDATION_ALIASES if normalized in FOUNDATION_ALIASES else {normalized}
+        if not any(_present(alias) for alias in aliases):
             missing.append(name)
     return missing
 
