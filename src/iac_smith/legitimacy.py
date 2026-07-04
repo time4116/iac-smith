@@ -74,6 +74,46 @@ def backend_resource_addresses(files: Mapping[str, str]) -> list[str]:
     ]
 
 
+def _module_entries(files: Mapping[str, str]):
+    """hcl2-parsed ``module`` blocks with a remote source in workload ``.tf`` files.
+
+    A community/registry module call is a real implementation (its resources
+    materialize at plan time), so it must satisfy the gates the same way raw
+    ``resource`` blocks do. Local-path sources stay excluded: a module call into
+    a placeholder directory vouches for nothing.
+    """
+    import hcl2
+
+    def unquote(value: str) -> str:
+        # This hcl2 version keeps the surrounding quotes on parsed strings.
+        if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+            return value[1:-1]
+        return value
+
+    for path in sorted(files):
+        if not path.endswith(".tf") or path.startswith(_BOOTSTRAP_PREFIX):
+            continue
+        try:
+            parsed = hcl2.loads(files[path])
+        except Exception:
+            continue
+        for entry in parsed.get("module", []):
+            for name, body in entry.items():
+                if not isinstance(body, dict):
+                    continue
+                source = body.get("source")
+                if not isinstance(source, str):
+                    continue
+                source = unquote(source)
+                if source and not source.startswith(("./", "../")):
+                    yield unquote(name), source, body
+
+
+def workload_module_calls(files: Mapping[str, str]) -> list[str]:
+    """Remote-source module calls outside the backend bootstrap tree."""
+    return [f"module.{name} ({source})" for name, source, _body in _module_entries(files)]
+
+
 def find_failure_banner(text: str) -> str | None:
     lowered = text.lower()
     for banner in FAILURE_BANNERS:
@@ -129,6 +169,10 @@ def _workload_resource_corpus(files: Mapping[str, str]) -> str:
                 for rname, body in instances.items():
                     fragments.append(rname)
                     fragments.extend(_body_strings(body))
+    for name, source, body in _module_entries(files):
+        fragments.append(name)
+        fragments.append(source)
+        fragments.extend(_body_strings(body))
     return "\n".join(fragments).lower()
 
 
@@ -160,7 +204,7 @@ def check_pr_legitimacy(
     """
     errors: list[str] = []
     planned_modules = _planned_module_dirs(change_plan)
-    workload = workload_resource_addresses(generated_files)
+    workload = workload_resource_addresses(generated_files) + workload_module_calls(generated_files)
 
     if planned_modules and not allow_structure_only:
         if structure_only:

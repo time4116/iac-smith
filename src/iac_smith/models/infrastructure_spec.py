@@ -63,7 +63,9 @@ class RegistryModuleSpec(BaseModel):
     kind: Literal["registry_module"] = "registry_module"
     source: str
     version: str | None = None
-    inputs: dict[str, ValueExpression] = Field(default_factory=dict)
+    # Same native-JSON value semantics as ResourceSpec.arguments: the renderer
+    # writes the module call, the model never authors HCL text.
+    inputs: dict[str, JsonValue] = Field(default_factory=dict)
     outputs: list[OutputSpec] = Field(default_factory=list)
 
 
@@ -98,6 +100,8 @@ class InfrastructureSpec(BaseModel):
     files_to_generate: list[str]
     assumptions: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
-    rendering_policy: Literal["deterministic_structure_only", "composed_provider_resources"] = (
-        "deterministic_structure_only"
-    )
+    rendering_policy: Literal[
+        "deterministic_structure_only",
+        "composed_provider_resources",
+        "composed_registry_module",
+    ] = "deterministic_structure_only"

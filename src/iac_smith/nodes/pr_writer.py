@@ -1,6 +1,6 @@
 import re
 
-from iac_smith.legitimacy import resource_inventory
+from iac_smith.legitimacy import resource_inventory, workload_module_calls
 from iac_smith.models.change_plan import ChangePlan
 from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.validation import ValidationResult
@@ -47,13 +47,16 @@ def _inventory_summary(generated_files: dict[str, str]) -> list[str]:
     workload, backend = _split_inventory(generated_files)
     workload_count = sum(len(records) for records in workload.values())
     backend_count = sum(len(records) for records in backend.values())
+    module_calls = workload_module_calls(generated_files)
     lines: list[str] = []
     if workload_count:
         lines.append(
             f"{workload_count} provider resource(s) rendered across "
             f"{len(workload)} module/stack file(s)"
         )
-    else:
+    if module_calls:
+        lines.append(f"{len(module_calls)} community module call(s): " + ", ".join(module_calls))
+    if not workload_count and not module_calls:
         lines.append(
             "No provider resources were generated outside the backend bootstrap — "
             "module bodies are structural placeholders"
@@ -87,6 +90,13 @@ def _scope_monitoring(generated_files: dict[str, str]) -> str:
                 f"{sum(len(records) for records in workload.values())} "
                 f"across {len(workload)} file(s)"
             ),
+            (
+                "* Community module calls: "
+                + (
+                    ", ".join(f"`{call}`" for call in workload_module_calls(generated_files))
+                    or "none"
+                )
+            ),
             (f"* Backend bootstrap resources: {sum(len(records) for records in backend.values())}"),
             f"* Module directories: {', '.join(f'`{d}`' for d in module_dirs) or 'none'}",
             f"* Environment stacks: {', '.join(f'`{d}`' for d in env_stacks) or 'none'}",
@@ -100,12 +110,15 @@ def _scope_monitoring(generated_files: dict[str, str]) -> str:
 
 def _resource_listing(generated_files: dict[str, str]) -> str:
     inventory = resource_inventory(generated_files)
-    if not inventory:
+    module_calls = workload_module_calls(generated_files)
+    if not inventory and not module_calls:
         return "None — no `resource` blocks exist in the rendered Terraform."
-    return "\n".join(
+    lines = [
         f"* `{path}`: " + ", ".join(f"`{rtype}.{rname}`" for rtype, rname in records)
         for path, records in inventory.items()
-    )
+    ]
+    lines.extend(f"* Community module call: `{call}`" for call in module_calls)
+    return "\n".join(lines)
 
 
 def build_pr_body(

@@ -148,3 +148,43 @@ def test_pr_body_says_structure_only_validation_scope_when_placeholder():
 
     assert "structural placeholders" in body
     assert "No provider resources were generated outside the backend bootstrap" in body
+
+
+def test_pr_body_lists_community_module_calls():
+    intent = InfrastructureIntent(
+        raw_request="Static website behind CloudFront",
+        resource_type="cloudfront_distribution",
+        environment_scope=EnvironmentScope.NON_PROD_ONLY,
+        environments=["non-prod"],
+        region="us-west-2",
+    )
+    plan = ChangePlan(
+        stack_name="static-site",
+        environments=["non-prod"],
+        files_to_generate=["modules/static-site/main.tf"],
+        backend_resources={
+            "non-prod": BackendResource(bucket="iac-smith-state", lock_table="iac-smith-lock")
+        },
+        summary=["plan summary"],
+    )
+    generated_files = {
+        "modules/static-site/main.tf": (
+            'module "this" {\n'
+            '  source  = "terraform-aws-modules/cloudfront/aws"\n'
+            '  version = "5.0.1"\n'
+            "}\n"
+        ),
+    }
+
+    body = build_pr_body(
+        issue_url="https://github.com/time4116/iac-smith/issues/59",
+        intent=intent,
+        change_plan=plan,
+        validation=ValidationResult(status=ValidationStatus.PASSED),
+        generated_files=generated_files,
+    )
+
+    assert "1 community module call(s): module.this (terraform-aws-modules/cloudfront/aws)" in body
+    assert "Community module call: `module.this (terraform-aws-modules/cloudfront/aws)`" in body
+    assert "Community module calls: `module.this (terraform-aws-modules/cloudfront/aws)`" in body
+    assert "structural placeholders" not in body

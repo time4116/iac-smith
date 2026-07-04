@@ -13,6 +13,7 @@ from iac_smith.models.infrastructure_spec import (
     InfrastructureSpec,
     OutputSpec,
     ProviderResourcesSpec,
+    RegistryModuleSpec,
     ValueExpression,
 )
 from iac_smith.models.intent import InfrastructureIntent
@@ -644,6 +645,16 @@ def render_provider_resources(resources, block_names: dict[str, list[str]] | Non
 
 def _render_resources(component: ComponentSpec) -> str:
     implementation = component.implementation
+    if implementation.kind == "registry_module":
+        lines = ['module "this" {', f'  source  = "{implementation.source}"']
+        if implementation.version:
+            lines.append(f'  version = "{implementation.version}"')
+        if implementation.inputs:
+            lines.append("")
+        for name, value in implementation.inputs.items():
+            lines.extend(_render_entry(name, value, set(), 1))
+        lines.append("}")
+        return "\n".join(lines) + "\n"
     if implementation.kind != "provider_resources" or not implementation.resources:
         return (
             "# Deterministic skeleton generated from InfrastructureSpec.\n"
@@ -696,11 +707,21 @@ def apply_composition(spec: InfrastructureSpec, composed: ComposedComponent) -> 
     merged_outputs = component.outputs + [
         output for output in composed.outputs if output.name not in existing_output_names
     ]
+    if composed.registry_module is not None:
+        implementation: ProviderResourcesSpec | RegistryModuleSpec = RegistryModuleSpec(
+            source=composed.registry_module.source,
+            version=composed.registry_module.version or None,
+            inputs=composed.registry_module.inputs,
+        )
+        rendering_policy = "composed_registry_module"
+    else:
+        implementation = ProviderResourcesSpec(
+            resources=composed.resources, block_names=composed.block_names
+        )
+        rendering_policy = "composed_provider_resources"
     updated_component = component.model_copy(
         update={
-            "implementation": ProviderResourcesSpec(
-                resources=composed.resources, block_names=composed.block_names
-            ),
+            "implementation": implementation,
             "outputs": merged_outputs,
         }
     )
@@ -709,7 +730,7 @@ def apply_composition(spec: InfrastructureSpec, composed: ComposedComponent) -> 
             "components": [updated_component, *spec.components[1:]],
             "assumptions": [*spec.assumptions, *composed.assumptions],
             "warnings": [w for w in spec.warnings if w != _STRUCTURE_ONLY_WARNING],
-            "rendering_policy": "composed_provider_resources",
+            "rendering_policy": rendering_policy,
         }
     )
 
@@ -757,6 +778,7 @@ class SpecRendererGenerator:
         self._last_repo_path = None
         self._last_composed = None
         self._pending_runtime_findings: list[str] = []
+        self._registry_candidates = None
 
     def _structure_only_allowed(self) -> bool:
         if self._allow_structure_only is not None:
@@ -833,6 +855,18 @@ class SpecRendererGenerator:
         ]
         runtime_findings = self._pending_runtime_findings
         self._pending_runtime_findings = []
+        from iac_smith.registry_modules import (
+            discover_registry_candidates,
+            registry_modules_enabled,
+        )
+
+        if registry_modules_enabled():
+            # Cached across repair rounds: repairing a module call must validate
+            # against the same harvested contract that composed it.
+            if self._registry_candidates is None:
+                self._registry_candidates = discover_registry_candidates(intent, logger=self._log)
+        else:
+            self._registry_candidates = []
         try:
             composed = composer.compose(
                 intent=intent,
@@ -843,6 +877,7 @@ class SpecRendererGenerator:
                 negative_patterns=negative_patterns or None,
                 previous=self._last_composed if runtime_findings else None,
                 runtime_findings=runtime_findings or None,
+                registry_candidates=self._registry_candidates or None,
             )
         except (SpecCompositionError, ValueError) as exc:
             if not allow_structure_only:

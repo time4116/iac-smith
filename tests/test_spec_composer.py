@@ -1528,3 +1528,217 @@ def test_spec_renderer_repair_hands_previous_composition_to_composer(monkeypatch
     assert second["previous"] is not None
     assert second["previous"].resources[0].type == "customcloud_network"
     assert any("all attributes must be indexed" in f for f in second["runtime_findings"])
+
+
+_CLOUDFRONT_CONTRACT_KW = dict(
+    source="terraform-aws-modules/cloudfront/aws",
+    version="5.0.1",
+    description="CloudFront distribution module",
+    inputs={
+        "comment": {"name": "comment", "type": "string", "required": False},
+        "origin": {"name": "origin", "type": "any", "required": True},
+        "enabled": {"name": "enabled", "type": "bool", "required": False},
+    },
+    outputs=["cloudfront_distribution_id", "cloudfront_distribution_arn"],
+)
+
+
+def _registry_candidates():
+    from iac_smith.registry_modules import RegistryModuleContract
+
+    return [RegistryModuleContract(**_CLOUDFRONT_CONTRACT_KW)]
+
+
+_VALID_MODULE_SELECTION = {
+    "registry_module": {
+        "source": "terraform-aws-modules/cloudfront/aws",
+        "inputs": {
+            "comment": "Site for ${var.environment}",
+            "origin": {"s3": {"domain_name": "example.s3.amazonaws.com"}},
+        },
+        "outputs": ["cloudfront_distribution_id"],
+    }
+}
+
+
+def test_compose_selects_registry_module_and_pins_contract_version():
+    composer, runtime = _composer([_VALID_MODULE_SELECTION])
+
+    composed = composer.compose(
+        intent=_intent(),
+        component_name="static-site",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+        registry_candidates=_registry_candidates(),
+    )
+
+    module = composed.registry_module
+    assert module is not None
+    assert module.source == "terraform-aws-modules/cloudfront/aws"
+    assert module.version == "5.0.1"
+    assert composed.resources == []
+    assert [output.value for output in composed.outputs] == [
+        "module.this.cloudfront_distribution_id"
+    ]
+    assert "required inputs: origin" in runtime.prompts[0]
+    assert any("community module" in a.lower() for a in composed.assumptions)
+
+
+def test_compose_falls_back_to_resources_when_model_declines_module():
+    composer, _runtime = _composer(
+        [{"registry_module": None}, _VALID_SELECTION, _VALID_COMPOSITION]
+    )
+
+    composed = composer.compose(
+        intent=_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+        registry_candidates=_registry_candidates(),
+    )
+
+    assert composed.registry_module is None
+    assert [r.type for r in composed.resources] == [
+        "customcloud_network",
+        "customcloud_database",
+    ]
+
+
+def test_registry_module_selection_is_validated_and_repaired():
+    invalid = {
+        "registry_module": {
+            "source": "terraform-aws-modules/cloudfront/aws",
+            "inputs": {"orign": {"s3": {}}, "comment": "${data.aws_caller_identity.current.id}"},
+            "outputs": ["nonexistent_output"],
+        }
+    }
+    composer, runtime = _composer([invalid, _VALID_MODULE_SELECTION])
+
+    composed = composer.compose(
+        intent=_intent(),
+        component_name="static-site",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+        registry_candidates=_registry_candidates(),
+    )
+
+    assert composed.registry_module is not None
+    repair_prompt = runtime.prompts[1]
+    assert "does not define input(s): `orign`" in repair_prompt
+    assert "missing required input(s): `origin`" in repair_prompt
+    assert "does not define output(s): `nonexistent_output`" in repair_prompt
+    assert "no sibling resources" in repair_prompt
+
+
+def test_registry_module_hallucinated_source_is_rejected():
+    hallucinated = {
+        "registry_module": {"source": "terraform-aws-modules/made-up/aws", "inputs": {}}
+    }
+    composer, runtime = _composer([hallucinated, _VALID_MODULE_SELECTION])
+
+    composed = composer.compose(
+        intent=_intent(),
+        component_name="static-site",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+        registry_candidates=_registry_candidates(),
+    )
+
+    assert composed.registry_module is not None
+    assert "is not one of the offered community modules" in runtime.prompts[1]
+
+
+def test_registry_module_repair_edits_previous_call():
+    previous = ComposedComponent.model_validate(
+        {
+            "registry_module": {
+                "source": "terraform-aws-modules/cloudfront/aws",
+                "version": "5.0.1",
+                "inputs": {"origin": {"s3": {}}, "enabled": "yes"},
+                "outputs": ["cloudfront_distribution_id"],
+            }
+        }
+    )
+    composer, runtime = _composer([_VALID_MODULE_SELECTION])
+
+    composed = composer.compose(
+        intent=_intent(),
+        component_name="static-site",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+        previous=previous,
+        runtime_findings=['expected bool, got "yes"'],
+        registry_candidates=_registry_candidates(),
+    )
+
+    assert composed.registry_module is not None
+    assert "SMALLEST change" in runtime.prompts[0]
+    assert "expected bool" in runtime.prompts[0]
+
+
+def test_registry_module_repair_refuses_to_abandon_module():
+    previous = ComposedComponent.model_validate(
+        {
+            "registry_module": {
+                "source": "terraform-aws-modules/cloudfront/aws",
+                "version": "5.0.1",
+                "inputs": {"origin": {"s3": {}}},
+            }
+        }
+    )
+    composer, _runtime = _composer([{"registry_module": None}])
+
+    with pytest.raises(SpecCompositionError, match="abandoned"):
+        composer.compose(
+            intent=_intent(),
+            component_name="static-site",
+            allowed_inputs=ALLOWED_INPUTS,
+            environments=["non-prod"],
+            provider_contracts=CONTRACTS,
+            previous=previous,
+            runtime_findings=["some plan error"],
+            registry_candidates=_registry_candidates(),
+        )
+
+
+def test_registry_module_renders_pinned_module_call(monkeypatch):
+    _patch_resolver(monkeypatch)
+    composer, _runtime = _composer([_VALID_MODULE_SELECTION])
+    generator = SpecRendererGenerator(composer=composer)
+    monkeypatch.setattr(
+        "iac_smith.registry_modules.discover_registry_candidates",
+        lambda intent, logger=None: _registry_candidates(),
+    )
+    monkeypatch.setenv("IAC_SMITH_REGISTRY_MODULES", "1")
+
+    files = generator.generate_files(
+        intent=_intent(),
+        change_plan=_plan("static-site"),
+        repo_patterns=RepoPatterns(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+
+    main = files["modules/static-site/main.tf"]
+    assert 'module "this" {' in main
+    assert 'source  = "terraform-aws-modules/cloudfront/aws"' in main
+    assert 'version = "5.0.1"' in main
+    assert 'comment = "Site for ${var.environment}"' in main
+    assert hcl2.loads(main)
+    outputs = files["modules/static-site/outputs.tf"]
+    assert "module.this.cloudfront_distribution_id" in outputs
+    from iac_smith.legitimacy import check_pr_legitimacy, workload_module_calls
+
+    assert workload_module_calls(files) == ["module.this (terraform-aws-modules/cloudfront/aws)"]
+    assert (
+        check_pr_legitimacy(
+            generated_files=files,
+            change_plan=_plan("static-site"),
+            intent=_intent().model_copy(update={"resource_type": "cloudfront_distribution"}),
+        )
+        == []
+    )
