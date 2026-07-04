@@ -14,6 +14,7 @@ from iac_smith.models.change_plan import ChangePlan
 from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
 from iac_smith.models.rules import Ruleset
+from iac_smith.nodes.change_planner import FOUNDATION_ALIASES
 from iac_smith.nodes.static_review import (
     _extract_hcl_block_body,
     static_review_generated_files,
@@ -1603,7 +1604,7 @@ def _build_pr_check_workflow(change_plan: ChangePlan) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _change_detect_job(workload_modules: list[str]) -> list[str]:
+def _change_detect_job(workload_modules: list[str], foundation_module: str | None) -> list[str]:
     """Build the `detect` job that scopes apply to the components that changed.
 
     It diffs the push range (`github.event.before`..`github.sha`) and emits, per
@@ -1649,9 +1650,16 @@ def _change_detect_job(workload_modules: list[str]) -> list[str]:
         "          if changed '^bootstrap/'; then bootstrap=true; fi",
         "          if changed '^environments/terragrunt\\.hcl$'"
         " || changed '^environments/[^/]+/terragrunt\\.hcl$'; then root=true; fi",
-        "          if changed '^modules/foundation/'"
-        " || changed '^environments/[^/]+/foundation/'; then foundation=true; fi",
-        '          if [ "$root" = true ]; then foundation=true; fi',
+        *(
+            [
+                f"          if changed '^modules/{foundation_module}/'"
+                f" || changed '^environments/[^/]+/{foundation_module}/';"
+                " then foundation=true; fi",
+                '          if [ "$root" = true ]; then foundation=true; fi',
+            ]
+            if foundation_module
+            else []
+        ),
         "          stack_args=()",
         "          for s in ${WORKLOAD_STACKS}; do",
         '            if [ "$root" = true ] || changed "^modules/${s}/"'
@@ -1698,6 +1706,10 @@ def _gate_environment_job(env: str) -> list[str]:
 
 
 def _build_apply_workflow(change_plan: ChangePlan) -> str:
+    return build_apply_workflow(change_plan.files_to_generate, change_plan.environments)
+
+
+def build_apply_workflow(files_to_generate: list[str], environments: list[str]) -> str:
     """Build terraform-apply.yml deterministically from the actual module paths.
 
     The run is scoped to the components whose files changed (`detect` job) and
@@ -1705,15 +1717,11 @@ def _build_apply_workflow(change_plan: ChangePlan) -> str:
     before any AWS mutation. Greenfield pushes apply every component in dependency
     order. Skipped upstream jobs do not cancel independent downstream applies.
     """
-    module_names = _extract_module_names(change_plan.files_to_generate)
-    bootstrap_envs = (
-        _extract_bootstrap_envs(change_plan.files_to_generate)
-        or change_plan.environments
-        or ["non-prod"]
-    )
+    module_names = _extract_module_names(files_to_generate)
+    bootstrap_envs = _extract_bootstrap_envs(files_to_generate) or environments or ["non-prod"]
     env = bootstrap_envs[0]
-    has_foundation = "foundation" in module_names
-    workload_modules = [n for n in module_names if n != "foundation"]
+    foundation_module = next((name for name in module_names if name in FOUNDATION_ALIASES), None)
+    workload_modules = [n for n in module_names if n != foundation_module]
 
     lines: list[str] = [
         "on:",
@@ -1730,7 +1738,7 @@ def _build_apply_workflow(change_plan: ChangePlan) -> str:
         "  id-token: write",
         "",
         "jobs:",
-        *_change_detect_job(workload_modules),
+        *_change_detect_job(workload_modules, foundation_module),
         "",
         *_gate_environment_job(env),
         "",
@@ -1752,11 +1760,11 @@ def _build_apply_workflow(change_plan: ChangePlan) -> str:
         _BOOTSTRAP_BACKEND_RUN,
     ]
 
-    if has_foundation:
+    if foundation_module:
         lines += [
             "",
             "  apply-foundation:",
-            f"    name: Apply — {env}/foundation",
+            f"    name: Apply — {env}/{foundation_module}",
             "    needs: [detect, gate, bootstrap]",
             "    if: ${{ always() && needs.gate.result == 'success'"
             " && needs.detect.outputs.foundation == 'true'"
@@ -1768,11 +1776,13 @@ def _build_apply_workflow(change_plan: ChangePlan) -> str:
             "      - uses: hashicorp/setup-terraform@v3",
             _TG_INSTALL_STEP,
             _AWS_CREDS_STEP,
-            *_terragrunt_plan_apply_steps("foundation", f"environments/{env}/foundation"),
+            *_terragrunt_plan_apply_steps(
+                foundation_module, f"environments/{env}/{foundation_module}"
+            ),
         ]
 
     if workload_modules:
-        if has_foundation:
+        if foundation_module:
             pred_job = "apply-foundation"
             pred_ref = "needs['apply-foundation']"
         else:

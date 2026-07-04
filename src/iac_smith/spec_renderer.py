@@ -351,45 +351,9 @@ def _render_pr_check_workflow(spec: InfrastructureSpec) -> str:
 
 
 def _render_apply_workflow(spec: InfrastructureSpec) -> str:
-    env = spec.environments[0]
-    return "\n".join(
-        [
-            "name: Terraform Apply",
-            "",
-            "on:",
-            "  push:",
-            "    branches: [main]",
-            "    paths:",
-            "      - 'environments/**'",
-            "      - 'modules/**'",
-            "      - 'bootstrap/**'",
-            "",
-            "permissions:",
-            "  contents: read",
-            "  id-token: write",
-            "",
-            "jobs:",
-            "  detect:",
-            "    runs-on: ubuntu-latest",
-            "    outputs:",
-            "      stack_changed: ${{ steps.filter.outputs.stack_changed }}",
-            "    steps:",
-            "      - uses: actions/checkout@v4",
-            "      - id: filter",
-            "        run: echo 'stack_changed=true' >> \"$GITHUB_OUTPUT\"",
-            "  plan-summary:",
-            "    needs: detect",
-            "    if: needs.detect.outputs.stack_changed == 'true'",
-            "    runs-on: ubuntu-latest",
-            "    environment: production",
-            "    steps:",
-            "      - uses: actions/checkout@v4",
-            "      - run: echo 'Spec-rendered apply workflow placeholder. Review generated plan'",
-            "      - run: echo 'before apply.'",
-            f"      - run: echo 'Default environment: {env}'",
-            "",
-        ]
-    )
+    from iac_smith.dynamic_terraform import build_apply_workflow
+
+    return build_apply_workflow(spec.files_to_generate, spec.environments)
 
 
 def _render_backend_file(spec: InfrastructureSpec, path: str) -> str:
