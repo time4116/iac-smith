@@ -209,3 +209,48 @@ def test_required_foundation_resolves_to_actual_vpc_foundation_stack(tmp_path):
     assert 'dependency "vpc-foundation"' in stack_hcl
     assert 'config_path = "../vpc-foundation"' in stack_hcl
     assert "vpc_id = dependency.vpc-foundation.outputs.vpc_id" in stack_hcl
+
+
+def test_rendered_workflows_are_valid_yaml_and_apply_is_real():
+    import yaml
+
+    spec = build_spec_from_intent(
+        intent=_intent(),
+        change_plan=_plan(),
+        repo_patterns=RepoPatterns(existing_stack_paths=["modules/foundation"]),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+    files = render_spec(spec)
+
+    apply_workflow = files[".github/workflows/terraform-apply.yml"]
+    pr_check = files[".github/workflows/terraform-pr-check.yml"]
+    parsed = yaml.safe_load(apply_workflow)
+    yaml.safe_load(pr_check)
+
+    # The live demo PRs shipped `echo 'Default environment: non-prod'` — an
+    # unquoted YAML scalar with `: ` inside — which GitHub rejected as an
+    # invalid workflow file.
+    assert "placeholder" not in apply_workflow
+    assert {"detect", "gate", "bootstrap", "apply-workloads"} <= set(parsed["jobs"])
+    assert parsed["jobs"]["gate"]["environment"] == "non-prod"
+    assert "terragrunt apply --non-interactive tfplan" in apply_workflow
+    assert "terraform import aws_s3_bucket.terraform_state" in apply_workflow
+
+
+def test_rendered_apply_workflow_recognizes_foundation_alias_stack():
+    import yaml
+
+    spec = build_spec_from_intent(
+        intent=_intent("vpc"),
+        change_plan=_plan("vpc-foundation"),
+        repo_patterns=RepoPatterns(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+    files = render_spec(spec)
+    apply_workflow = files[".github/workflows/terraform-apply.yml"]
+    parsed = yaml.safe_load(apply_workflow)
+
+    assert "apply-foundation" in parsed["jobs"]
+    assert "environments/non-prod/vpc-foundation" in apply_workflow
+    assert "modules/vpc-foundation/" in apply_workflow
+    assert "apply-workloads" not in parsed["jobs"]
