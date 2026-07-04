@@ -22,7 +22,7 @@ from collections.abc import Callable, Iterator
 from difflib import get_close_matches
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, JsonValue, ValidationError
 
 from iac_smith.blackboard import TerraformContract, validate_generated_contracts
 from iac_smith.dynamic_terraform import (
@@ -36,6 +36,7 @@ from iac_smith.dynamic_terraform import (
 from iac_smith.models.infrastructure_spec import OutputSpec, ResourceSpec
 from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.validation import ValidationStatus
+from iac_smith.registry_modules import RegistryModuleContract
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _BARE_REFERENCE_HEAD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\.[A-Za-z_]")
@@ -45,8 +46,19 @@ _RESOURCE_REF_RE = re.compile(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\.([a-z][a-z0-9
 _NESTED_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+class ComposedRegistryModule(BaseModel):
+    """A community-module call selected against a harvested registry contract."""
+
+    source: str
+    # Pinned from the registry contract after validation, never by the model.
+    version: str = ""
+    inputs: dict[str, JsonValue] = Field(default_factory=dict)
+    outputs: list[str] = Field(default_factory=list)
+
+
 class ComposedComponent(BaseModel):
-    resources: list[ResourceSpec]
+    resources: list[ResourceSpec] = Field(default_factory=list)
+    registry_module: ComposedRegistryModule | None = None
     outputs: list[OutputSpec] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
     # Populated from the provider contracts after validation (never by the
@@ -281,6 +293,71 @@ def _nested_block_errors(
                             block_names=block_names,
                         )
                     )
+    return errors
+
+
+_INTERPOLATION_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def validate_composed_registry_module(
+    module: ComposedRegistryModule,
+    *,
+    contracts: dict[str, RegistryModuleContract],
+    allowed_inputs: list[str],
+) -> list[str]:
+    """Deterministically validate a module call against its registry contract.
+
+    Mirrors the provider-schema gate: hallucinated modules, inputs the module
+    does not define, missing required inputs, unknown outputs, and references
+    to anything other than the allowed input variables are all repair findings.
+    """
+    contract = contracts.get(module.source)
+    if contract is None:
+        offered = ", ".join(f"`{source}`" for source in sorted(contracts))
+        return [f"`{module.source}` is not one of the offered community modules: {offered}."]
+    errors: list[str] = []
+    unknown = sorted(set(module.inputs) - set(contract.inputs))
+    if unknown:
+        sample = ", ".join(sorted(contract.inputs)[:40])
+        errors.append(
+            f"Module `{module.source}` does not define input(s): "
+            + ", ".join(f"`{name}`" for name in unknown)
+            + f". Its inputs include: {sample}."
+        )
+    missing = [name for name in contract.required_inputs if name not in module.inputs]
+    if missing:
+        errors.append(
+            f"Module `{module.source}` is missing required input(s): "
+            + ", ".join(f"`{name}`" for name in missing)
+            + "."
+        )
+    allowed = set(allowed_inputs)
+    for name, value in module.inputs.items():
+        scope = f"{module.source} input `{name}`"
+        for leaf in _iter_string_leaves(value):
+            errors.extend(_bare_reference_errors([leaf], scope=scope, known_resource_types=set()))
+            for expression in _INTERPOLATION_RE.findall(leaf):
+                if _FORBIDDEN_ROOT_RE.search(expression) or _RESOURCE_REF_RE.search(expression):
+                    errors.append(
+                        f"`{scope}` references `{expression.strip()}`, but a module call "
+                        "has no sibling resources or local/data/module values. Only "
+                        "literals and the allowed input variables exist here."
+                    )
+                    continue
+                for var_name in _VAR_REF_RE.findall(expression):
+                    if var_name not in allowed:
+                        errors.append(
+                            f"`{scope}` references undeclared variable `var.{var_name}`. "
+                            f"The only input variables are: {', '.join(allowed_inputs)}."
+                        )
+    unknown_outputs = [name for name in module.outputs if name not in contract.outputs]
+    if unknown_outputs:
+        sample = ", ".join(contract.outputs[:40])
+        errors.append(
+            f"Module `{module.source}` does not define output(s): "
+            + ", ".join(f"`{name}`" for name in unknown_outputs)
+            + f". Its outputs include: {sample}."
+        )
     return errors
 
 
@@ -709,6 +786,177 @@ class SpecComposer:
                 )
         return lines
 
+    def _registry_candidate_lines(self, contracts: dict[str, RegistryModuleContract]) -> list[str]:
+        lines = [
+            "",
+            "Community modules available (contracts harvested from the Terraform Registry):",
+        ]
+        for source in sorted(contracts):
+            contract = contracts[source]
+            lines.append(f"- {source} (version {contract.version})")
+            if contract.description:
+                lines.append(f"  {contract.description[:160]}")
+            if contract.required_inputs:
+                lines.append(f"  required inputs: {', '.join(contract.required_inputs)}")
+            optional = sorted(set(contract.inputs) - set(contract.required_inputs))
+            if optional:
+                lines.append(f"  optional inputs: {', '.join(optional[:40])}")
+            if contract.outputs:
+                lines.append(f"  outputs: {', '.join(contract.outputs[:40])}")
+        return lines
+
+    def _compose_registry_module(
+        self,
+        *,
+        intent: InfrastructureIntent,
+        component_name: str,
+        allowed_inputs: list[str],
+        environments: list[str],
+        candidates: list[RegistryModuleContract],
+        negative_patterns: list[str] | None,
+        previous: ComposedRegistryModule | None = None,
+        initial_findings: list[str] | None = None,
+    ) -> ComposedRegistryModule | None:
+        """Select and fill one community-module call, or None to compose raw resources.
+
+        Fresh composition treats a decline or exhausted repair rounds as "use raw
+        provider resources instead" (fail-soft). Repairing an existing module call
+        (``previous``) raises on failure: abandoning the implementation mid-repair
+        would silently change what the PR contains.
+        """
+        contracts = {contract.source: contract for contract in candidates}
+        findings = list(initial_findings or [])
+        repairing = previous is not None
+        for round_number in range(1, self.max_repair_rounds + 2):
+            previous_lines: list[str] = []
+            if previous is not None:
+                previous_lines = [
+                    "",
+                    "Your previous module call is below. It failed the findings at the",
+                    "end of this prompt. Apply the SMALLEST change that resolves every",
+                    "finding and keep everything else identical:",
+                    json.dumps(
+                        previous.model_dump(include={"source", "inputs", "outputs"}),
+                        separators=(",", ":"),
+                    ),
+                ]
+            lines = [
+                *self._context_lines(
+                    intent=intent,
+                    component_name=component_name,
+                    allowed_inputs=allowed_inputs,
+                    environments=environments,
+                ),
+                *self._registry_candidate_lines(contracts),
+                *self._negative_pattern_lines(negative_patterns),
+                *previous_lines,
+                "",
+                "Decide whether ONE community module above fully implements the request.",
+                "Rules:",
+                '- Return ONLY JSON: {"registry_module": {"source": "<candidate source>",',
+                '  "inputs": {"<input>": <value>}, "outputs": ["<module output>", ...]}}',
+                '- Or return {"registry_module": null} when raw provider resources fit',
+                "  the request better (module too narrow, wrong service, or the request",
+                "  needs resources no single candidate covers).",
+                "- `inputs` values are native JSON (numbers, booleans, lists, objects;",
+                "  strings are quoted templates). Wrap variable references in",
+                '  interpolation (e.g. "${var.environment}"). No other references exist',
+                "  in a module call: never reference resources, data sources, locals, or",
+                "  other modules.",
+                "- Use only input names the chosen module defines; set every required",
+                "  input; rely on the module's defaults otherwise.",
+                "- `outputs` lists the module outputs consumers of this stack need,",
+                "  chosen from the module's outputs.",
+            ]
+            if findings:
+                lines.extend(
+                    [
+                        "",
+                        "Your previous response failed deterministic validation. Fix every",
+                        "finding below without introducing new violations:",
+                        *(f"- {finding}" for finding in findings),
+                    ]
+                )
+            try:
+                payload = self._invoke_json("\n".join(lines))
+            except ValueError as exc:
+                findings = [
+                    f"Your previous response could not be parsed: {exc} Return exactly "
+                    'one JSON object of the form {"registry_module": {...}} or '
+                    '{"registry_module": null} with no prose and no markdown fences.'
+                ]
+                self._log(
+                    f"IaC Smith: registry module round {round_number} response was not "
+                    f"parseable JSON; repairing. ({exc})"
+                )
+                continue
+            if "registry_module" not in payload:
+                findings = [
+                    'The response must be {"registry_module": {...}} or '
+                    '{"registry_module": null} — the `registry_module` key was missing.'
+                ]
+                continue
+            selection = payload["registry_module"]
+            if selection is None:
+                if repairing:
+                    raise SpecCompositionError(
+                        "Runtime repair abandoned the community-module implementation; "
+                        "blocking rather than silently changing what the PR contains."
+                    )
+                self._log("IaC Smith: model declined community modules; composing raw resources.")
+                return None
+            try:
+                module = ComposedRegistryModule.model_validate(selection)
+            except ValidationError as exc:
+                findings = _shape_findings(exc)
+                self._log(
+                    f"IaC Smith: registry module round {round_number} response shape was "
+                    f"invalid ({len(exc.errors())} field error(s)); repairing."
+                )
+                continue
+            findings = validate_composed_registry_module(
+                module, contracts=contracts, allowed_inputs=allowed_inputs
+            )
+            if not findings:
+                contract = contracts[module.source]
+                self._log(
+                    f"IaC Smith: composed community module call `{module.source}` "
+                    f"(version {contract.version}) for `{component_name}`."
+                )
+                return module.model_copy(update={"version": contract.version})
+            previous = module
+            self._log(
+                f"IaC Smith: registry module round {round_number} failed deterministic "
+                f"validation with {len(findings)} finding(s); repairing."
+            )
+        if repairing:
+            raise SpecCompositionError(
+                "Runtime repair of the community-module call did not converge after "
+                f"{self.max_repair_rounds + 1} attempts: " + "; ".join(findings)
+            )
+        self._log(
+            "IaC Smith: community-module composition did not validate; "
+            "falling back to raw provider resources."
+        )
+        return None
+
+    def _registry_component(self, module: ComposedRegistryModule) -> ComposedComponent:
+        return ComposedComponent(
+            registry_module=module,
+            outputs=[
+                OutputSpec(
+                    name=name,
+                    description=f"`{name}` from `{module.source}`.",
+                    value=f"module.this.{name}",
+                )
+                for name in module.outputs
+            ],
+            assumptions=[
+                f"Implemented via community module `{module.source}` "
+                f"pinned to version `{module.version}`."
+            ],
+        )
+
     def _compose_once(
         self,
         *,
@@ -818,8 +1066,30 @@ class SpecComposer:
         negative_patterns: list[str] | None = None,
         previous: ComposedComponent | None = None,
         runtime_findings: list[str] | None = None,
+        registry_candidates: list[RegistryModuleContract] | None = None,
     ) -> ComposedComponent:
         known_resource_types = set(provider_contracts)
+        if previous is not None and previous.registry_module is not None:
+            # Repairing a module call: re-enter registry composition with the
+            # runtime findings; its contract must be offered again for validation.
+            candidates = list(registry_candidates or [])
+            if previous.registry_module.source not in {c.source for c in candidates}:
+                raise SpecCompositionError(
+                    f"Cannot repair community module `{previous.registry_module.source}`: "
+                    "its registry contract is no longer available."
+                )
+            module = self._compose_registry_module(
+                intent=intent,
+                component_name=component_name,
+                allowed_inputs=allowed_inputs,
+                environments=environments,
+                candidates=candidates,
+                negative_patterns=negative_patterns,
+                previous=previous.registry_module,
+                initial_findings=list(runtime_findings or []),
+            )
+            assert module is not None  # repair either converges or raises
+            return self._registry_component(module)
         if previous is not None:
             # Repairing an existing composition: keep its type universe instead
             # of re-selecting, and seed the findings with the runtime errors.
@@ -840,6 +1110,17 @@ class SpecComposer:
                     previous=previous,
                     initial_findings=list(runtime_findings or []),
                 )
+        if registry_candidates:
+            module = self._compose_registry_module(
+                intent=intent,
+                component_name=component_name,
+                allowed_inputs=allowed_inputs,
+                environments=environments,
+                candidates=registry_candidates,
+                negative_patterns=negative_patterns,
+            )
+            if module is not None:
+                return self._registry_component(module)
         selected, selection_warnings = self._select_resource_types(
             intent=intent,
             component_name=component_name,
