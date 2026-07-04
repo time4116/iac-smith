@@ -245,7 +245,8 @@ def test_compose_accepts_native_json_argument_values():
     assert 'engine = "postgres"' in rendered
     assert "port = 5432" in rendered
     assert "public = false" in rendered
-    assert 'Environment = "${var.environment}"' in rendered
+    # A string that is exactly one interpolation renders as the bare expression.
+    assert "Environment = var.environment" in rendered
     assert 'ManagedBy = "IaC Smith"' in rendered
     hcl2.loads(rendered)
 
@@ -1227,3 +1228,171 @@ def test_data_reference_finding_names_the_unique_name_alternative():
         "`data` values do not exist" in error and "omit the optional name argument" in error
         for error in errors
     )
+
+
+# --- Second showcase round (runs on issues #68/#69/#70): renderer semantics ---
+
+
+def test_block_typed_arguments_are_canonicalized_and_rendered_as_blocks():
+    from iac_smith.spec_composer import normalize_composed_blocks
+
+    contracts = {
+        "customcloud_pipeline": TerraformContract(
+            kind="provider_resource",
+            name="customcloud_pipeline",
+            allowed_arguments=["name", "delivery", "tags"],
+            required_arguments=["name"],
+            block_names=["delivery", "logging"],
+            source="fixture schema",
+        )
+    }
+    # Terraform JSON semantics: the model expresses blocks as "name": [{...}]
+    # inside arguments — including an inner block ("logging") nested deeper.
+    composed = ComposedComponent(
+        resources=[
+            ResourceSpec(
+                type="customcloud_pipeline",
+                name="this",
+                arguments={
+                    "name": "pipeline",
+                    "delivery": [
+                        {
+                            "destination": "bucket",
+                            "logging": [{"enabled": True, "group": "logs"}],
+                        }
+                    ],
+                    "tags": {"Environment": "${var.environment}"},
+                },
+            )
+        ]
+    )
+
+    normalized = normalize_composed_blocks(composed, contracts)
+    resource = normalized.resources[0]
+    assert "delivery" not in resource.arguments
+    assert resource.nested_blocks["delivery"][0]["destination"] == "bucket"
+    # `tags` is a plain map attribute, not a block — it must stay an argument.
+    assert "tags" in resource.arguments
+
+    rendered = render_provider_resources(
+        normalized.resources, {"customcloud_pipeline": ["delivery", "logging"]}
+    )
+    assert "delivery {" in rendered
+    assert "logging {" in rendered
+    assert "delivery = [" not in rendered
+    assert "logging = [" not in rendered
+    assert "tags = {" in rendered
+    hcl2.loads(rendered)
+
+
+def test_sole_interpolation_jsonencode_renders_as_bare_expression():
+    from iac_smith.spec_renderer import _sole_interpolation_expression
+
+    policy = '${jsonencode({"Version":"2012-10-17","Statement":[{"Effect":"Allow"}]})}'
+    assert (
+        _sole_interpolation_expression(policy)
+        == 'jsonencode({"Version":"2012-10-17","Statement":[{"Effect":"Allow"}]})'
+    )
+    # Mixed templates keep template semantics.
+    assert _sole_interpolation_expression("prefix-${var.environment}") is None
+    assert _sole_interpolation_expression("${var.a}-${var.b}") is None
+
+    rendered = render_provider_resources(
+        [
+            ResourceSpec(
+                type="customcloud_database",
+                name="db",
+                arguments={"engine": "postgres", "name": policy},
+            )
+        ]
+    )
+    assert 'name = jsonencode({"Version":"2012-10-17"' in rendered
+    assert "\\" not in rendered
+    hcl2.loads(rendered)
+
+
+def test_contracts_from_provider_schema_collects_nested_block_names():
+    from iac_smith.blackboard import contracts_from_provider_schema
+
+    schema = {
+        "provider_schemas": {
+            "registry.terraform.io/hashicorp/customcloud": {
+                "resource_schemas": {
+                    "customcloud_bucket_encryption": {
+                        "block": {
+                            "attributes": {"bucket": {"type": "string", "required": True}},
+                            "block_types": {
+                                "rule": {
+                                    "block": {
+                                        "block_types": {
+                                            "apply_server_side_encryption_by_default": {
+                                                "block": {
+                                                    "attributes": {
+                                                        "sse_algorithm": {"type": "string"}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    contracts = contracts_from_provider_schema(schema)
+    contract = contracts["customcloud_bucket_encryption"]
+
+    assert contract.block_names == ["apply_server_side_encryption_by_default", "rule"]
+    assert "rule" in contract.allowed_arguments
+
+
+def test_compose_carries_block_names_for_the_renderer():
+    contracts = {
+        "customcloud_database": TerraformContract(
+            kind="provider_resource",
+            name="customcloud_database",
+            allowed_arguments=[
+                "engine",
+                "name",
+                "network_ref",
+                "port",
+                "public",
+                "settings",
+                "tags",
+            ],
+            required_arguments=["engine"],
+            block_names=["settings"],
+            source="fixture schema",
+        )
+    }
+    composition = {
+        "resources": [
+            {
+                "type": "customcloud_database",
+                "name": "db",
+                # Block expressed Terraform-JSON style inside arguments.
+                "arguments": {"engine": "postgres", "settings": [{"tier": "small"}]},
+            }
+        ],
+        "outputs": [],
+        "assumptions": [],
+    }
+    composer, _ = _composer([{"resource_types": ["customcloud_database"]}, composition])
+
+    composed = composer.compose(
+        intent=_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=contracts,
+    )
+
+    assert composed.block_names == {"customcloud_database": ["settings"]}
+    assert composed.resources[0].nested_blocks["settings"] == [{"tier": "small"}]
+    rendered = render_provider_resources(composed.resources, composed.block_names)
+    assert "settings {" in rendered
+    assert 'tier = "small"' in rendered

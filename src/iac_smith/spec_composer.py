@@ -49,6 +49,51 @@ class ComposedComponent(BaseModel):
     resources: list[ResourceSpec]
     outputs: list[OutputSpec] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
+    # Populated from the provider contracts after validation (never by the
+    # model): per resource type, the schema's nested-block names so rendering
+    # can emit real blocks. See ProviderResourcesSpec.block_names.
+    block_names: dict[str, list[str]] = Field(default_factory=dict)
+
+
+def normalize_composed_blocks(
+    composed: ComposedComponent, provider_contracts: dict[str, TerraformContract]
+) -> ComposedComponent:
+    """Move block-typed argument entries into ``nested_blocks``.
+
+    The prompt says argument values follow Terraform JSON semantics, and in
+    Terraform JSON a nested block is written ``"name": [{...}]`` — so the model
+    putting blocks in ``arguments`` is faithful, not wrong (the live issue
+    #69/#70 runs did exactly this). Canonicalizing deterministically beats
+    asking the model to relearn the split.
+    """
+    resources = []
+    for resource in composed.resources:
+        contract = provider_contracts.get(resource.type)
+        block_names = set(contract.block_names) if contract else set()
+        if not block_names:
+            resources.append(resource)
+            continue
+        arguments = dict(resource.arguments)
+        nested_blocks = {name: list(entries) for name, entries in resource.nested_blocks.items()}
+        for key in list(arguments):
+            if key not in block_names:
+                continue
+            value = arguments[key]
+            entries = (
+                [value]
+                if isinstance(value, dict)
+                else value
+                if isinstance(value, list) and value and all(isinstance(v, dict) for v in value)
+                else None
+            )
+            if entries is None:
+                continue
+            nested_blocks.setdefault(key, []).extend(entries)
+            del arguments[key]
+        resources.append(
+            resource.model_copy(update={"arguments": arguments, "nested_blocks": nested_blocks})
+        )
+    return composed.model_copy(update={"resources": resources})
 
 
 class SpecCompositionError(RuntimeError):
@@ -218,7 +263,14 @@ def validate_composed_component(
             errors.append(f"Duplicate resource address `{scope}`.")
         addresses.add((resource.type, resource.name))
 
-    rendered = render_provider_resources(composed.resources)
+    rendered = render_provider_resources(
+        composed.resources,
+        {
+            rtype: contract.block_names
+            for rtype, contract in provider_contracts.items()
+            if contract.block_names
+        },
+    )
     gate = validate_generated_contracts(
         {f"modules/{component_name}/main.tf": rendered},
         provider_contracts,
@@ -593,6 +645,11 @@ class SpecComposer:
             lines.append(
                 f"  allowed arguments and nested blocks: {', '.join(contract.allowed_arguments)}"
             )
+            if contract.block_names:
+                lines.append(
+                    f"  names that are nested blocks (use `nested_blocks`): "
+                    f"{', '.join(contract.block_names)}"
+                )
         return lines
 
     def _compose_once(
@@ -740,6 +797,7 @@ class SpecComposer:
                     f"invalid ({len(exc.errors())} field error(s)); repairing."
                 )
                 continue
+            composed = normalize_composed_blocks(composed, provider_contracts)
             findings = validate_composed_component(
                 composed,
                 provider_contracts=provider_contracts,
@@ -753,7 +811,16 @@ class SpecComposer:
                     f"for `{component_name}`."
                 )
                 composed.assumptions.extend(selection_warnings)
-                return composed
+                composed_types = {resource.type for resource in composed.resources}
+                return composed.model_copy(
+                    update={
+                        "block_names": {
+                            rtype: provider_contracts[rtype].block_names
+                            for rtype in sorted(composed_types)
+                            if rtype in provider_contracts and provider_contracts[rtype].block_names
+                        }
+                    }
+                )
             carried_negatives.extend(
                 finding for finding in findings if finding not in carried_negatives
             )

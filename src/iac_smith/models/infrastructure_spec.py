@@ -51,6 +51,11 @@ class ResourceSpec(BaseModel):
 class ProviderResourcesSpec(BaseModel):
     kind: Literal["provider_resources"] = "provider_resources"
     resources: list[ResourceSpec] = Field(default_factory=list)
+    # Per resource type: names that are nested blocks (at any depth) in the
+    # provider schema, so the renderer can emit `name { ... }` instead of an
+    # attribute assignment. Carried on the spec because rendering happens after
+    # composition, where the schema contracts are no longer in scope.
+    block_names: dict[str, list[str]] = Field(default_factory=dict)
     contract_source: str = "provider-schema"
 
 
