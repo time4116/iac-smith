@@ -1468,3 +1468,63 @@ def test_missing_required_argument_inside_nested_block_is_a_finding():
         "nested block `index` entry 1 is missing required argument `projection_type`" in error
         for error in errors
     )
+
+
+def test_repair_composes_iteratively_against_previous_composition():
+    previous = ComposedComponent.model_validate(_VALID_COMPOSITION)
+    composer, runtime = _composer([_VALID_COMPOSITION])
+
+    composed = composer.compose(
+        intent=_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+        previous=previous,
+        runtime_findings=["Error: all attributes must be indexed. Unused attributes: [x]"],
+    )
+
+    # No type-selection call happens on repair: one prompt total.
+    assert len(runtime.prompts) == 1
+    prompt = runtime.prompts[0]
+    assert "Your previous composition is below" in prompt
+    assert "SMALLEST change" in prompt
+    assert "all attributes must be indexed" in prompt
+    assert '"customcloud_network"' in prompt
+    assert len(composed.resources) == 2
+
+
+def test_spec_renderer_repair_hands_previous_composition_to_composer(monkeypatch):
+    _patch_resolver(monkeypatch)
+
+    class RecordingComposer:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def compose(self, **kwargs):
+            self.calls.append(kwargs)
+            return ComposedComponent.model_validate(_VALID_COMPOSITION)
+
+    composer = RecordingComposer()
+    generator = SpecRendererGenerator(composer=composer)
+
+    generator.generate_files(
+        intent=_intent(),
+        change_plan=_plan(),
+        repo_patterns=RepoPatterns(),
+        target_repo="time4116/iac-smith-demo-infra",
+    )
+    generator.repair_files(
+        intent=_intent(),
+        change_plan=_plan(),
+        repo_patterns=RepoPatterns(),
+        target_repo="time4116/iac-smith-demo-infra",
+        generated_files={},
+        repair_errors=["terraform plan failed: all attributes must be indexed"],
+    )
+
+    first, second = composer.calls
+    assert first["previous"] is None
+    assert second["previous"] is not None
+    assert second["previous"].resources[0].type == "customcloud_network"
+    assert any("all attributes must be indexed" in f for f in second["runtime_findings"])

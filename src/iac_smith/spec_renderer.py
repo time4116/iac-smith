@@ -791,6 +791,8 @@ class SpecRendererGenerator:
         self._allow_structure_only = allow_structure_only
         self._repair_negative_patterns: list[str] = []
         self._last_repo_path = None
+        self._last_composed = None
+        self._pending_runtime_findings: list[str] = []
 
     def _structure_only_allowed(self) -> bool:
         if self._allow_structure_only is not None:
@@ -865,6 +867,8 @@ class SpecRendererGenerator:
             *(blackboard.negative_patterns if blackboard else []),
             *self._repair_negative_patterns,
         ]
+        runtime_findings = self._pending_runtime_findings
+        self._pending_runtime_findings = []
         try:
             composed = composer.compose(
                 intent=intent,
@@ -873,6 +877,8 @@ class SpecRendererGenerator:
                 environments=spec.environments,
                 provider_contracts=resolver.provider_contracts,
                 negative_patterns=negative_patterns or None,
+                previous=self._last_composed if runtime_findings else None,
+                runtime_findings=runtime_findings or None,
             )
         except (SpecCompositionError, ValueError) as exc:
             if not allow_structure_only:
@@ -883,6 +889,7 @@ class SpecRendererGenerator:
             self._log(f"IaC Smith: spec composition failed; rendering structure only: {exc}")
             spec = _with_warning(spec, f"Spec composition failed; rendered structure only: {exc}")
             return render_spec(spec)
+        self._last_composed = composed
         return render_spec(apply_composition(spec, composed))
 
     def repair_files(
@@ -911,6 +918,10 @@ class SpecRendererGenerator:
             *self._repair_negative_patterns,
             *(_compact_finding(error) for error in repair_errors),
         ][-16:]
+        # Iterative repair: pass the exact runtime errors as first-round
+        # findings against the previous composition, so the model edits its
+        # last output instead of regenerating the same document at temp 0.
+        self._pending_runtime_findings = [_compact_finding(error) for error in repair_errors]
         return self.generate_files(
             intent=intent,
             change_plan=change_plan,

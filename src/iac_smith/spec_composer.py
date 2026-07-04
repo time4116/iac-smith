@@ -719,7 +719,25 @@ class SpecComposer:
         contracts: dict[str, TerraformContract],
         negative_patterns: list[str] | None,
         findings: list[str],
+        previous: ComposedComponent | None = None,
     ) -> dict[str, Any]:
+        previous_lines: list[str] = []
+        if previous is not None:
+            # Iterative repair: regenerating from scratch at temperature 0
+            # reproduces the same document, so a failing run never converges
+            # (the live issue #70 loop). Showing the prior composition turns
+            # "compose again" into "apply the minimal edit".
+            previous_lines = [
+                "",
+                "Your previous composition is below. It failed the findings at the",
+                "end of this prompt. Apply the SMALLEST change that resolves every",
+                "finding — usually removing or adjusting one entry — and keep every",
+                "other resource, argument, and output identical:",
+                json.dumps(
+                    previous.model_dump(include={"resources", "outputs", "assumptions"}),
+                    separators=(",", ":"),
+                ),
+            ]
         lines = [
             *self._context_lines(
                 intent=intent,
@@ -729,6 +747,7 @@ class SpecComposer:
             ),
             *self._contract_lines(contracts),
             *self._negative_pattern_lines(negative_patterns),
+            *previous_lines,
             "",
             "Compose the resources implementing the request. Rules:",
             "- Return ONLY JSON:",
@@ -797,8 +816,30 @@ class SpecComposer:
         environments: list[str],
         provider_contracts: dict[str, TerraformContract],
         negative_patterns: list[str] | None = None,
+        previous: ComposedComponent | None = None,
+        runtime_findings: list[str] | None = None,
     ) -> ComposedComponent:
         known_resource_types = set(provider_contracts)
+        if previous is not None:
+            # Repairing an existing composition: keep its type universe instead
+            # of re-selecting, and seed the findings with the runtime errors.
+            selected = sorted(
+                {resource.type for resource in previous.resources} & set(provider_contracts)
+            )
+            selection_warnings: list[str] = []
+            if selected:
+                return self._compose_rounds(
+                    intent=intent,
+                    component_name=component_name,
+                    allowed_inputs=allowed_inputs,
+                    environments=environments,
+                    provider_contracts=provider_contracts,
+                    negative_patterns=negative_patterns,
+                    selected=selected,
+                    selection_warnings=selection_warnings,
+                    previous=previous,
+                    initial_findings=list(runtime_findings or []),
+                )
         selected, selection_warnings = self._select_resource_types(
             intent=intent,
             component_name=component_name,
@@ -813,8 +854,36 @@ class SpecComposer:
         max_types = _int_env("IAC_SMITH_MAX_RESOURCE_TYPES", 12)
         if max_types > 0 and len(selected) > max_types:
             raise SpecCompositionError(_oversized_request_message(selected, max_types))
+        return self._compose_rounds(
+            intent=intent,
+            component_name=component_name,
+            allowed_inputs=allowed_inputs,
+            environments=environments,
+            provider_contracts=provider_contracts,
+            negative_patterns=negative_patterns,
+            selected=selected,
+            selection_warnings=selection_warnings,
+            previous=None,
+            initial_findings=[],
+        )
+
+    def _compose_rounds(
+        self,
+        *,
+        intent: InfrastructureIntent,
+        component_name: str,
+        allowed_inputs: list[str],
+        environments: list[str],
+        provider_contracts: dict[str, TerraformContract],
+        negative_patterns: list[str] | None,
+        selected: list[str],
+        selection_warnings: list[str],
+        previous: ComposedComponent | None,
+        initial_findings: list[str],
+    ) -> ComposedComponent:
+        known_resource_types = set(provider_contracts)
         contracts = {name: provider_contracts[name] for name in selected}
-        findings: list[str] = []
+        findings: list[str] = list(initial_findings)
         # Schema mistakes already rejected this run must not be rediscovered in a
         # later round, so every failed round's findings ride along as negative
         # patterns for the rest of the composition (bounded to keep the prompt sane).
@@ -829,6 +898,7 @@ class SpecComposer:
                     contracts=contracts,
                     negative_patterns=[*(negative_patterns or []), *carried_negatives],
                     findings=findings,
+                    previous=previous,
                 )
             except ValueError as exc:
                 # An unparseable response is a repairable violation, not a dead
@@ -882,6 +952,8 @@ class SpecComposer:
                 finding for finding in findings if finding not in carried_negatives
             )
             del carried_negatives[24:]
+            # Later rounds edit the newest composition rather than the original.
+            previous = composed
             self._log(
                 f"IaC Smith: composition round {round_number} failed deterministic "
                 f"validation with {len(findings)} finding(s); repairing."
