@@ -1064,3 +1064,76 @@ def test_composer_logs_full_response_when_unparseable():
     dumps = [line for line in logs if "unparseable model response" in line]
     assert dumps
     assert "bad \\x escape" in dumps[0]
+
+
+def test_extract_json_object_repairs_unquoted_bare_expression_values():
+    from iac_smith.dynamic_terraform import _extract_json_object
+
+    # The exact live issue #66 defect: output values emitted as unquoted JSON
+    # tokens, inside a fenced document.
+    broken = (
+        "```json\n"
+        '{"resources":[{"type":"aws_vpc","name":"foundation",'
+        '"arguments":{"cidr_block":"10.0.0.0/16"}}],'
+        '"outputs":[{"name":"vpc_id","description":"VPC id",'
+        '"value":aws_vpc.foundation.id},'
+        '{"name":"vpc_cidr","description":"CIDR",'
+        '"value":aws_vpc.foundation.cidr_block}],'
+        '"assumptions":[]}\n```'
+    )
+
+    document = _extract_json_object(broken)
+
+    assert document["outputs"][0]["value"] == "aws_vpc.foundation.id"
+    assert document["outputs"][1]["value"] == "aws_vpc.foundation.cidr_block"
+
+
+def test_extract_json_object_does_not_quote_non_reference_tokens():
+    import pytest as _pytest
+
+    from iac_smith.dynamic_terraform import _extract_json_object
+
+    # A dotless bare token is not reference-shaped; it must stay a parse error
+    # rather than being silently quoted into a string.
+    with _pytest.raises(ValueError):
+        _extract_json_object('{"value": bogus}')
+
+
+def test_compose_recovers_live_issue_66_unquoted_output_payload():
+    fenced_with_bare_outputs = (
+        "```json\n"
+        '{"resources":[{"type":"customcloud_database","name":"db",'
+        '"arguments":{"engine":"postgres"}}],'
+        '"outputs":[{"name":"database_ref","description":"Ref",'
+        '"value":customcloud_database.db.id}],"assumptions":[]}\n'
+        "```"
+    )
+    composer, runtime = _composer(
+        [{"resource_types": ["customcloud_database"]}, fenced_with_bare_outputs]
+    )
+
+    composed = composer.compose(
+        intent=_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    assert composed.outputs[0].value == "customcloud_database.db.id"
+    assert len(runtime.prompts) == 2  # parsed on round 1, no repair round
+
+
+def test_compose_prompt_forbids_unquoted_output_tokens():
+    composer, runtime = _composer([_VALID_SELECTION, _VALID_COMPOSITION])
+
+    composer.compose(
+        intent=_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    assert "never emit an unquoted token" in runtime.prompts[1]
+    assert "not a JSON template" not in runtime.prompts[1]

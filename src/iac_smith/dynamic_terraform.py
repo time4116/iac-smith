@@ -638,6 +638,36 @@ def _balanced_object_span(text: str) -> str | None:
     return None
 
 
+_BARE_EXPRESSION_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:[.\[][A-Za-z0-9_.*\[\]]*)+")
+
+
+def _quote_bare_expression_tokens(text: str, max_repairs: int = 32) -> str | None:
+    """Quote unquoted Terraform-reference tokens where JSON expects a value.
+
+    Models asked for "a bare Terraform expression" reliably emit it as an
+    unquoted JSON token (``"value":aws_vpc.foundation.id`` — the live issue #66
+    failure). The decode error names the exact position, so the repair is
+    surgical: only a reference-shaped token (must contain a dot) sitting where a
+    value is expected gets quoted; anything else stays a parse failure. Returns
+    the repaired text, or None when nothing was repaired.
+    """
+    repaired = text
+    changed = False
+    for _ in range(max_repairs):
+        try:
+            json.loads(repaired, strict=False)
+            return repaired if changed else None
+        except json.JSONDecodeError as exc:
+            if exc.msg != "Expecting value":
+                return repaired if changed else None
+            match = _BARE_EXPRESSION_TOKEN_RE.match(repaired, exc.pos)
+            if not match or "." not in match.group(0):
+                return repaired if changed else None
+            repaired = f'{repaired[: exc.pos]}"{match.group(0)}"{repaired[match.end() :]}'
+            changed = True
+    return repaired if changed else None
+
+
 def _extract_json_object(text: str) -> dict[str, Any]:
     # strict=False tolerates literal control characters (real newlines/tabs)
     # inside JSON strings — models emit them routinely in multi-line values
@@ -663,7 +693,13 @@ def _extract_json_object(text: str) -> dict[str, Any]:
             value = json.loads(candidate, strict=False)
         except json.JSONDecodeError as exc:
             errors.setdefault(kind, (candidate, exc))
-            continue
+            repaired = _quote_bare_expression_tokens(candidate)
+            if repaired is None:
+                continue
+            try:
+                value = json.loads(repaired, strict=False)
+            except json.JSONDecodeError:
+                continue
         if isinstance(value, dict):
             return value
     if not errors:
