@@ -29,7 +29,10 @@ def test_issue_workflow_has_privilege_boundary_before_secrets_and_oidc():
         "actions": "read",
         "contents": "read",
         "id-token": "write",
-        "issues": "read",
+        # issues stays the only write besides id-token: blocked runs post their
+        # block reason (prerequisite failures, staged too-broad plans) to the
+        # source issue, and the ephemeral github.token is scoped to this repo.
+        "issues": "write",
     }
     assert (
         workflow["concurrency"]["group"]
