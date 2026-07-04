@@ -166,8 +166,7 @@ def test_required_existing_stack_dependency_is_wired_generically(tmp_path):
 def test_required_foundation_resolves_to_actual_vpc_foundation_stack(tmp_path):
     (tmp_path / "modules" / "vpc-foundation").mkdir(parents=True)
     (tmp_path / "modules" / "vpc-foundation" / "outputs.tf").write_text(
-        'output "vpc_id" {\n  value = "v"\n}\n\n'
-        'output "private_subnet_ids" {\n  value = []\n}\n',
+        'output "vpc_id" {\n  value = "v"\n}\n\noutput "private_subnet_ids" {\n  value = []\n}\n',
         encoding="utf-8",
     )
     intent = InfrastructureIntent(
