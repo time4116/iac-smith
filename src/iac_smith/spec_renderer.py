@@ -706,6 +706,14 @@ def _with_warning(spec: InfrastructureSpec, warning: str) -> InfrastructureSpec:
     return spec.model_copy(update={"warnings": [*spec.warnings, warning]})
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _compact_finding(error: str) -> str:
+    """One terraform error as a single prompt-safe line (no ANSI, bounded)."""
+    return " ".join(_ANSI_RE.sub("", error).split())[:400]
+
+
 class SpecRendererGenerator:
     """File-generator adapter used by graph.default_file_generator."""
 
@@ -719,6 +727,8 @@ class SpecRendererGenerator:
         self._composer = composer
         self._logger = logger
         self._allow_structure_only = allow_structure_only
+        self._repair_negative_patterns: list[str] = []
+        self._last_repo_path = None
 
     def _structure_only_allowed(self) -> bool:
         if self._allow_structure_only is not None:
@@ -742,6 +752,7 @@ class SpecRendererGenerator:
         repo_path=None,
         blackboard: RunBlackboard | None = None,
     ) -> dict[str, str]:
+        self._last_repo_path = repo_path
         spec = build_spec_from_intent(
             intent=intent,
             change_plan=change_plan,
@@ -788,6 +799,10 @@ class SpecRendererGenerator:
                 spec, "Provider schema harvest was unavailable; rendered structure only."
             )
             return render_spec(spec)
+        negative_patterns = [
+            *(blackboard.negative_patterns if blackboard else []),
+            *self._repair_negative_patterns,
+        ]
         try:
             composed = composer.compose(
                 intent=intent,
@@ -795,7 +810,7 @@ class SpecRendererGenerator:
                 allowed_inputs=sorted(component.inputs),
                 environments=spec.environments,
                 provider_contracts=resolver.provider_contracts,
-                negative_patterns=blackboard.negative_patterns if blackboard else None,
+                negative_patterns=negative_patterns or None,
             )
         except (SpecCompositionError, ValueError) as exc:
             if not allow_structure_only:
@@ -807,3 +822,39 @@ class SpecRendererGenerator:
             spec = _with_warning(spec, f"Spec composition failed; rendered structure only: {exc}")
             return render_spec(spec)
         return render_spec(apply_composition(spec, composed))
+
+    def repair_files(
+        self,
+        *,
+        intent: InfrastructureIntent,
+        change_plan: ChangePlan,
+        repo_patterns: RepoPatterns,
+        ruleset=None,
+        target_repo: str,
+        generated_files: dict[str, str],
+        repair_errors: list[str],
+        blackboard: RunBlackboard | None = None,
+    ) -> dict[str, str]:
+        """Runtime repair for spec mode: re-compose with the real Terraform findings.
+
+        The schema gate cannot see everything (e.g. arguments *inside* nested
+        blocks — the live issue #70 run passed composition and failed
+        ``terraform validate`` on a GSI's inner arguments). Because rendering is
+        deterministic, "repair" here means one thing: run composition again with
+        the validator's exact errors carried as never-repeat patterns.
+        """
+        # Accumulate (bounded) across repair rounds: later rounds must not
+        # rediscover an error an earlier round already hit.
+        self._repair_negative_patterns = [
+            *self._repair_negative_patterns,
+            *(_compact_finding(error) for error in repair_errors),
+        ][-16:]
+        return self.generate_files(
+            intent=intent,
+            change_plan=change_plan,
+            repo_patterns=repo_patterns,
+            ruleset=ruleset,
+            target_repo=target_repo,
+            repo_path=self._last_repo_path,
+            blackboard=blackboard,
+        )
