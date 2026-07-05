@@ -59,10 +59,12 @@ def _plan(stack_name: str = "database-platform") -> ChangePlan:
             "README.md",
             "environments/non-prod/root.hcl",
             f"environments/non-prod/{stack_name}/terragrunt.hcl",
+            f"environments/non-prod/{stack_name}/README.md",
             f"modules/{stack_name}/main.tf",
             f"modules/{stack_name}/variables.tf",
             f"modules/{stack_name}/outputs.tf",
             f"modules/{stack_name}/versions.tf",
+            f"modules/{stack_name}/README.md",
         ],
         backend_resources={
             "non-prod": BackendResource(bucket="iac-smith-state", lock_table="iac-smith-lock")
@@ -1731,6 +1733,16 @@ def test_registry_module_renders_pinned_module_call(monkeypatch):
     assert hcl2.loads(main)
     outputs = files["modules/static-site/outputs.tf"]
     assert "module.this.cloudfront_distribution_id" in outputs
+    # Generated READMEs are real docs, not internal-jargon placeholders (the
+    # live showcase PR #2 review).
+    module_readme = files["modules/static-site/README.md"]
+    assert "typed InfrastructureSpec" not in module_readme
+    assert "terraform-aws-modules/cloudfront/aws" in module_readme
+    assert "pinned to `5.0.1`" in module_readme
+    assert "## Outputs" in module_readme
+    stack_readme = files["environments/non-prod/static-site/README.md"]
+    assert "Generated Terragrunt stack" not in stack_readme
+    assert "environment approval gate" in stack_readme
     # The root must not pin a provider range on top of the module's own
     # required_providers: aws "~> 5.0" against the module's ">= 6.x" made
     # terraform init unsatisfiable (live issue #66 re-run).
