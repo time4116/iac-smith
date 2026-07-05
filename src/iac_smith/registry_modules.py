@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -131,6 +132,40 @@ def fetch_module_contract(source: str, *, timeout: float = 10.0) -> RegistryModu
     )
 
 
+_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9-]{2,}")
+
+
+def _candidate_queries(intent: InfrastructureIntent, cap: int = 16) -> list[str]:
+    """Search queries derived from the parsed request, most specific first.
+
+    The registry search ANDs its terms, so a multi-word class like
+    "cloudfront distribution" matches nothing even though `cloudfront` finds
+    the module — after the full class the tokens are tried individually. The
+    parsed class name can also miss the operative service entirely (the live
+    issue #68 re-run classed a CloudFront request as `static website
+    hosting`), so feature and raw-request tokens contribute too. Everything
+    stays request-derived; there is no curated service vocabulary.
+    """
+    queries: list[str] = []
+    seen: set[str] = set()
+
+    def add(candidate: str) -> None:
+        if candidate and candidate not in seen and len(queries) < cap:
+            seen.add(candidate)
+            queries.append(candidate)
+
+    class_query = " ".join((intent.resource_type or "").replace("_", " ").split())
+    add(class_query)
+    for token in _TOKEN_RE.findall(class_query.lower()):
+        add(token)
+    for feature in intent.features:
+        for token in _TOKEN_RE.findall(feature.replace("_", " ").lower()):
+            add(token)
+    for token in _TOKEN_RE.findall((intent.raw_request or "").lower()):
+        add(token)
+    return queries
+
+
 def discover_registry_candidates(
     intent: InfrastructureIntent,
     *,
@@ -140,20 +175,14 @@ def discover_registry_candidates(
 ) -> list[RegistryModuleContract]:
     """Community-module candidates for the parsed intent, with harvested contracts.
 
-    The search query is derived from the parsed request (never a hardcoded
-    service list), so discovery stays generic across whatever the registry
-    exposes for the configured namespaces.
+    Queries are derived from the parsed request (never a hardcoded service
+    list), so discovery stays generic across whatever the registry exposes
+    for the configured namespaces.
     """
-    query = " ".join(
-        part for part in (intent.resource_type or "").replace("_", " ").split() if part
-    )
-    if not query:
+    queries = _candidate_queries(intent)
+    if not queries:
         return []
-    # The registry search ANDs its terms, so a multi-word class like
-    # "cloudfront distribution" matches nothing even though `cloudfront`
-    # finds the module; after the full query, fall back to its tokens.
-    queries = [query]
-    queries.extend(token for token in query.split() if len(token) >= 3 and token != query)
+    query = queries[0]
     candidates: list[RegistryModuleContract] = []
     seen: set[str] = set()
     for namespace in registry_namespaces():
