@@ -2,11 +2,11 @@
 
 This document describes the canonical layout IaC Smith generates when starting from an empty or near-empty target repository. It covers the directory structure, the rules that govern it, and how to extend the repo with additional stacks over time.
 
-IaC Smith is designed to scan and adapt to existing Terraform/Terragrunt conventions in the target repository before generating anything — but that path has not been tested against real-world existing infrastructure. Treat this layout as the guaranteed baseline for greenfield projects.
+IaC Smith is designed to scan and adapt to existing Terraform/Terragrunt conventions in the target repository before generating anything, but that path has not been tested against real-world existing infrastructure. Treat this layout as the guaranteed baseline for greenfield projects.
 
 ## Stacks
 
-A **stack** is one independently deployable unit of infrastructure — a named group of AWS resources that is planned and applied together and owns its own Terraform state. IaC Smith derives the stack name from the issue as a short `snake_case` or `kebab-case` label.
+A **stack** is one independently deployable unit of infrastructure: a named group of AWS resources that is planned and applied together and owns its own Terraform state. IaC Smith derives the stack name from the issue as a short `snake_case` or `kebab-case` label.
 
 Examples:
 
@@ -18,7 +18,7 @@ Examples:
 | EKS cluster | `eks-fargate` |
 | Baseline account guardrails | `baseline` |
 
-Each stack lives at `environments/<env>/<stack-name>/` and maps to a reusable Terraform module at `modules/<stack-name>/`. A repository can contain multiple stacks — each gets its own live path and its own isolated Terraform state file in S3.
+Each stack lives at `environments/<env>/<stack-name>/` and maps to a reusable Terraform module at `modules/<stack-name>/`. A repository can contain multiple stacks; each gets its own live path and its own isolated Terraform state file in S3.
 
 ## Directory structure
 
@@ -58,17 +58,17 @@ Each file in a module has a fixed responsibility. IaC Smith checks these in stat
 
 | File | Contains |
 |---|---|
-| `main.tf` | Resources and data sources only — no `terraform {}` block, no `variable`, no `output` |
+| `main.tf` | Resources and data sources only; no `terraform {}` block, no `variable`, no `output` |
 | `variables.tf` | All `variable` declarations |
 | `outputs.tf` | All `output` declarations |
-| `versions.tf` | The sole `terraform { required_providers {} }` block — never in `main.tf` |
+| `versions.tf` | The sole `terraform { required_providers {} }` block; never in `main.tf` |
 
 ## Terragrunt hierarchy
 
 The two-level hierarchy keeps remote state config DRY while giving each stack isolated state:
 
-1. **`environments/<env>/root.hcl`** — the environment **root config**: defines `remote_state` and the provider `generate` block once for the environment, plus shared locals. It is named `root.hcl` (not `terragrunt.hcl`) because Terragrunt deprecated using `terragrunt.hcl` as an include root. The state key uses `path_relative_to_include()`, which resolves to the calling stack's directory relative to this file (e.g. `ecs-fargate/terraform.tfstate`), so every stack gets its own isolated state file in S3 automatically. The root config holds its config **directly** — it has no `include` block of its own.
-2. **`environments/<env>/<stack>/terragrunt.hcl`** — the **stack config**: includes the root with `include "root" { path = find_in_parent_folders("root.hcl") }`, then declares the module source (relative path into `modules/`), dependency blocks, and input variable bindings.
+1. **`environments/<env>/root.hcl`**, the environment **root config**: defines `remote_state` and the provider `generate` block once for the environment, plus shared locals. It is named `root.hcl` (not `terragrunt.hcl`) because Terragrunt deprecated using `terragrunt.hcl` as an include root. The state key uses `path_relative_to_include()`, which resolves to the calling stack's directory relative to this file (e.g. `ecs-fargate/terraform.tfstate`), so every stack gets its own isolated state file in S3 automatically. The root config holds its config **directly**; it has no `include` block of its own.
+2. **`environments/<env>/<stack>/terragrunt.hcl`**, the **stack config**: includes the root with `include "root" { path = find_in_parent_folders("root.hcl") }`, then declares the module source (relative path into `modules/`), dependency blocks, and input variable bindings.
 
 Because state is isolated per stack, a `terragrunt plan` or `apply` in `environments/non-prod/ecs-fargate-stack/` only reads and writes state for that stack. Any pre-existing shared stacks, such as a foundation stack, keep their own state files and can be planned or applied independently.
 
@@ -102,13 +102,13 @@ inputs = {
 }
 ```
 
-`mock_outputs` are required so that `terragrunt plan` works in CI before the dependency stack has been applied. Never use `module.<name>.output` syntax in Terragrunt configs — that syntax is only valid inside a Terraform module.
+`mock_outputs` are required so that `terragrunt plan` works in CI before the dependency stack has been applied. Never use `module.<name>.output` syntax in Terragrunt configs; that syntax is only valid inside a Terraform module.
 
 ## Foundation module
 
-Referencing existing networking is the default, and IaC Smith **never generates** a `foundation` module — not up front, and not reactively. If a `modules/foundation` directory already exists in the target repository, a new stack is *wired to it* (referencing existing infrastructure). Otherwise the workload sources the VPC/subnets it needs from existing infrastructure — passed as inputs or read with data sources — and any stray `dependency "foundation"` a stack tries to declare on a non-existent foundation is stripped so it cannot break `terragrunt plan`.
+Referencing existing networking is the default, and IaC Smith **never bundles** a `foundation` module into a workload PR. A foundation stack is generated only when the issue explicitly requests one, as its own stack in its own PR (the [showcase's issue #1](https://github.com/time4116/iac-smith-showcase-infra/issues/1) is an example). If a foundation module already exists in the target repository, a new stack is *wired to it* (referencing existing infrastructure). When a workload states a dependency on a foundation that does not exist, the change planner blocks with an explicit prerequisite message; any stray `dependency "foundation"` the model invents on a non-existent foundation is stripped so it cannot break `terragrunt plan`.
 
-Creating a whole shared-networking layer is intentionally out of scope: it dropped a large-blast-radius VPC into unrelated workload PRs, and the model-authored foundation's output contract drifted from what workloads referenced — a recurring source of non-deterministic breakage.
+Bundling a shared-networking layer into workload PRs is intentionally out of scope: it dropped a large-blast-radius VPC into unrelated workload PRs, and the model-authored foundation's output contract drifted from what workloads referenced, a recurring source of non-deterministic breakage.
 
 ## Adding a new stack to an existing repo
 
@@ -118,4 +118,4 @@ Create a new GitHub issue in the controller repository labeled `iac-smith`. IaC 
 - Add a new `environments/<env>/<new-stack>/` live path wired to the existing environment `root.hcl`
 - Generate `modules/<new-stack>/` only if the module does not already exist
 
-Follow-on PRs are fully additive — they do not modify existing module code unless the issue explicitly requests a change to an existing resource.
+Follow-on PRs are fully additive; they do not modify existing module code unless the issue explicitly requests a change to an existing resource.

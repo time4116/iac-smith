@@ -1,10 +1,10 @@
-# IaC Smith — Agent Reference
+# IaC Smith Agent Reference
 
 ## What This System Is
 
 IaC Smith is an agentic workflow that converts a GitHub Issue into a validated Terraform/Terragrunt pull request on a target infrastructure repository. It does not apply infrastructure; it only generates, validates, and opens a PR.
 
-It generates **infrastructure, not application code** — no `Program.cs`, Dockerfile, or build pipeline. This is not a refusal rule but a structural property: the change planner only plans IaC/workflow/doc files, and the generator is constrained to that planned set (`dynamic_terraform.py`: "Do not generate files outside files_to_generate"). A request like "deploy my .NET app" yields the hosting infrastructure; the deployable artifact and its build/deploy belong to a separate application pipeline.
+It generates **infrastructure, not application code**: no `Program.cs`, Dockerfile, or build pipeline. This is not a refusal rule but a structural property: the change planner only plans IaC/workflow/doc files, and the generator is constrained to that planned set (`dynamic_terraform.py`: "Do not generate files outside files_to_generate"). A request like "deploy my .NET app" yields the hosting infrastructure; the deployable artifact and its build/deploy belong to a separate application pipeline.
 
 **Input:** GitHub Issue with the `iac-smith` label  
 **Output:** PR on the target repo containing Terraform/Terragrunt files, or a blocked/ignored status
@@ -48,14 +48,14 @@ All configuration is via environment variables. There are no CLI flags.
 | `IAC_SMITH_BEDROCK_CONCURRENCY` | `4` | Parallel file generation threads |
 | `IAC_SMITH_BEDROCK_MAX_TOKENS` | `16384` | Max output tokens for one file. Generation streams, so this can be generous enough to fit even a big module's `main.tf` in a single response without truncation; temperature 0 means the model stops at `end_turn`, so the cap bounds worst case, not typical cost |
 | `IAC_SMITH_INTENT_MAX_TOKENS` | `4096` | Max output tokens for intent parsing. Intent also streams under the structured-output contract; a verbose intent that exceeds the cap is truncated to unclosed JSON, so the run fails with an explicit "truncated at max_tokens" message telling you to raise this |
-| `IAC_SMITH_BEDROCK_READ_TIMEOUT` | `180` | Bedrock read timeout (seconds). Generation streams, so this applies *between* events (a stall), not to total generation time — a long file no longer races it |
+| `IAC_SMITH_BEDROCK_READ_TIMEOUT` | `180` | Bedrock read timeout (seconds). Generation streams, so this applies *between* events (a stall), not to total generation time; a long file no longer races it |
 | `IAC_SMITH_BEDROCK_MAX_ATTEMPTS` | `2` | Bedrock invoke attempts per call (single retry authority; botocore's own retries are disabled so they can't nest and multiply the wall time) |
 | `IAC_SMITH_CHECK_TIMEOUT` | `300` | Per-command timeout (seconds) for `terraform`/`terragrunt` runtime-validation subprocesses, so a stalled plan/init can't hang the run |
 | `IAC_SMITH_RUN_TIMEOUT` | `360` | Hard wall-clock budget (seconds) for the entire run. `IAC_SMITH_CHECK_TIMEOUT` bounds a single subprocess; this bounds the whole accumulation of generation/repair/plan/scaffold cycles. On expiry the run is hard-stopped (SIGALRM interrupts even a blocked subprocess) and returns `blocked` without opening a PR. `0` disables it |
 | `IAC_SMITH_SCHEMA_CACHE_DIR` | System temp (`iac-smith-provider-schema/`) | Where the generation-time provider-schema harvest caches the per-provider-version schema JSON (and shares a Terraform plugin cache). Point this at a persisted/`actions/cache` path in CI so the `terraform init` cost is paid once across runs |
 | `IAC_SMITH_SCHEMA_HARVEST` | unset | Set to `0` to disable the generation-time provider-schema harvest (the contract gate then degrades to runtime-only schema, as before) |
-| `IAC_SMITH_GENERATE_LOCKFILE` | `1` | After runtime validation passes, write a multi-platform `.terraform.lock.hcl` (pinned provider versions + checksums) in each generated `modules/<x>/` and commit it. Set to `0` to skip. Best-effort and parallel — needs `terraform` on PATH (skips otherwise), and a module that fails to lock is logged and skipped, never blocking the PR. A Terraform `.gitignore` is also written when the target repo has none |
-| `IAC_SMITH_ALLOW_STRUCTURE_ONLY` | unset | Set to `1` to allow structure-only (placeholder-module) PRs. By default a run whose planned workload modules end up with zero provider resources — composer disabled, schema harvest unavailable, or composition failed — is **blocked**, and the final PR legitimacy gate (`legitimacy.py`) also refuses backend-only inventories and failure banners in generated files or the PR body. A required existing-stack dependency that was not wired blocks even with the opt-in |
+| `IAC_SMITH_GENERATE_LOCKFILE` | `1` | After runtime validation passes, write a multi-platform `.terraform.lock.hcl` (pinned provider versions + checksums) in each generated `modules/<x>/` and commit it. Set to `0` to skip. Best-effort and parallel: needs `terraform` on PATH (skips otherwise), and a module that fails to lock is logged and skipped, never blocking the PR. A Terraform `.gitignore` is also written when the target repo has none |
+| `IAC_SMITH_ALLOW_STRUCTURE_ONLY` | unset | Set to `1` to allow structure-only (placeholder-module) PRs. By default a run whose planned workload modules end up with zero provider resources (composer disabled, schema harvest unavailable, or composition failed) is **blocked**, and the final PR legitimacy gate (`legitimacy.py`) also refuses backend-only inventories and failure banners in generated files or the PR body. A required existing-stack dependency that was not wired blocks even with the opt-in |
 | `IAC_SMITH_MAX_RESOURCE_TYPES` | `12` | Reliability cap on how many provider resource types one composed component may need. A selection above the cap is rejected as too broad with a staged implementation plan (grouped by service token) in the block reason, which is posted back to the source issue. `0` disables the cap |
 | `IAC_SMITH_REGISTRY_MODULES` | enabled | Set to `0` to disable community-module composition. When enabled, `registry_modules.py` searches the Terraform Registry (query derived from the parsed intent, never a hardcoded service list), harvests candidate modules' input/output contracts, and offers them to the composer; the model may implement the component as one validated, version-pinned module call instead of raw provider resources, or decline. Discovery is fail-soft: no network or no candidates simply falls back to raw resource composition |
 | `IAC_SMITH_REGISTRY_NAMESPACES` | `terraform-aws-modules` | Comma-separated registry namespaces searched for community-module candidates |
@@ -213,10 +213,14 @@ environments/{env}/{stack_name}/terragrunt.hcl
 environments/{env}/{stack_name}/README.md
 ```
 
-**IaC Smith never generates a shared-networking foundation.** Reference-existing
-networking is the deterministic default. `plan_changes` never schedules a foundation,
-and there is no reactive scaffold that creates one on demand. The two mechanisms that
-used to create foundations were both removed because they were non-deterministic:
+**IaC Smith never generates a shared-networking foundation as a side effect of a
+workload request.** Reference-existing networking is the deterministic default.
+`plan_changes` never schedules a foundation alongside a workload, and there is no
+reactive scaffold that creates one on demand. (An issue that explicitly requests the
+networking stack itself, like the showcase's issue #1, generates it as the requested
+stack in its own PR; that is the normal path, not a side effect.) The two mechanisms
+that used to create foundations implicitly were both removed because they were
+non-deterministic:
 
 - The parsed `requires_new_vpc` intent field (model-parsed, flip-flopped between runs
   of the same issue → the same request sometimes produced a whole VPC foundation and
@@ -229,9 +233,9 @@ used to create foundations were both removed because they were non-deterministic
   on until the run hit its wall-clock budget.
 
 A workload therefore sources the networking it needs from existing infrastructure
-(inputs / data sources). A foundation is only ever *followed*, never created, and only
-when one already exists in the target repo — `_wire_foundation_dependency` wires the
-workload to it. When no foundation stack is present,
+(inputs / data sources). A workload plan only ever *follows* a foundation, never
+creates one, and only when one already exists in the target repo;
+`_wire_foundation_dependency` wires the workload to it. When no foundation stack is present,
 `_strip_orphan_foundation_dependency` removes any model-authored `dependency "foundation"`
 block and the inputs that referenced `dependency.foundation.outputs.*`, so an orphan
 cross-stack reference can never reach `terragrunt plan` as a hard "no variable named
@@ -264,22 +268,22 @@ modules/{stack_name}/README.md
 
 **Module:** `src/iac_smith/blackboard.py`
 
-Starts a run-scoped `RunBlackboard` — typed shared state that coordinates
+Starts a run-scoped `RunBlackboard`: typed shared state that coordinates
 generation and repair without becoming long-term memory. Deliberately makes **no
 service- or language-specific assumptions**: it carries no curated keyword lists
 or golden-path file sets. Contracts and constraints are filled in later,
 dynamically:
 
 - **`resolve_contracts_for_files(files, resolver)`** derives candidate contracts
-  from the resource types that actually appear in the generated Terraform — not
+  from the resource types that actually appear in the generated Terraform, not
   from keywords. `ContractResolver` is the generic injection point: tests inject
   fixture contracts, and in production it is populated by
   `provider_schema.build_schema_resolver` (see below).
 - **`provider_schema.build_schema_resolver(files)`** (`src/iac_smith/provider_schema.py`)
   is what makes the generation-time gate real. It reads the providers the
   generated `versions.tf` files declare, then harvests the **full** provider
-  schema from a *clean throwaway config* — declaring only those providers,
-  `terraform init`, `terraform providers schema -json` — rather than from the
+  schema from a *clean throwaway config* (declaring only those providers, then
+  `terraform init`, `terraform providers schema -json`) rather than from the
   module under generation. This matters: the runtime harvest (below) runs the
   schema command inside the generated module, which fails to load exactly when the
   module is most broken (an invalid resource type), returning `{}` precisely when
@@ -292,7 +296,7 @@ dynamically:
 - **`contracts_from_provider_schema(schema, resource_types=...)`** parses
   `terraform providers schema -json` into `TerraformContract`s (allowed arguments
   = top-level attributes + nested block names; required = schema-required
-  attributes). Fully generic across providers — no per-resource knowledge.
+  attributes). Fully generic across providers; no per-resource knowledge.
   Runtime validation (`runtime_validation.py`) also harvests this after each
   module's `terraform init` succeeds, scoped to the resource types that module
   declares, and returns it on `RuntimeValidationResult.contract_docs`.
@@ -301,9 +305,9 @@ dynamically:
   top-level (depth-0) arguments are validated (nested `setting {}` / `tag {}` keys
   are not mistaken for unsupported arguments). When `known_resource_types` (the
   full set of types the declared providers expose) is supplied, it also rejects a
-  **hallucinated resource type** — a type whose provider is known (shares a name
-  prefix with a real type) but which the provider does not define, e.g.
-  `aws_db_proxy_target_group` — deterministically, the equivalent of Terraform's
+  **hallucinated resource type**, a type whose provider is known (shares a name
+  prefix with a real type) but which the provider does not define (e.g.
+  `aws_db_proxy_target_group`), deterministically: the equivalent of Terraform's
   "does not support resource type" but caught before Terraform runs. Resources
   from providers that weren't harvested are skipped, so no false positives. Runs
   in `validation_runner` after static review: the blackboard gets the scoped docs
@@ -312,11 +316,11 @@ dynamically:
   validate`/`plan` failures into negative patterns; `RunBlackboard.with_findings`
   merges them. Recognized error classes: unsupported argument, unsupported block
   type, unsupported resource type, and the plan-time provider **value
-  constraints** that `validate` cannot catch — `expected … to match regular
+  constraints** that `validate` cannot catch: `expected … to match regular
   expression` (e.g. an App Runner image that isn't ECR/`public.ecr.aws`),
   `expected … to be in the range` (e.g. a health-check interval outside 1–20), and
   `No value for required variable`. The runtime-repair loop (`cli.py`) feeds these
-  back into the blackboard — together with the harvested provider contracts — and
+  back into the blackboard, together with the harvested provider contracts, and
   into `repair_files`, so each repair prompt is told both the real allowed/required
   arguments and what not to repeat.
 
@@ -334,7 +338,7 @@ actually been resolved or learned (no boilerplate on the first pass).
 - Max tokens: `IAC_SMITH_BEDROCK_MAX_TOKENS` (default 16384), temperature 0. File generation uses streaming, so the read timeout applies between stream events rather than to total generation time; the generous cap is meant to fit even a large module's `main.tf` in one response and only bounds worst-case output cost.
 - Output constrained to JSON schema: `{"path": str, "content": str, "assumptions": [], "warnings": []}`
 - JSON format enforced via `output_config.format.type = "json_schema"` on the first call
-- **Streaming generation:** file generation uses `invoke_model_with_response_stream` (`_invoke_file_generation` → `_read_stream_document`), accumulating `content_block_delta` text and tracking the final `stop_reason`. Streaming keeps the connection alive between events, so the read timeout applies per-event rather than to total generation time. That decouples a large file's generation length from the timeout and lets `IAC_SMITH_BEDROCK_MAX_TOKENS` be generous enough to fit a big `main.tf` in one response — no mid-document truncation, no continuation/prefill stitching (which models can't always do). If the model still reports `stop_reason == "max_tokens"`, the document may be clipped: the caller's parse-retry catches the malformed JSON and the log says to raise `IAC_SMITH_BEDROCK_MAX_TOKENS`
+- **Streaming generation:** file generation uses `invoke_model_with_response_stream` (`_invoke_file_generation` → `_read_stream_document`), accumulating `content_block_delta` text and tracking the final `stop_reason`. Streaming keeps the connection alive between events, so the read timeout applies per-event rather than to total generation time. That decouples a large file's generation length from the timeout and lets `IAC_SMITH_BEDROCK_MAX_TOKENS` be generous enough to fit a big `main.tf` in one response: no mid-document truncation, no continuation/prefill stitching (which models can't always do). If the model still reports `stop_reason == "max_tokens"`, the document may be clipped: the caller's parse-retry catches the malformed JSON and the log says to raise `IAC_SMITH_BEDROCK_MAX_TOKENS`
 
 **Concurrency:** `IAC_SMITH_BEDROCK_CONCURRENCY` threads (default 4), one file per thread
 
@@ -349,50 +353,50 @@ After all files are generated in parallel:
 - File organization rules: `variables.tf` = variables only, `outputs.tf` = outputs only, `versions.tf` = terraform block + required_providers only, `main.tf` = resources + data sources only
 - No duplicate declarations across files in a module
 - No hardcoded credentials
-- Apply workflows must never trigger on `pull_request`; `terraform-apply.yml` must trigger only on push to `main` — never `master`, never both
+- Apply workflows must never trigger on `pull_request`; `terraform-apply.yml` must trigger only on push to `main` (never `master`, never both)
 - `terraform-apply.yml` must have a `bootstrap` job that runs first (before any stack apply job); the bootstrap job imports `aws_s3_bucket.terraform_state` and `aws_dynamodb_table.terraform_locks` before applying, making it idempotent on ephemeral CI runners
-- `terraform-apply.yml` must use `secrets.AWS_ROLE_ARN_NON_PROD` for `role-to-assume` — never `AWS_ROLE_TO_ASSUME`, `AWS_ROLE_ARN`, or any other name
-- Bootstrap module S3 resource must be named `aws_s3_bucket.terraform_state`; DynamoDB must be `aws_dynamodb_table.terraform_locks`; variables must be `state_bucket_name` and `state_lock_table_name` — these names are hardcoded in the apply workflow's import step
+- `terraform-apply.yml` must use `secrets.AWS_ROLE_ARN_NON_PROD` for `role-to-assume`, never `AWS_ROLE_TO_ASSUME`, `AWS_ROLE_ARN`, or any other name
+- Bootstrap module S3 resource must be named `aws_s3_bucket.terraform_state`; DynamoDB must be `aws_dynamodb_table.terraform_locks`; variables must be `state_bucket_name` and `state_lock_table_name`; these names are hardcoded in the apply workflow's import step
 - Prefer private networking, encryption, least privilege
 - Follow all `error`-severity rules; follow `warning`/`preference` rules unless conflict
 - Generated workflows that require AWS access must use OIDC (`aws-actions/configure-aws-credentials` with `role-to-assume`); never emit `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY`
-- Every `aws-actions/configure-aws-credentials` step must set `mask-aws-account-id: true` — the action does not mask it by default, so terraform ARN output would otherwise leak the account ID into run logs
+- Every `aws-actions/configure-aws-credentials` step must set `mask-aws-account-id: true`; the action does not mask it by default, so terraform ARN output would otherwise leak the account ID into run logs
 - Install terragrunt via the authenticated `curl` pattern; never use `autero1/action-terragrunt`
 - `terraform-pr-check.yml` must use a single job named `validate`; never split into multiple jobs
-- `terraform-pr-check.yml` must not include `terragrunt validate` or `terragrunt plan` steps — those require a deployed S3 backend that does not exist for brand-new infrastructure
+- `terraform-pr-check.yml` must not include `terragrunt validate` or `terragrunt plan` steps; those require a deployed S3 backend that does not exist for brand-new infrastructure
 - `terraform-pr-check.yml` must use `terragrunt hcl format --check` for HCL format checking; never `terragrunt hclfmt --check` (the `--check` flag does not exist on the `hclfmt` subcommand)
-- `terraform-pr-check.yml` does not need AWS credentials or `id-token: write` — `terraform init -backend=false` and `terraform validate` are schema-only operations
+- `terraform-pr-check.yml` does not need AWS credentials or `id-token: write`; `terraform init -backend=false` and `terraform validate` are schema-only operations
 
 **Canonical file shape examples injected (`_CANONICAL_FILE_SHAPES`):**
 
 Eight annotated structural templates are appended to every generation prompt immediately after the non-negotiable rules. They cover:
-- `versions.tf` — sole owner of `required_providers`; explicitly labelled "must NEVER appear in main.tf"
-- `main.tf` — resources and data sources only; no `terraform{}` block, no variable/output declarations
-- `variables.tf` — all `variable` declarations; shows `var.xxx` cross-file reference pattern
-- `outputs.tf` — all `output` declarations only
-- `environments/non-prod/root.hcl` (environment root, NOT terragrunt.hcl) — `remote_state`, `locals`, provider `generate` block, held directly with no `include`
-- `environments/non-prod/<stack>/terragrunt.hcl` (stack) — `include "root" { path = find_in_parent_folders("root.hcl") }`, `dependency` blocks, `inputs`; explicitly warns "NEVER write `module.<name>.output_name`"
-- `.github/workflows/terraform-pr-check.yml` — trigger path and working-directory alignment example
-- `.github/workflows/terraform-apply.yml` — bootstrap job with idempotent imports, apply-foundation and stack apply jobs with `needs:` dependencies, `secrets.AWS_ROLE_ARN_NON_PROD` usage
+- `versions.tf`: sole owner of `required_providers`; explicitly labelled "must NEVER appear in main.tf"
+- `main.tf`: resources and data sources only; no `terraform{}` block, no variable/output declarations
+- `variables.tf`: all `variable` declarations; shows `var.xxx` cross-file reference pattern
+- `outputs.tf`: all `output` declarations only
+- `environments/non-prod/root.hcl` (environment root, NOT terragrunt.hcl): `remote_state`, `locals`, provider `generate` block, held directly with no `include`
+- `environments/non-prod/<stack>/terragrunt.hcl` (stack): `include "root" { path = find_in_parent_folders("root.hcl") }`, `dependency` blocks, `inputs`; explicitly warns "NEVER write `module.<name>.output_name`"
+- `.github/workflows/terraform-pr-check.yml`: trigger path and working-directory alignment example
+- `.github/workflows/terraform-apply.yml`: bootstrap job with idempotent imports, apply-foundation and stack apply jobs with `needs:` dependencies, `secrets.AWS_ROLE_ARN_NON_PROD` usage
 
 ### Deterministic envelope generation
 
-Some planned files are pure **structural envelope** — invariant apart from env/region/stack-name, identical every run, and historically a source of repair-loop bugs when left to the model. These are rendered deterministically and **never sent to Bedrock**, so the model cannot drop a block, mangle a comment, or hallucinate them; `terraform`/`terragrunt` validate and plan remain the authoritative gate.
+Some planned files are pure **structural envelope**: invariant apart from env/region/stack-name, identical every run, and historically a source of repair-loop bugs when left to the model. These are rendered deterministically and **never sent to Bedrock**, so the model cannot drop a block, mangle a comment, or hallucinate them; `terraform`/`terragrunt` validate and plan remain the authoritative gate.
 
-- **Workflows** (`.github/workflows/*.yml`) — model-generated then overwritten via `_apply_workflow_overrides` (`_build_pr_check_workflow` / `_build_apply_workflow`).
-- **`environments/<env>/root.hcl`** — rendered by `_render_root_hcl` (via `_deterministic_envelope_files`) and excluded from both generation and the repair loop. Guarantees the root `locals` (`environment`, `aws_region`) always exist, which child stacks redeclare. This is the canonical home for new envelope files as more of the layout becomes deterministic.
-- **Child stack `terragrunt.hcl` envelope** — `_normalize_child_terragrunt` rewrites every child stack's `include` and `locals` blocks deterministically from the env's root locals (before static review and before each disk write), leaving the model's `terraform`/`dependency`/`inputs` untouched. The child always gets a correct, parseable `include "root"` + `locals { environment, aws_region }` regardless of what the model emitted — so a missing/dropped/mangled envelope is structurally impossible. The rebuilt `locals` also always declares `environment` and `stack_name` derived from the child's own path (env dir and stack dir; root values win if present), so a model that references `local.stack_name`/`local.environment` — values the root does not expose — no longer fails with "Unsupported attribute". This replaced the additive `_inject_missing_child_locals` patcher; the orphaned-locals static check remains only as a backstop for trees assembled without a root config.
-- **Module declaration dedup** — `_dedup_module_declarations` (runs right after `_normalize_child_terragrunt`, same three call sites) removes any `variable`/`output` block from a module's `main.tf` that its dedicated `variables.tf`/`outputs.tf` already declares. Terraform rejects duplicate declarations ("... must be unique within a module"), and the model intermittently repeats them — a class of error the repair loop can **oscillate** on (fix main.tf, the model re-adds it when regenerating the dedicated file) until the run hits its wall-clock budget. Dedup is deterministic and authoritative (the dedicated file wins), so it breaks the loop before static review even runs; a declaration living solely in `main.tf` is left untouched. Nested braces in a block body are handled by brace-balanced excision (`_strip_named_blocks`).
-- **Foundation module (deterministic, only when following an existing one)** — IaC Smith never *generates* a foundation, but the invariant `_FOUNDATION_MODULE_FILES` (sourcing the community **`terraform-aws-modules/vpc/aws`** module, pinned `~> 5.0`, exposing `vpc_id`/`private_subnet_ids`/`public_subnet_ids`/`vpc_cidr`) and `_render_foundation_stack_terragrunt` remain the canonical rendering for a foundation stack that is already part of the tree, rendered via `_deterministic_envelope_files` so the model never hand-authors it.
-- **Workload→foundation dependency wiring / stripping** — `_wire_foundation_dependency` runs after the child-normalizer (same three call sites) and connects a workload to a foundation **that already exists in the tree**. For each `environments/<env>/<workload>/terragrunt.hcl` it computes the intersection of the foundation's output names (from `modules/foundation/outputs.tf`) with the workload module's declared variables (from `modules/<workload>/variables.tf`); if non-empty it (re)writes a canonical `dependency "foundation"` block (`config_path = "../foundation"`, `mock_outputs` typed from each consuming variable's `type`, `mock_outputs_allowed_terraform_commands = ["validate","plan"]`) and rewires each intersection input to `dependency.foundation.outputs.<name>`, preserving other inputs. Purely structural (outputs ∩ variables), idempotent, no service-specific names. `_strip_orphan_foundation_dependency` runs right after it and covers the common case where **no** foundation exists: it removes any model-authored `dependency "foundation"` block and every input referencing `dependency.foundation.outputs.*`, leaving the workload to source networking from its own variables/data sources — so an orphan cross-stack reference can never become a hard `terragrunt plan` failure the repair loop oscillates on.
-- **Unattributable static-review issues no longer trigger full regeneration** — the repair loop repairs only files `_path_needs_repair` attributes to the issues; when none are attributable it hands the best-effort tree to terraform/terragrunt validation to gate, instead of the old `or repairable` fallback that regenerated **every** file each round (a cross-cutting error just reproduced itself, burning the whole budget).
+- **Workflows** (`.github/workflows/*.yml`): model-generated then overwritten via `_apply_workflow_overrides` (`_build_pr_check_workflow` / `_build_apply_workflow`).
+- **`environments/<env>/root.hcl`**: rendered by `_render_root_hcl` (via `_deterministic_envelope_files`) and excluded from both generation and the repair loop. Guarantees the root `locals` (`environment`, `aws_region`) always exist, which child stacks redeclare. This is the canonical home for new envelope files as more of the layout becomes deterministic.
+- **Child stack `terragrunt.hcl` envelope**: `_normalize_child_terragrunt` rewrites every child stack's `include` and `locals` blocks deterministically from the env's root locals (before static review and before each disk write), leaving the model's `terraform`/`dependency`/`inputs` untouched. The child always gets a correct, parseable `include "root"` + `locals { environment, aws_region }` regardless of what the model emitted, so a missing/dropped/mangled envelope is structurally impossible. The rebuilt `locals` also always declares `environment` and `stack_name` derived from the child's own path (env dir and stack dir; root values win if present), so a model that references `local.stack_name`/`local.environment` (values the root does not expose) no longer fails with "Unsupported attribute". This replaced the additive `_inject_missing_child_locals` patcher; the orphaned-locals static check remains only as a backstop for trees assembled without a root config.
+- **Module declaration dedup**: `_dedup_module_declarations` (runs right after `_normalize_child_terragrunt`, same three call sites) removes any `variable`/`output` block from a module's `main.tf` that its dedicated `variables.tf`/`outputs.tf` already declares. Terraform rejects duplicate declarations ("... must be unique within a module"), and the model intermittently repeats them, a class of error the repair loop can **oscillate** on (fix main.tf, the model re-adds it when regenerating the dedicated file) until the run hits its wall-clock budget. Dedup is deterministic and authoritative (the dedicated file wins), so it breaks the loop before static review even runs; a declaration living solely in `main.tf` is left untouched. Nested braces in a block body are handled by brace-balanced excision (`_strip_named_blocks`).
+- **Foundation module (deterministic, only when following an existing one)**: IaC Smith never generates a foundation as a workload side effect, but the invariant `_FOUNDATION_MODULE_FILES` (sourcing the community **`terraform-aws-modules/vpc/aws`** module, pinned `~> 5.0`, exposing `vpc_id`/`private_subnet_ids`/`public_subnet_ids`/`vpc_cidr`) and `_render_foundation_stack_terragrunt` remain the canonical rendering for a foundation stack that is already part of the tree, rendered via `_deterministic_envelope_files` so the model never hand-authors it.
+- **Workload→foundation dependency wiring / stripping**: `_wire_foundation_dependency` runs after the child-normalizer (same three call sites) and connects a workload to a foundation **that already exists in the tree**. For each `environments/<env>/<workload>/terragrunt.hcl` it computes the intersection of the foundation's output names (from `modules/foundation/outputs.tf`) with the workload module's declared variables (from `modules/<workload>/variables.tf`); if non-empty it (re)writes a canonical `dependency "foundation"` block (`config_path = "../foundation"`, `mock_outputs` typed from each consuming variable's `type`, `mock_outputs_allowed_terraform_commands = ["validate","plan"]`) and rewires each intersection input to `dependency.foundation.outputs.<name>`, preserving other inputs. Purely structural (outputs ∩ variables), idempotent, no service-specific names. `_strip_orphan_foundation_dependency` runs right after it and covers the common case where **no** foundation exists: it removes any model-authored `dependency "foundation"` block and every input referencing `dependency.foundation.outputs.*`, leaving the workload to source networking from its own variables/data sources, so an orphan cross-stack reference can never become a hard `terragrunt plan` failure the repair loop oscillates on.
+- **Unattributable static-review issues no longer trigger full regeneration**: the repair loop repairs only files `_path_needs_repair` attributes to the issues; when none are attributable it hands the best-effort tree to terraform/terragrunt validation to gate, instead of the old `or repairable` fallback that regenerated **every** file each round (a cross-cutting error just reproduced itself, burning the whole budget).
 
 ---
 
 ## Static Review Checks
 
 **Module:** `src/iac_smith/nodes/static_review.py`  
-**Function:** `static_review_generated_files(generated_files, known_stack_dirs=None) → ValidationResult` — `known_stack_dirs` carries the stack directories already present in the target repo (from `existing_stack_dirs(repo_path)`) so cross-stack dependency checks don't false-positive on pre-existing infrastructure.
+**Function:** `static_review_generated_files(generated_files, known_stack_dirs=None) → ValidationResult`; `known_stack_dirs` carries the stack directories already present in the target repo (from `existing_stack_dirs(repo_path)`) so cross-stack dependency checks don't false-positive on pre-existing infrastructure.
 
 **ValidationResult:**
 ```python
@@ -407,7 +411,7 @@ class ValidationResult(BaseModel):
 - AWS access key pattern matched (`AKIA...` / `ASIA...` 20-char)
 - Private key header found (`BEGIN RSA/OPENSSH/EC/DSA PRIVATE KEY`)
 - `aws_access_key_id=` or `aws_secret_access_key=` literal found
-- Generic secret pattern: `(password|token|secret)\s*=\s*(?:"[^"]{6,}"|'[^']{6,}')` — alternation keeps each delimiter paired with its own exclusion class, so values containing the opposite quote character are still caught
+- Generic secret pattern: `(password|token|secret)\s*=\s*(?:"[^"]{6,}"|'[^']{6,}')`; alternation keeps each delimiter paired with its own exclusion class, so values containing the opposite quote character are still caught
 - Terraform apply workflow has `pull_request` trigger without branch filter
 - Terragrunt remote state key does not use `path_relative_to_include()`
 - Duplicate `variable` declarations across files in same module
@@ -421,9 +425,9 @@ class ValidationResult(BaseModel):
 - Module README missing terraform-docs markers
 - A literal string assigned to a secret-named field (`*secret*`/`*password*`/`*token*`, e.g. `WEBUI_SECRET_KEY = "change-me"`). Reference-style identifiers (`*_arn`/`*_id`/`*_name`) and ARN/URL/path values are excluded. Advisory because the blocking credential patterns only match `secret =`/`password =` anchored directly before `=`, so a secret-*named* field with a suffix slips past them
 
-**Terragrunt input direction is asymmetric:** Terragrunt passes inputs as `TF_VAR_*` environment variables and Terraform silently ignores undeclared ones, so a stack passing an *extra* input the module does not declare is **not** an error. Only the reverse is flagged — a *required* module variable (one declared without a `default`) that the stack fails to pass, which would fail non-interactive `terragrunt plan/apply`.
+**Terragrunt input direction is asymmetric:** Terragrunt passes inputs as `TF_VAR_*` environment variables and Terraform silently ignores undeclared ones, so a stack passing an *extra* input the module does not declare is **not** an error. Only the reverse is flagged: a *required* module variable (one declared without a `default`) that the stack fails to pass, which would fail non-interactive `terragrunt plan/apply`.
 
-**Dangling cross-stack dependencies (structural):** `_find_terragrunt_dangling_dependencies` flags a stack that references `dependency.<name>.outputs.*` with no matching `dependency "<name>"` block, or whose `dependency` `config_path` resolves to a stack that is neither generated by this change nor in `known_stack_dirs`. This catches — at generation time, where regeneration can still fix it — the case where the model invents a dependency on a `foundation` stack that was never created (otherwise it surfaces only as a cryptic `terragrunt plan` failure: "There is no variable named dependency"). Generic: the rule is "the target stack must exist", never "it must be called foundation". The complementary prompt rule tells the model to provision missing shared infra in its own module or via data sources rather than depend on a stack that isn't there.
+**Dangling cross-stack dependencies (structural):** `_find_terragrunt_dangling_dependencies` flags a stack that references `dependency.<name>.outputs.*` with no matching `dependency "<name>"` block, or whose `dependency` `config_path` resolves to a stack that is neither generated by this change nor in `known_stack_dirs`. This catches, at generation time where regeneration can still fix it, the case where the model invents a dependency on a `foundation` stack that was never created (otherwise it surfaces only as a cryptic `terragrunt plan` failure: "There is no variable named dependency"). Generic: the rule is "the target stack must exist", never "it must be called foundation". The complementary prompt rule tells the model to provision missing shared infra in its own module or via data sources rather than depend on a stack that isn't there.
 
 ---
 
@@ -436,11 +440,11 @@ class ValidationResult(BaseModel):
 
 | Scope | Command |
 |---|---|
-| `environments/` (if exists) | `terragrunt hcl format` (v0.71+) or `terragrunt hclfmt` — auto-fix, no `--check` |
-| `modules/` and `bootstrap/` | `terraform fmt -recursive` — auto-fix, silently corrects formatting in place |
-| Every standalone Terraform root with `*.tf` (any dir under `modules/`, `bootstrap/`, etc. — everything except `environments/` Terragrunt stacks and `.`-prefixed cache dirs) | `terraform init -backend=false -input=false` then `terraform validate` |
+| `environments/` (if exists) | `terragrunt hcl format` (v0.71+) or `terragrunt hclfmt` (auto-fix, no `--check`) |
+| `modules/` and `bootstrap/` | `terraform fmt -recursive` (auto-fix; silently corrects formatting in place) |
+| Every standalone Terraform root with `*.tf` (any dir under `modules/`, `bootstrap/`, etc.; everything except `environments/` Terragrunt stacks and `.`-prefixed cache dirs) | `terraform init -backend=false -input=false` then `terraform validate` |
 
-After each successful `terraform init`, IaC Smith also runs `terraform providers schema -json` in that module and parses the authoritative resource contracts (scoped to the resource types the module declares) onto `RuntimeValidationResult.contract_docs`. This is best-effort — any failure to read or parse the schema is swallowed and never blocks validation. The contracts feed the run blackboard so repair prompts get real allowed/required arguments (see Runtime Repair Loop).
+After each successful `terraform init`, IaC Smith also runs `terraform providers schema -json` in that module and parses the authoritative resource contracts (scoped to the resource types the module declares) onto `RuntimeValidationResult.contract_docs`. This is best-effort; any failure to read or parse the schema is swallowed and never blocks validation. The contracts feed the run blackboard so repair prompts get real allowed/required arguments (see Runtime Repair Loop).
 
 By default, Terragrunt stacks under `environments/` are **not** plan-validated at runtime: `terragrunt validate/plan` against the real backend require all dependency stacks to be deployed, which is never true for brand-new infrastructure. HCL syntax errors are caught by the formatter; provider and schema errors are caught by `terraform validate` on the underlying modules.
 
@@ -486,10 +490,10 @@ else:
 **File selection for repair (`_path_needs_repair`):**
 
 A file is selected for repair if it appears in any error string, with these refinements:
-1. **"keep in" exclusion** — for duplicate-declaration errors the hint reads "Remove from X, keep in Y." The canonical file (Y) is excluded from repair so its declarations are not dropped.
-2. **Directory-based fallback** — runtime validation errors name the module/stack directory (e.g. `terraform validate modules/ecs-fargate failed`), not individual file paths. Any file whose parent directory matches the error is implicated. A negative-lookahead regex (`(?!/)`) prevents a shorter directory name (e.g. `environments`) from matching errors about a deeper path (e.g. `environments/non-prod/foundation`).
-3. **Pinpoint scoping** — when an error pinpoints exact files (`on main.tf line 5`), only those files are repaired, not the whole directory. This stops a weak model from regenerating files that already validated and regressing them (e.g. rewriting a valid `variables.tf` with `var "x" {`). A directory-level error with no file pinpoint still repairs the whole unit.
-4. **Stack→module bridge** — a `terragrunt plan`/`validate` failure names the stack dir (`environments/<env>/<stack>`), but the offending value (an image, a variable default) often lives in `modules/<stack>`; the module's `.tf` files are repaired too, matched by the shared stack name.
+1. **"keep in" exclusion**: for duplicate-declaration errors the hint reads "Remove from X, keep in Y." The canonical file (Y) is excluded from repair so its declarations are not dropped.
+2. **Directory-based fallback**: runtime validation errors name the module/stack directory (e.g. `terraform validate modules/ecs-fargate failed`), not individual file paths. Any file whose parent directory matches the error is implicated. A negative-lookahead regex (`(?!/)`) prevents a shorter directory name (e.g. `environments`) from matching errors about a deeper path (e.g. `environments/non-prod/foundation`).
+3. **Pinpoint scoping**: when an error pinpoints exact files (`on main.tf line 5`), only those files are repaired, not the whole directory. This stops a weak model from regenerating files that already validated and regressing them (e.g. rewriting a valid `variables.tf` with `var "x" {`). A directory-level error with no file pinpoint still repairs the whole unit.
+4. **Stack→module bridge**: a `terragrunt plan`/`validate` failure names the stack dir (`environments/<env>/<stack>`), but the offending value (an image, a variable default) often lives in `modules/<stack>`; the module's `.tf` files are repaired too, matched by the shared stack name.
 
 If no files match any criterion, all files are repaired as a fallback.
 
@@ -503,7 +507,7 @@ re-enters `compose()` with the previous `ComposedComponent` and the exact
 (ANSI-stripped, compacted) runtime findings, instructing the model to make the
 smallest change to its prior typed selections that addresses the errors. Resource-type
 selection is not re-run, negative patterns accumulate across attempts (capped at 16),
-and the repaired spec re-renders deterministically — so repairs stay inside the
+and the repaired spec re-renders deterministically, so repairs stay inside the
 schema-validated JSON channel instead of free-editing HCL text.
 
 ---
@@ -537,7 +541,7 @@ class RepoPatterns(BaseModel):
 
 **Location:** `{target_repo}/rules/*.yaml` if present; otherwise bundled `iac-smith/rules/*.yaml`
 
-> **Per-target-repo configurability:** If the target repo ships its own `rules/` directory, those rules fully replace the bundled defaults — the controller is not modified. This means each infrastructure repo can enforce its own compliance requirements, naming conventions, or tag policies without any changes to the IaC Smith source. The bundled rules apply only when the target repo has no `rules/` directory at all.
+> **Per-target-repo configurability:** If the target repo ships its own `rules/` directory, those rules fully replace the bundled defaults; the controller is not modified. This means each infrastructure repo can enforce its own compliance requirements, naming conventions, or tag policies without any changes to the IaC Smith source. The bundled rules apply only when the target repo has no `rules/` directory at all.
 
 **Rule schema:**
 ```yaml
@@ -624,9 +628,9 @@ The workflow installs Python, uv, terraform, terragrunt, configures AWS OIDC cre
 
 ## Bedrock Hard-Failure Behavior
 
-Network-level errors (`ConnectionClosedError`, `ConnectTimeoutError`, `EndpointConnectionError`, `ReadTimeoutError`) and Bedrock throttling (`ThrottlingException`, `TooManyRequestsException`, `ServiceUnavailableException`) are retried up to `IAC_SMITH_BEDROCK_MAX_ATTEMPTS` times (default 2) before re-raising. This loop is the single retry authority — botocore's own `Config(retries=...)` is set to `max_attempts=1` so the two layers can't nest and multiply the worst-case wall time. Every retry is logged with the file it was generating, so a slow/stalled call is visible and pinpointed instead of looking like a hang. Non-throttle `ClientError`s (e.g. `AccessDeniedException`) are not retried.
+Network-level errors (`ConnectionClosedError`, `ConnectTimeoutError`, `EndpointConnectionError`, `ReadTimeoutError`) and Bedrock throttling (`ThrottlingException`, `TooManyRequestsException`, `ServiceUnavailableException`) are retried up to `IAC_SMITH_BEDROCK_MAX_ATTEMPTS` times (default 2) before re-raising. This loop is the single retry authority: botocore's own `Config(retries=...)` is set to `max_attempts=1` so the two layers can't nest and multiply the worst-case wall time. Every retry is logged with the file it was generating, so a slow/stalled call is visible and pinpointed instead of looking like a hang. Non-throttle `ClientError`s (e.g. `AccessDeniedException`) are not retried.
 
-For **streamed** file generation, the failure surface is during *consumption*, not just the initial call: a mid-stream service error arrives either as a raised `EventStreamError` or as a modeled exception-member event (`throttlingException`, `modelTimeoutException`, `internalServerException`, `modelStreamErrorException`, `serviceUnavailableException`, `validationException`). `_read_stream_document` raises `BedrockStreamError` on a member event so it is never silently dropped as a short document, and `_stream_file_with_retries` wraps the whole invoke + stream-read as one retryable unit — a fresh invoke restarts the stream (a consumed stream can't be resumed). Transient members and stream/connection errors retry up to `IAC_SMITH_BEDROCK_MAX_ATTEMPTS`; `validationException` (non-transient) propagates immediately rather than burning the parse-retry budget.
+For **streamed** file generation, the failure surface is during *consumption*, not just the initial call: a mid-stream service error arrives either as a raised `EventStreamError` or as a modeled exception-member event (`throttlingException`, `modelTimeoutException`, `internalServerException`, `modelStreamErrorException`, `serviceUnavailableException`, `validationException`). `_read_stream_document` raises `BedrockStreamError` on a member event so it is never silently dropped as a short document, and `_stream_file_with_retries` wraps the whole invoke + stream-read as one retryable unit; a fresh invoke restarts the stream (a consumed stream can't be resumed). Transient members and stream/connection errors retry up to `IAC_SMITH_BEDROCK_MAX_ATTEMPTS`; `validationException` (non-transient) propagates immediately rather than burning the parse-retry budget.
 
 `ThrottlingException` (daily token quota exhausted) is caught in `cli.py` around both the graph invocation and the runtime repair loop, and returns a clean `IaCSmithRunResult(status="blocked", block_reason="Bedrock throttled: ...")` instead of a raw traceback.
 
@@ -638,8 +642,8 @@ All other Bedrock errors (auth failures, model errors) are not caught and propag
 
 - IaC Smith **never** runs `terraform apply` or `terragrunt apply`.
 - IaC Smith **never** commits to `main` on the target repo; always creates a new branch.
-- Generated apply workflows must have a `push` trigger scoped to `main` only — never `master`, never `pull_request`.
-- Terragrunt remote state keys must always use `path_relative_to_include()` — hardcoded keys are a FAILED static check.
+- Generated apply workflows must have a `push` trigger scoped to `main` only; never `master`, never `pull_request`.
+- Terragrunt remote state keys must always use `path_relative_to_include()`; hardcoded keys are a FAILED static check.
 - File organization within a Terraform module is strictly partitioned: declarations belong in exactly one canonical file. Cross-file duplicates are a FAILED static check.
 - Path traversal in generated file paths is rejected before write (`..` and leading `/` are invalid).
 - The target repo allowlist (`IAC_SMITH_ALLOWED_TARGET_REPO`) must exactly match `IAC_SMITH_TARGET_REPO` or the run aborts before any Bedrock call.

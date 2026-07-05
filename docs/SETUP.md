@@ -122,7 +122,7 @@ The controller only generates and opens PRs; the generated `.github/workflows/te
 
 2. **OIDC role + secret for applying.** The apply workflow assumes `${{ secrets.AWS_ROLE_ARN_NON_PROD }}` via GitHub Actions OIDC. Add that secret to the target repo and create or extend an IAM role whose trust policy allows the target repo's OIDC subject (`repo:<owner>/<target-infra-repo>:ref:refs/heads/main`), with the permissions needed to apply the generated infrastructure. This is separate from the controller's Bedrock role.
 
-Making the target repo public exposes the generated Terraform/Terragrunt and the backend resource names it hardcodes (state bucket and lock-table names); confirm those contain nothing sensitive before flipping visibility. Secrets are never in the repo — they are referenced as `${{ secrets.* }}` and stored in repo settings.
+Making the target repo public exposes the generated Terraform/Terragrunt and the backend resource names it hardcodes (state bucket and lock-table names); confirm those contain nothing sensitive before flipping visibility. Secrets are never in the repo; they are referenced as `${{ secrets.* }}` and stored in repo settings.
 
 ## Local development
 
