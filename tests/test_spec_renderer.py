@@ -272,3 +272,34 @@ def test_plural_dependency_outputs_are_typed_and_mocked_as_lists():
     assert _mock_output_value("public_subnets") == '["mock-id"]'
     assert _mock_output_value("vpc_id") == '"mock-id"'
     assert not _list_like_name("status")
+
+
+def test_generated_workflows_keep_covering_existing_stacks():
+    # The live showcase ECS PR: workflows were rendered from the new stack's
+    # plan alone, erasing vpc-foundation from change detection, apply routing,
+    # and PR validation the moment the PR merged.
+    import yaml
+
+    spec = build_spec_from_intent(
+        intent=_intent("ecs_fargate_nginx"),
+        change_plan=_plan("ecs-fargate-nginx"),
+        repo_patterns=RepoPatterns(
+            existing_stack_paths=[
+                "modules/vpc-foundation",
+                "environments/non-prod/vpc-foundation",
+            ]
+        ),
+        target_repo="time4116/iac-smith-showcase-infra",
+    )
+    files = render_spec(spec)
+
+    apply_workflow = files[".github/workflows/terraform-apply.yml"]
+    parsed = yaml.safe_load(apply_workflow)
+    assert "apply-foundation" in parsed["jobs"]
+    assert "modules/vpc-foundation/" in apply_workflow
+    assert "environments/non-prod/vpc-foundation" in apply_workflow
+    assert "ecs-fargate-nginx" in apply_workflow
+
+    pr_check = files[".github/workflows/terraform-pr-check.yml"]
+    assert "modules/vpc-foundation" in pr_check
+    assert "modules/ecs-fargate-nginx" in pr_check
