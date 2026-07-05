@@ -33,7 +33,9 @@ jobs:
       (github.event_name == 'issues' && github.event.label.name == 'iac-smith' && github.actor == 'time4116')
     runs-on: ubuntu-latest
     env:
-      IAC_SMITH_ALLOWED_TARGET_REPO: time4116/iac-smith-demo-infra
+      # Repo Variable overrides the default so switching demo targets is a
+      # settings change; both values must stay identical or the CLI fails closed.
+      IAC_SMITH_ALLOWED_TARGET_REPO: ${{ vars.IAC_SMITH_ALLOWED_TARGET_REPO || 'time4116/iac-smith-demo-infra' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - name: Check monthly run limit
@@ -86,7 +88,7 @@ jobs:
           # failing files, when the primary model cannot self-correct a
           # provider-schema error. Unset/equal to BEDROCK_MODEL_ID disables it.
           BEDROCK_ESCALATION_MODEL_ID: ${{ vars.BEDROCK_ESCALATION_MODEL_ID || 'global.anthropic.claude-sonnet-4-6' }}
-          IAC_SMITH_TARGET_REPO: time4116/iac-smith-demo-infra
+          IAC_SMITH_TARGET_REPO: ${{ vars.IAC_SMITH_TARGET_REPO || 'time4116/iac-smith-demo-infra' }}
           # Gate PR creation on a real terragrunt plan (local state, mock_outputs
           # for dependencies). Requires the assumed AWS role to have read/describe
           # permissions for the providers being planned.
