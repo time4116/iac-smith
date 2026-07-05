@@ -1731,6 +1731,13 @@ def test_registry_module_renders_pinned_module_call(monkeypatch):
     assert hcl2.loads(main)
     outputs = files["modules/static-site/outputs.tf"]
     assert "module.this.cloudfront_distribution_id" in outputs
+    # The root must not pin a provider range on top of the module's own
+    # required_providers: aws "~> 5.0" against the module's ">= 6.x" made
+    # terraform init unsatisfiable (live issue #66 re-run).
+    versions = files["modules/static-site/versions.tf"]
+    assert 'source  = "hashicorp/aws"' in versions
+    assert "~> 5.0" not in versions
+    assert hcl2.loads(versions)
     from iac_smith.legitimacy import check_pr_legitimacy, workload_module_calls
 
     assert workload_module_calls(files) == ["module.this (terraform-aws-modules/cloudfront/aws)"]

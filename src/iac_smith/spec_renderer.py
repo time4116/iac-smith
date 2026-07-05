@@ -491,13 +491,24 @@ def _render_module_file(spec: InfrastructureSpec, path: str) -> str:
     if filename == "outputs.tf":
         return _render_outputs(component)
     if filename == "versions.tf":
+        # A community module carries its own required_providers constraint
+        # (e.g. terraform-aws-modules/vpc 6.x needs aws >= 6.28); pinning
+        # ~> 5.0 in the root too made the intersection unsatisfiable and
+        # terraform init unrepairable (the live issue #66 re-run). The module
+        # call dictates the provider range; the committed lockfile pins the
+        # resolved version.
+        version_line = (
+            ""
+            if component.implementation.kind == "registry_module"
+            else '      version = "~> 5.0"\n'
+        )
         return (
             "terraform {\n"
             '  required_version = ">= 1.5"\n'
             "  required_providers {\n"
             "    aws = {\n"
             '      source  = "hashicorp/aws"\n'
-            '      version = "~> 5.0"\n'
+            f"{version_line}"
             "    }\n"
             "  }\n"
             "}\n"
