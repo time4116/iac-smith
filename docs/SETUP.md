@@ -16,7 +16,7 @@ Configure these in the controller repo:
 - Secret `AWS_ROLE_ARN_NON_PROD`: non-production IAM role ARN used by the controller workflow to call Bedrock and by generated non-prod validation workflows.
 - Secret `AWS_ROLE_ARN_PROD`: production IAM role ARN used by generated production validation workflows.
 - Variable `AWS_REGION`: optional, defaults to `us-west-2`.
-- Variable or workflow env `IAC_SMITH_ALLOWED_TARGET_REPO`: exact `<owner>/<target-infra-repo>` value the controller is allowed to write to.
+- Variable `IAC_SMITH_ALLOWED_TARGET_REPO` (and matching `IAC_SMITH_TARGET_REPO`): exact `<owner>/<target-infra-repo>` value the controller is allowed to write to. The repo Variables override the defaults baked into `.github/workflows/issue-to-pr.yml`.
 
 The workflow only runs when the `iac-smith` label is applied by `time4116`. If ownership changes, update `.github/workflows/issue-to-pr.yml` deliberately instead of broadening this check to all users.
 

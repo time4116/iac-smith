@@ -4,6 +4,8 @@ IaC Smith uses LangGraph to model infrastructure generation as explicit state tr
 
 The design goal is simple: open a PR only when the rendered Terraform/Terragrunt is safe, legitimate, and reviewable. Otherwise, block with a concrete reason.
 
+This document describes the run conceptually. Not every stage below is a literal `StateGraph` node: the actual graph nodes are `issue_intake`, `intent_parser`, `ruleset_loader`, `repo_pattern_scanner`, `change_planner`, `blackboard_planner`, `code_generator`, `validation_runner`, and `pr_writer` (`graph.py`). Contract harvest and typed-spec composition run inside the generator invoked by `code_generator`, and the runtime repair loop and final legitimacy gate run in the CLI wrapper (`cli.py`) around the graph.
+
 ## Why LangGraph is used
 
 LangGraph gives the controller a durable execution shape:

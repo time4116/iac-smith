@@ -10,7 +10,7 @@ IaC Smith never applies infrastructure. The controller creates PRs only; human r
 
 ## Current workflow
 
-1. A user creates an issue in `time4116/iac-smith` and applies the `iac-smith` label.
+1. A user creates an issue in `time4116/iac-smith` and applies the `iac-smith` label, or triggers the controller workflow manually with `workflow_dispatch`, passing an issue number and optional `source_repo` so an issue filed in the target repo can drive the run.
 2. The owner-gated GitHub Actions controller workflow starts.
 3. The controller validates that the requested target repository exactly matches `IAC_SMITH_ALLOWED_TARGET_REPO`.
 4. The workflow assumes AWS credentials through GitHub Actions OIDC and calls Bedrock using the configured `BEDROCK_MODEL_ID`.
