@@ -100,12 +100,10 @@ def test_discover_builds_query_from_intent_and_harvests_contracts(monkeypatch):
     )
     candidates = discover_registry_candidates(_intent())
 
-    # Full query first, then per-token fallback; duplicate sources are deduped.
-    assert queries == [
-        ("cloudfront distribution", "terraform-aws-modules"),
-        ("cloudfront", "terraform-aws-modules"),
-        ("distribution", "terraform-aws-modules"),
-    ]
+    # Full class query first, then token fallbacks (class, features, raw
+    # request), deduped; duplicate module sources are deduped too.
+    assert queries[0] == ("cloudfront distribution", "terraform-aws-modules")
+    assert ("cloudfront", "terraform-aws-modules") in queries
     assert [c.source for c in candidates] == ["terraform-aws-modules/cloudfront/aws"]
     assert candidates[0].version == "5.0.1"
 
@@ -128,10 +126,53 @@ def test_discover_falls_back_to_tokens_when_full_query_matches_nothing(monkeypat
     assert [c.source for c in candidates] == ["terraform-aws-modules/cloudfront/aws"]
 
 
-def test_discover_returns_nothing_without_resource_type(monkeypatch):
+def test_discover_returns_nothing_without_any_request_text(monkeypatch):
     monkeypatch.setattr(
         "iac_smith.registry_modules.search_modules",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not search")),
     )
-    intent = _intent().model_copy(update={"resource_type": ""})
+    intent = _intent().model_copy(update={"resource_type": "", "raw_request": ""})
     assert discover_registry_candidates(intent) == []
+
+
+def test_discover_finds_service_named_only_in_raw_request(monkeypatch):
+    # The live issue #68 re-run: intent classed the request as
+    # `static website hosting`, so no class token matched the cloudfront
+    # module even though the issue text named CloudFront explicitly.
+    def fake_search(query, *, namespace, provider="aws", limit=3, timeout=10.0):
+        if query == "cloudfront":
+            return ["terraform-aws-modules/cloudfront/aws"]
+        return []
+
+    monkeypatch.setattr("iac_smith.registry_modules.search_modules", fake_search)
+    monkeypatch.setattr(
+        "iac_smith.registry_modules._get_json", lambda url, timeout: _DETAILS_PAYLOAD
+    )
+    intent = _intent().model_copy(
+        update={
+            "resource_type": "static_website_hosting",
+            "raw_request": "Provision secure static website hosting with CloudFront and OAC.",
+        }
+    )
+    candidates = discover_registry_candidates(intent)
+
+    assert [c.source for c in candidates] == ["terraform-aws-modules/cloudfront/aws"]
+
+
+def test_candidate_queries_are_request_derived_bounded_and_deduped():
+    from iac_smith.registry_modules import _candidate_queries
+
+    intent = _intent().model_copy(
+        update={
+            "resource_type": "static_website_hosting",
+            "features": ["cloudfront", "origin_access_control"],
+            "raw_request": "Static website hosting with CloudFront. " + "filler " * 40,
+        }
+    )
+    queries = _candidate_queries(intent)
+
+    assert queries[0] == "static website hosting"
+    assert "cloudfront" in queries
+    assert "origin" in queries
+    assert len(queries) == len(set(queries))
+    assert len(queries) <= 16
