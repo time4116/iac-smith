@@ -4,13 +4,13 @@ This is the short setup index for IaC Smith. The detailed setup guide is in [doc
 
 ## Current project status
 
-IaC Smith's Bedrock-backed issue-to-PR MVP path is implemented. `BEDROCK_MODEL_ID` must be supplied by GitHub Actions secret or local environment configuration.
+IaC Smith's issue-to-PR path is implemented. The default generator is the typed-spec composer and deterministic renderer. `BEDROCK_MODEL_ID` must be supplied by GitHub Actions secret or local environment configuration so the controller can parse intent, compose resources, and run bounded repairs.
 
 ## Required GitHub configuration
 
 1. `IAC_SMITH_TARGET_REPO_PAT`
 
-   Fine-grained PAT scoped to the fixed target infrastructure repo, currently `time4116/iac-smith-demo-infra`.
+   Fine-grained PAT scoped only to the target infrastructure repository configured for this controller run.
 
 2. `BEDROCK_MODEL_ID`
 
@@ -26,11 +26,11 @@ IaC Smith's Bedrock-backed issue-to-PR MVP path is implemented. `BEDROCK_MODEL_I
 
 5. `AWS_REGION`
 
-   GitHub Actions variable for the Bedrock/controller region. The demo default is `us-west-2`.
+   GitHub Actions variable for the Bedrock/controller region. The default is `us-west-2`.
 
 6. `IAC_SMITH_ALLOWED_TARGET_REPO`
 
-   Controller allowlist value. The workflow sets this to `time4116/iac-smith-demo-infra`; the CLI fails closed unless `IAC_SMITH_TARGET_REPO` matches it exactly.
+   Controller allowlist value, formatted as `<owner>/<target-infra-repo>`. The CLI fails closed unless `IAC_SMITH_TARGET_REPO` matches it exactly.
 
 ## Safety boundary
 

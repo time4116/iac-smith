@@ -2,736 +2,109 @@
 
 ## Purpose
 
-**IaC Smith** is an AWS-focused agentic infrastructure workflow that turns freeform GitHub issues into validated, reviewable Terraform/Terragrunt pull requests.
+IaC Smith turns natural-language AWS infrastructure requests into validated, reviewable Terraform/Terragrunt pull requests.
 
-The core value is not "push-button app hosting." The core value is:
+The portfolio value is not autonomous cloud engineering or push-button app hosting. The value is AI-assisted IaC PR generation with deterministic safety gates: a reviewer can describe infrastructure in a GitHub issue and receive a supportable PR whose rendered resources, assumptions, validation results, and scope boundaries are explicit.
 
-> Can I loosely describe the infrastructure I want in natural language and receive a clear, concise, validated Terraform/Terragrunt PR that looks like a senior platform engineer wrote it?
+IaC Smith never applies infrastructure. The controller creates PRs only; human review, merge, and the target repository's GitOps workflow remain the deployment boundary.
 
-IaC Smith should generate infrastructure-as-code changes that are understandable, supportable, reviewable, and ready to apply after merge.
+## Current workflow
 
-## High-Level Concept
+1. A user creates an issue in `time4116/iac-smith` and applies the `iac-smith` label, or triggers the controller workflow manually with `workflow_dispatch`, passing an issue number and optional `source_repo` so an issue filed in the target repo can drive the run.
+2. The owner-gated GitHub Actions controller workflow starts.
+3. The controller validates that the requested target repository exactly matches `IAC_SMITH_ALLOWED_TARGET_REPO`.
+4. The workflow assumes AWS credentials through GitHub Actions OIDC and calls Bedrock using the configured `BEDROCK_MODEL_ID`.
+5. IaC Smith parses the issue into infrastructure intent, scans the target repo for Terraform/Terragrunt conventions, and builds a deterministic change plan.
+6. The default typed-spec composer proposes schema-validated resource selections or community-module calls as JSON, not freeform HCL text.
+7. Deterministic renderers write repository structure, backend bootstrap, Terragrunt envelopes, workflows, module variables, outputs, and dependency wiring.
+8. Static review, provider-schema validation, runtime Terraform/Terragrunt validation, and optional local-state plan checks gate the result.
+9. Bounded repair loops feed exact validation findings back into the composer or generator.
+10. If the final legitimacy gate confirms real requested resources were rendered, IaC Smith commits the target branch and opens or updates a PR.
+11. If legitimacy or validation cannot be proven, IaC Smith blocks instead of opening a misleading PR.
 
-A user opens a GitHub issue in the `iac-smith` controller repo with a freeform infrastructure request. When the issue is labeled `iac-smith`, a GitHub Actions workflow runs the LangGraph-based agent.
+## Current scope
 
-The agent reads the issue, infers the AWS infrastructure intent, scans the fixed target infrastructure repo, generates a complete Terraform/Terragrunt change, validates it, runs plan checks where possible, and opens a pull request against the fixed demo infrastructure repo.
+In scope:
 
-## Project Name
+- AWS-focused Terraform/Terragrunt generation
+- GitHub issue to target-repo PR workflow
+- Existing and greenfield target repositories
+- Repository convention scanning before generation
+- Typed resource specs and deterministic rendering by default
+- Terraform Registry community-module candidates, especially `terraform-aws-modules`
+- Backend bootstrap for S3 state and DynamoDB locking
+- `non-prod` and `prod` environment model
+- Generated target-repo PR check and post-merge apply workflows
+- Static review for safety and structural drift
+- Backend-free Terraform validation
+- Optional local-state Terragrunt planning with mocked dependencies
+- Bounded self-repair with exact validation findings
+- PR bodies generated from the rendered resource inventory, including Scope Monitoring
 
-- Repo name: `iac-smith`
-- Display name: **IaC Smith**
-- Target demo repo: `time4116/iac-smith-demo-infra`
+Out of scope:
 
-## Primary Workflow
+- Applying infrastructure from the controller repo
+- Generating application source code, Dockerfiles, or app build pipelines
+- Kubernetes workload manifests
+- Database migrations
+- DNS/TLS automation unless explicitly represented as infrastructure resources
+- Cost estimation
+- Multi-cloud support
+- GitHub App authentication
+- Auto-merge or auto-apply after PR creation
 
-1. User creates a GitHub issue in `time4116/iac-smith`.
-2. User writes the infrastructure request in freeform natural language.
-3. User applies the label `iac-smith`.
-4. GitHub Actions workflow runs.
-5. IaC Smith reads the issue body and metadata.
-6. IaC Smith scans the target repo `time4116/iac-smith-demo-infra`.
-7. IaC Smith infers the requested AWS infrastructure, environment scope, constraints, and assumptions.
-8. IaC Smith loads the Terraform/Terragrunt/AWS ruleset.
-9. IaC Smith generates a complete infrastructure PR.
-10. IaC Smith validates and repairs generated code when needed.
-11. IaC Smith runs plan checks where credentials and backend state allow.
-12. IaC Smith opens a PR against `time4116/iac-smith-demo-infra`.
-13. The PR description explains what was generated, assumptions, validations, plan results, warnings, and next steps.
-14. After review and merge, the target repo workflow applies the infrastructure.
+## Generation model
 
-## MVP Scope
+The default generation mode is the typed-spec compiler.
 
-### In Scope
+IaC Smith builds an `InfrastructureSpec` from the parsed issue intent and deterministic change plan. The model proposes typed components, provider resources, argument values, nested blocks, references, and community-module calls as structured JSON. Those proposals are validated against harvested provider and module schemas before HCL is rendered.
 
-- AWS only.
-- Freeform GitHub issue input.
-- GitHub Actions controller workflow.
-- AWS Bedrock Claude Sonnet as the default model.
-- LangGraph `StateGraph` orchestration.
-- Terraform/Terragrunt project generation.
-- OpenTofu-compatible implementation where practical.
-- Terragrunt as the primary interface for validation, plan, and apply.
-- Fixed target demo infra repo: `time4116/iac-smith-demo-infra`.
-- Fine-grained GitHub PAT for creating branches and PRs in the target repo.
-- AWS GitHub Actions OIDC role as a manual prerequisite.
-- Generated target repo workflows for PR checks and post-merge apply.
-- Backend/bootstrap generation for remote state.
-- S3 state bucket and DynamoDB lock table.
-- `non-prod` and `prod` environment model.
-- Standardized environment structure with minimal deviations.
-- `terraform-aws-modules` preferred where appropriate.
-- `tflint` included.
-- `terraform-docs` included.
-- High-value tests for the controller repo.
-- `uv`, `ruff`, and `pytest` for Python project quality.
+Freeform Bedrock Terraform generation remains available only as an explicit escape hatch with `IAC_SMITH_GENERATION_MODE=freeform`.
 
-### Out of Scope for MVP
+## Safety model
 
-- Azure or GCP.
-- Multi-cloud support.
-- Kubernetes workload manifests.
-- Full application deployment workflow.
-- Dockerfile generation.
-- App build standards.
-- App framework detection.
-- Database migrations.
-- DNS/TLS automation.
-- Cost estimation.
-- Checkov/tfsec/deeper security scanning.
-- Local CLI.
-- GitHub App auth.
-- Pre-commit hooks.
-- Manual issue comments after PR creation.
-- Auto-apply from the IaC Smith controller repo.
+IaC Smith fails closed by default.
 
-## Important Product Boundary
+If the composer is unavailable, schema harvest fails, generated resources are missing, or final resource inventory does not match the requested infrastructure class, the run blocks. `IAC_SMITH_ALLOW_STRUCTURE_ONLY=1` is reserved for explicit offline/eval scenarios and produces a PR warning when used.
 
-IaC Smith should not be tied to a single proof-of-concept such as "deploy my app to AWS." The project should focus on infrastructure generation from natural-language requirements.
+The final PR body is derived from rendered files, not from the original intent. This keeps summaries, resource counts, backend details, validation output, warnings, and Scope Monitoring aligned with what the branch actually contains.
 
-IaC Smith generates **infrastructure, not application code**. It does not write application source (a `Program.cs`, a Dockerfile, a build script) and is not designed to — that boundary is intentional (see "Out of Scope": full application deployment workflow, app build standards, app framework detection, Dockerfile generation). A request such as "deploy my .NET web app on Elastic Beanstalk" produces the Terraform/Terragrunt for the hosting infrastructure (the EB application + environment, networking wiring, IAM, logging), but the deployable artifact and the build/deploy step that ships it are expected to come from a separate application pipeline. The generated infrastructure is the landing zone the application deploys *into*. This boundary is enforced structurally rather than by a refusal rule: the change planner only plans IaC/workflow/doc files, and the generator is constrained to that planned file set.
+## Target repository boundary
 
-The MVP may use ECS Fargate or EKS Fargate as a demonstration scenario if useful, but the agent should not be hardcoded to one blueprint. It should infer what to generate from the issue text.
+IaC Smith is designed for a fixed allowlisted target repository per controller workflow run.
 
-The goal is:
-
-> One natural-language infrastructure request = one complete, reviewable Terraform/Terragrunt PR.
-
-That PR may include one module, multiple modules, live configuration, backend/bootstrap, workflows, documentation, and summaries depending on what the request needs.
-
-## Input Model
-
-The issue format should be freeform. Do not require a rigid issue template.
-
-Example issue:
-
-```md
-Create AWS infrastructure for a non-prod EKS Fargate setup in us-west-2. Use a new VPC, private subnets, standard tags, remote state, and basic logging. Generate the Terraform/Terragrunt structure and open a PR.
-```
-
-IaC Smith should:
-- infer intent from natural language,
-- make reasonable defaults where safe,
-- document assumptions in the PR,
-- avoid blocking unless the request is too risky or impossible to interpret.
-
-README guidance should say:
-
-> The more detail you provide in the issue, the better the generated Terraform PR will be.
-
-## Defaults and Inference Rules
-
-IaC Smith should make reasonable defaults when safe.
-
-Possible defaults:
-- AWS-only.
-- Default region can be configured, with `us-west-2` as a reasonable default for the demo.
-- If environment is unspecified, generate both `non-prod` and `prod` structure.
-- If the issue explicitly says `non-prod only`, generate only `non-prod`.
-- If the issue explicitly says `prod only`, generate only `prod`.
-- Prefer private subnets where appropriate.
-- Avoid public access unless explicitly requested or clearly implied.
-- Prefer `terraform-aws-modules` where appropriate.
-- Use standard tags.
-- Use S3 + DynamoDB remote state.
-- Use Terragrunt path-based dynamic state keys.
-- Use repo-derived names for backend resources.
-- Never hardcode one-off backend state keys.
-- Never run apply from the IaC Smith controller repo.
-
-## Environment Model
-
-Supported environments for MVP:
-
-- `non-prod`
-- `prod`
-
-No `dev`, `stage`, or `qa` sub-environments in MVP.
-
-Infrastructure should be standardized across `non-prod` and `prod`. Avoid environment-specific deviations unless explicitly requested.
-
-Environment differences should normally be limited to:
-- environment name/tag,
-- backend resource names,
-- Terragrunt path/state key,
-- values explicitly requested by the issue.
-
-## Backend and State
-
-Use a shared backend per target repo/environment.
-
-Example backend resources for `time4116/iac-smith-demo-infra`:
+The public demo target can change over time, so docs should avoid hardcoding one historical demo repo. Configure:
 
 ```text
-iac-smith-demo-infra-non-prod-tfstate
-iac-smith-demo-infra-non-prod-tflock
-iac-smith-demo-infra-prod-tfstate
-iac-smith-demo-infra-prod-tflock
+IAC_SMITH_TARGET_REPO=<owner>/<target-infra-repo>
+IAC_SMITH_ALLOWED_TARGET_REPO=<owner>/<target-infra-repo>
 ```
 
-Backend rules:
-- S3 backend for state.
-- DynamoDB table for locking.
-- S3 bucket versioning enabled.
-- S3 encryption enabled.
-- S3 public access blocked.
-- DynamoDB billing mode should be on-demand.
-- Backend resource names should be derived from target repo name and environment.
-- Names should be sanitized for AWS limits.
-- Backend state keys should be derived from Terragrunt path, not hardcoded.
+The values must match exactly. The target repo PAT should be fine-grained and scoped only to that repository with Contents and Pull requests write permissions.
 
-Terragrunt key pattern:
+## Terraform/Terragrunt layout
 
-```hcl
-key = "${path_relative_to_include()}/terraform.tfstate"
-```
-
-## Bootstrap Behavior
-
-IaC Smith should generate everything the target repo needs.
-
-Because remote state cannot be used until the S3 bucket and DynamoDB table exist, generated output should include backend bootstrap code.
-
-Expected bootstrap pattern:
-1. Use local state temporarily for backend bootstrap.
-2. Create S3 state bucket and DynamoDB lock table.
-3. Configure Terragrunt remote state for generated infrastructure.
-4. Use remote state for all main infrastructure stacks.
-
-## Target Repo Generated Structure
-
-The target repo starts completely empty for the MVP.
-
-IaC Smith should generate a complete structure based on the request. It should not be restricted to a single module.
-
-Possible generated structure:
+The generated layout uses:
 
 ```text
-bootstrap/
-  backend/
-    non-prod/
-      main.tf
-      variables.tf
-      outputs.tf
-      README.md
-    prod/
-      main.tf
-      variables.tf
-      outputs.tf
-      README.md
-
-modules/
-  <generated-module-or-stack>/
-    main.tf
-    variables.tf
-    outputs.tf
-    versions.tf
-    README.md
-
-environments/
-  non-prod/
-    root.hcl                  # environment root config (NOT terragrunt.hcl)
-    <generated-stack>/
-      terragrunt.hcl
-      README.md
-  prod/
-    root.hcl
-    <generated-stack>/
-      terragrunt.hcl
-      README.md
-
-.github/
-  workflows/
-    terraform-pr-check.yml
-    terraform-apply.yml
-```
-
-The actual generated structure should be determined by the request, ruleset, and existing target repo conventions.
-
-### Module Scope Rules
-
-`foundation` means shared AWS primitives that downstream resources depend on. Examples include VPCs, subnets, route tables, internet/NAT gateways, common network security boundaries, and other cross-stack building blocks.
-
-Application or workload modules should not hide foundational resources inside narrowly named modules. For example, `modules/ecs-fargate` should not create the VPC directly. It should depend on outputs from `modules/foundation` through `live/<env>/foundation` unless the issue explicitly asks for a different repo pattern.
-
-Generated module names must describe the primary ownership boundary of the code inside them. If a requested stack needs both foundation resources and workload-specific resources, IaC Smith should split them into appropriately scoped modules instead of placing a broad mix of resources under one specific module name.
-
-## Existing Repo Support
-
-IaC Smith scans the target repo before generation and passes discovered conventions plus bounded representative Terraform/Terragrunt snippets into the dynamic generator.
-
-Current behavior:
-- scan existing structure,
-- detect Terraform/Terragrunt conventions,
-- capture representative `environments/**/root.hcl`, `environments/**/terragrunt.hcl`, `modules/**/*.tf`, and module README examples,
-- follow existing naming/module/environment/backend patterns unless the issue explicitly says not to,
-- avoid stamping a new structure over an established repo,
-- disclose conflicts or assumptions in the PR.
-
-Generation still stays bounded by the planned file set; a model response that returns paths outside the plan or omits planned files is rejected before PR creation.
-
-## Generated Workflows in Target Repo
-
-IaC Smith should create target repo workflows if they do not already exist.
-
-If workflows already exist, IaC Smith should inspect them and avoid overwriting blindly. It may:
-- leave them unchanged,
-- update them minimally if needed,
-- explain workflow assumptions in the PR description.
-
-### PR Check Workflow
-
-File:
-
-```text
+bootstrap/backend/<env>/
+environments/<env>/root.hcl
+environments/<env>/<stack>/terragrunt.hcl
+modules/<stack>/*.tf
 .github/workflows/terraform-pr-check.yml
-```
-
-Runs on pull requests.
-
-Responsibilities:
-- checkout,
-- install Terraform/OpenTofu-compatible tooling as needed,
-- install Terragrunt,
-- install tflint,
-- install terraform-docs,
-- run Terragrunt HCL format check (`terragrunt hcl format --check`),
-- run `terraform fmt -check` on modules,
-- run `terraform init -backend=false && terraform validate` per module,
-- run tflint,
-- run terraform-docs validation,
-- surface validation results.
-
-Note: this workflow must not configure AWS credentials — `terraform init -backend=false` and `terraform validate` are schema-only and require no AWS access. `terragrunt validate` and `terragrunt plan` on environment stacks must not be included; those require a deployed S3 backend that does not exist for brand-new infrastructure.
-
-### Apply Workflow
-
-File:
-
-```text
 .github/workflows/terraform-apply.yml
 ```
 
-Runs after merge to `main`.
+IaC Smith does not generate a new `foundation` networking module as a default behavior. If a target repository already contains a foundation stack and module, new workload stacks can be wired to it. If no foundation exists, orphan foundation dependencies are stripped so generated stacks do not depend on infrastructure that is not present.
 
-Responsibilities:
-- a `detect` job scopes the run to only the components whose files changed
-  (`bootstrap`, `foundation`, and individual workload stacks); a change to a shared
-  root config fans out to foundation and all stacks; a greenfield push (no
-  before-SHA) applies everything in dependency order,
-- a single `gate` job backed by a GitHub Environment holds the run for manual
-  approval before any AWS mutation, and only prompts when something will actually
-  apply,
-- apply only the changed live path(s), not the entire repo,
-- use GitHub Actions OIDC,
-- run formatting/validation checks,
-- run plan,
-- run `terragrunt apply` on the saved plan.
+## Portfolio positioning
 
-Approval is two-step: PR review and merge, then the in-workflow Environment gate.
-The Environment's required reviewers are configured in the **target repo's
-Settings → Environments** (the workflow only references the environment by name);
-the gate is enforced once the target repo can use environment protection rules.
+Use this phrasing when describing the project:
 
-Note: the run applies what changed, not its dependents — a foundation-only change
-does not automatically re-apply workload stacks that consume its outputs.
+> IaC Smith is an AI-assisted IaC PR generator for AWS Terraform/Terragrunt. It converts GitHub issues into reviewable infrastructure PRs, but correctness is enforced by deterministic schema validation, runtime checks, bounded repair, and fail-closed legitimacy gates rather than blind trust in model output.
 
-IaC Smith itself must never apply infrastructure.
+Avoid claiming that it is a fully autonomous cloud engineer, that it can apply infrastructure, or that every generated PR is automatically production-ready without human review.
 
-## PR Behavior
+## Historical planning notes
 
-IaC Smith opens a branch in the target repo using:
-
-```text
-iac-smith/issue-<issue-number>-<short-slug>
-```
-
-Example:
-
-```text
-iac-smith/issue-12-create-eks-fargate-infra
-```
-
-The PR description should include:
-- source issue link,
-- generated infrastructure summary,
-- assumptions/defaults used,
-- files created/changed,
-- backend resources,
-- validation results: the security checks performed and the literal
-  Terraform/Terragrunt commands run against each module and stack,
-- warnings or risks,
-- target environment(s),
-- a "review before applying" note — the IaC was generated by an LLM and IaC
-  Smith never applied it.
-
-No issue comment is required for MVP. Opening the PR with a clear description is enough.
-
-## Documentation
-
-IaC Smith should generate README files where they make the Terraform/Terragrunt project supportable.
-
-Good README locations:
-- root `README.md` if useful,
-- `bootstrap/backend/README.md`,
-- `modules/<module>/README.md`,
-- `live/non-prod/<stack>/README.md`,
-- `live/prod/<stack>/README.md`.
-
-README files should explain:
-- what the stack/module creates,
-- how Terragrunt wires it together,
-- required inputs,
-- outputs,
-- remote state behavior,
-- validation/apply workflow,
-- assumptions made from the issue,
-- how to safely modify the stack later.
-
-The PR description is for reviewing the generated change. README files are for long-term support.
-
-## terraform-docs
-
-Use `terraform-docs` for generated module reference documentation.
-
-IaC Smith should:
-- generate useful README context,
-- add terraform-docs markers to module READMEs,
-- run terraform-docs in the generated target repo workflows,
-- fail PR checks if module docs are missing or outdated.
-
-Marker style:
-
-```md
-<!-- BEGIN_TF_DOCS -->
-<!-- END_TF_DOCS -->
-```
-
-## Ruleset
-
-Rules should live as YAML files in the controller repo, not as `SKILL.md`.
-
-Recommended structure:
-
-```text
-rules/
-  terraform.yaml
-  terragrunt.yaml
-  aws.yaml
-  security.yaml
-  tagging.yaml
-  pr_review.yaml
-```
-
-### Rule Categories
-
-`rules/terraform.yaml`
-- file structure,
-- formatting,
-- provider pinning,
-- module version pinning,
-- variables,
-- outputs,
-- use of community modules,
-- OpenTofu compatibility where practical.
-
-`rules/terragrunt.yaml`
-- live folder layout,
-- remote state pattern,
-- dynamic state keys,
-- environment config,
-- Terragrunt include patterns.
-
-`rules/aws.yaml`
-- AWS defaults,
-- preferred AWS modules,
-- VPC/networking patterns,
-- logging,
-- IAM,
-- CloudWatch,
-- S3/DynamoDB backend standards.
-
-`rules/security.yaml`
-- no hardcoded secrets,
-- least privilege IAM,
-- no public access unless requested,
-- narrow security group rules,
-- avoid exposing sensitive ports.
-
-`rules/tagging.yaml`
-- standard tags such as:
-  - `Project`,
-  - `Environment`,
-  - `ManagedBy`,
-  - `Owner`,
-  - `Repository`.
-
-`rules/pr_review.yaml`
-- required PR sections,
-- validation result formatting,
-- plan result formatting,
-- assumption/warning disclosure,
-- no-apply confirmation.
-
-## Rule Severity Model
-
-Use a tiered ruleset.
-
-Each rule should have a severity:
-
-```text
-error | warning | preference
-```
-
-### Error Rules
-
-Error rules block PR creation or trigger repair before PR.
-
-Examples:
-- hardcoded secrets or credentials,
-- public S3 buckets unless explicitly requested,
-- unrestricted `0.0.0.0/0` on SSH/RDP/database ports,
-- missing provider/module version constraints,
-- invalid formatting,
-- failed validation,
-- broken plan due to generated code errors,
-- missing required variable descriptions,
-- hardcoded one-off backend state keys.
-
-### Warning Rules
-
-Warning rules do not block PR creation but must be disclosed in the PR.
-
-Examples:
-- region defaulted because none was specified,
-- public ALB created because request implied public service,
-- existing network referenced because none was explicitly provided,
-- default CIDR ranges used,
-- plan skipped or partially run because credentials/backend were unavailable.
-
-### Preference Rules
-
-Preference rules guide generation but do not block.
-
-Examples:
-- prefer maintained `terraform-aws-modules`,
-- prefer reusable modules plus Terragrunt live config,
-- standard tags,
-- clear variable names,
-- concise outputs,
-- minimal generated complexity,
-- include README where useful.
-
-If hard-rule violations cannot be repaired after a retry limit, IaC Smith should fail the run and report the reason in the GitHub Action logs.
-
-## Preferred Terraform Modules
-
-Prefer established Terraform AWS community modules when appropriate, especially from `terraform-aws-modules`.
-
-Examples:
-- VPC: `terraform-aws-modules/vpc/aws`
-- EKS: `terraform-aws-modules/eks/aws`
-- ECS: `terraform-aws-modules/ecs/aws`
-- ALB: `terraform-aws-modules/alb/aws`
-- Security groups: `terraform-aws-modules/security-group/aws`
-- RDS: `terraform-aws-modules/rds/aws`
-
-Rules:
-- use explicit versions,
-- avoid floating latest,
-- wrap modules cleanly,
-- expose useful variables and outputs,
-- avoid hardcoded account-specific values,
-- document assumptions.
-
-## IaC Engine and Tooling
-
-Use Terraform/Terragrunt language in README and positioning for familiarity.
-
-Implementation should standardize on OpenTofu-compatible workflows where practical, with Terragrunt as the primary interface.
-
-Primary commands should be Terragrunt-based:
-- `terragrunt hcl format --check`,
-- `terragrunt validate`,
-- `terragrunt plan`,
-- `terragrunt apply`.
-
-Include:
-- `tflint`,
-- `terraform-docs`.
-
-Exclude from MVP:
-- `checkov`,
-- `tfsec`,
-- pre-commit hooks.
-
-## Controller Repo Tech Stack
-
-- Python
-- `uv`
-- LangGraph `StateGraph`
-- AWS Bedrock Claude Sonnet
-- GitHub Actions
-- GitHub API
-- `ruff`
-- `pytest`
-
-## LangGraph StateGraph
-
-Use LangGraph `StateGraph` from day one.
-
-Recommended nodes:
-
-1. **Issue Intake**
-   - Read GitHub issue text and metadata.
-   - Extract issue number, title, body, labels, repository info.
-
-2. **Repo Scan**
-   - Clone/inspect target repo.
-   - Detect current Terraform/Terragrunt layout, backend conventions, stack paths, and representative files so generation can defer to existing repo patterns.
-
-3. **Intent Parser**
-   - Infer AWS infrastructure intent, environment scope, region, resources, constraints, and defaults.
-
-4. **Ruleset Loader**
-   - Load YAML rules.
-   - Normalize error/warning/preference rules.
-
-5. **Change Planner**
-   - Decide project structure, generated files, modules, live paths, backend/bootstrap needs, workflows, and docs.
-
-6. **Code Generator**
-   - Generate Terraform/Terragrunt files, workflows, READMEs, terraform-docs markers, and supporting docs.
-   - Review each generated file immediately with static guardrails.
-   - Send hard static-review failures back to Bedrock for one bounded repair attempt before generating sibling files.
-
-7. **Static Review**
-   - Check generated output against hard rules and preference rules before running shell validation.
-   - Re-run over the complete generated set before PR creation to catch cross-file issues.
-
-8. **Validation Runner**
-   - Run formatting, validation, tflint, terraform-docs checks, and plan where possible.
-
-9. **Repair Loop**
-   - Feed errors back into the generation/revision step.
-   - Retry within a fixed limit.
-   - Fail if unrecoverable.
-
-10. **Plan Runner**
-   - Run Terragrunt plan where credentials/backend allow.
-   - Capture result for PR description.
-
-11. **PR Writer**
-   - Create branch in target repo.
-   - Commit generated files.
-   - Open PR.
-   - Write concise PR body with results and assumptions.
-
-## Authentication and Secrets
-
-### GitHub
-
-MVP uses a fine-grained GitHub PAT stored in GitHub Actions secrets.
-
-The PAT should be scoped only to:
-
-```text
-time4116/iac-smith-demo-infra
-```
-
-Needed permissions:
-- read repo,
-- create branch,
-- commit files,
-- open PR.
-
-Future version can move to GitHub App auth.
-
-### AWS
-
-AWS GitHub Actions OIDC/IAM role setup is a manual prerequisite for MVP.
-
-Docs should include:
-- AWS IAM role for GitHub Actions OIDC,
-- allowed repo/branch conditions,
-- permissions needed for plan/apply,
-- GitHub variable for role ARN,
-- GitHub variable for AWS region.
-
-IaC Smith does not generate/manage the AWS OIDC setup in v1.
-
-## GitHub Actions
-
-### Controller Repo CI
-
-File:
-
-```text
-.github/workflows/ci.yml
-```
-
-Runs on PRs to the controller repo.
-
-Commands:
-```bash
-uv sync --locked
-uv run ruff check .
-uv run ruff format --check .
-uv run pytest
-```
-
-### Controller Issue-to-PR Workflow
-
-File:
-
-```text
-.github/workflows/issue-to-pr.yml
-```
-
-Triggered when issue label `iac-smith` is applied.
-
-Responsibilities:
-- checkout controller repo,
-- install `uv`,
-- install dependencies,
-- configure AWS credentials for Bedrock access,
-- read issue payload,
-- run IaC Smith workflow,
-- open PR in target demo repo.
-
-## Testing Strategy
-
-Include high-quality tests where they add value.
-
-Test:
-- ruleset loading and validation,
-- severity handling,
-- freeform issue parsing into structured intent,
-- StateGraph routing decisions,
-- generated file plan creation,
-- PR summary generation,
-- validation result parsing,
-- repair-loop retry limits,
-- branch/PR naming logic.
-
-Avoid low-value tests like asserting exact LLM-generated Terraform output.
-
-Use:
-- `pytest`,
-- mocked Bedrock responses,
-- fixture issue files,
-- fixture target repos,
-- fixture rules,
-- golden snapshots only for stable outputs like PR summaries or parsed intent.
-
-## Suggested README Positioning
-
-```md
-# IaC Smith
-
-IaC Smith is an AWS-focused agentic IaC workflow that turns freeform GitHub issues into validated Terraform/Terragrunt pull requests.
-
-It uses AWS Bedrock, Claude Sonnet, and LangGraph to infer infrastructure intent, apply an opinionated ruleset, generate Terraform/Terragrunt projects from issue text plus repo-discovered conventions, validate the output, run plan checks, and open a reviewable PR against a target infrastructure repository.
-
-The goal is not to blindly apply infrastructure. The goal is to turn natural-language infrastructure requests into clear, supportable, validated IaC changes that can be reviewed, merged, and applied through normal GitOps-style workflows.
-```
-
+The original long-form MVP planning brief is preserved at [docs/historical/PROJECT_BRIEF.md](historical/PROJECT_BRIEF.md). Treat it as historical context, not current behavior documentation.

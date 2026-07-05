@@ -34,25 +34,20 @@ Each stack lives at `environments/<env>/<stack-name>/` and maps to a reusable Te
 ├── environments/
 │   └── <env>/                   # e.g. non-prod, prod
 │       ├── root.hcl             # environment root config: remote_state, provider, shared locals
-│       ├── foundation/          # present when a VPC/networking layer is needed
-│       │   ├── terragrunt.hcl
-│       │   └── README.md
 │       └── <stack-name>/        # the requested infrastructure stack
 │           ├── terragrunt.hcl
 │           └── README.md
 └── modules/
-    ├── foundation/              # shared VPC/networking module (reused across stacks)
-    │   ├── main.tf
-    │   ├── variables.tf
-    │   ├── outputs.tf
-    │   ├── versions.tf
-    │   └── README.md
     └── <stack-name>/            # reusable Terraform module for this stack
         ├── main.tf
         ├── variables.tf
         ├── outputs.tf
         ├── versions.tf
         └── README.md
+
+# Optional pre-existing shared networking, if already present in the target repo:
+# environments/<env>/foundation/terragrunt.hcl
+# modules/foundation/*.tf
 ```
 
 Generated CI workflows are placed at `.github/workflows/terraform-pr-check.yml` and `.github/workflows/terraform-apply.yml`.
@@ -75,7 +70,7 @@ The two-level hierarchy keeps remote state config DRY while giving each stack is
 1. **`environments/<env>/root.hcl`** — the environment **root config**: defines `remote_state` and the provider `generate` block once for the environment, plus shared locals. It is named `root.hcl` (not `terragrunt.hcl`) because Terragrunt deprecated using `terragrunt.hcl` as an include root. The state key uses `path_relative_to_include()`, which resolves to the calling stack's directory relative to this file (e.g. `ecs-fargate/terraform.tfstate`), so every stack gets its own isolated state file in S3 automatically. The root config holds its config **directly** — it has no `include` block of its own.
 2. **`environments/<env>/<stack>/terragrunt.hcl`** — the **stack config**: includes the root with `include "root" { path = find_in_parent_folders("root.hcl") }`, then declares the module source (relative path into `modules/`), dependency blocks, and input variable bindings.
 
-Because state is isolated per stack, a `terragrunt plan` or `apply` in `environments/non-prod/ecs-fargate-stack/` only reads and writes state for that stack. The foundation stack and any future stacks each have their own state files and can be planned or applied independently.
+Because state is isolated per stack, a `terragrunt plan` or `apply` in `environments/non-prod/ecs-fargate-stack/` only reads and writes state for that stack. Any pre-existing shared stacks, such as a foundation stack, keep their own state files and can be planned or applied independently.
 
 ## Backend resource naming
 
@@ -119,8 +114,8 @@ Creating a whole shared-networking layer is intentionally out of scope: it dropp
 
 Create a new GitHub issue in the controller repository labeled `iac-smith`. IaC Smith scans the existing repository before generating anything, so it will:
 
-- Reuse `modules/foundation` if it exists rather than regenerating it
-- Add a new `environments/<env>/<new-stack>/` live path wired to the existing environment `terragrunt.hcl`
+- Reuse and wire to an existing `modules/foundation` stack if one exists rather than regenerating it
+- Add a new `environments/<env>/<new-stack>/` live path wired to the existing environment `root.hcl`
 - Generate `modules/<new-stack>/` only if the module does not already exist
 
 Follow-on PRs are fully additive — they do not modify existing module code unless the issue explicitly requests a change to an existing resource.

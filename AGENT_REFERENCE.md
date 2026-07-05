@@ -331,7 +331,7 @@ actually been resolved or learned (no boilerplate on the first pass).
 **Module:** `src/iac_smith/dynamic_terraform.py` (class `BedrockTerraformGenerator`)
 
 **Bedrock call per file:**
-- Max tokens: `IAC_SMITH_BEDROCK_MAX_TOKENS` (default 4096), temperature 0. `invoke_model` is non-streaming, so a runaway generation that exceeds the read timeout looks like a dead connection; the tight cap keeps each call well under `IAC_SMITH_BEDROCK_READ_TIMEOUT`
+- Max tokens: `IAC_SMITH_BEDROCK_MAX_TOKENS` (default 16384), temperature 0. File generation uses streaming, so the read timeout applies between stream events rather than to total generation time; the generous cap is meant to fit even a large module's `main.tf` in one response and only bounds worst-case output cost.
 - Output constrained to JSON schema: `{"path": str, "content": str, "assumptions": [], "warnings": []}`
 - JSON format enforced via `output_config.format.type = "json_schema"` on the first call
 - **Streaming generation:** file generation uses `invoke_model_with_response_stream` (`_invoke_file_generation` → `_read_stream_document`), accumulating `content_block_delta` text and tracking the final `stop_reason`. Streaming keeps the connection alive between events, so the read timeout applies per-event rather than to total generation time. That decouples a large file's generation length from the timeout and lets `IAC_SMITH_BEDROCK_MAX_TOKENS` be generous enough to fit a big `main.tf` in one response — no mid-document truncation, no continuation/prefill stitching (which models can't always do). If the model still reports `stop_reason == "max_tokens"`, the document may be clipped: the caller's parse-retry catches the malformed JSON and the log says to raise `IAC_SMITH_BEDROCK_MAX_TOKENS`
@@ -595,7 +595,7 @@ Sections in order:
 7. Backend resources (S3 bucket + DynamoDB lock table per env)
 8. Validation results (status + check list)
 9. Scope Monitoring (rendered workload resource counts per module so reviewers can spot scope drift)
-10. Warnings and risks (includes an explicit validation-scope note when a PR is structure-only)
+10. Warnings and risks (includes an explicit validation-scope note only when `IAC_SMITH_ALLOW_STRUCTURE_ONLY=1` permits a structure-only PR)
 11. Expected post-merge apply behavior
 12. Explicit confirmation: IaC Smith did not apply anything
 
@@ -608,7 +608,7 @@ summary/inventory from them, so the body describes what was actually rendered.
 
 **Issue fetch:** `GET /repos/{repo}/issues/{number}`  
 **PR creation:** `POST /repos/{repo}/pulls` (idempotent: checks for existing open PR on same head/base first)  
-**Auth:** `Authorization: Bearer {token}`, `X-GitHub-Api-Version: 2022-11-28`
+**Auth headers:** `Authorization: Bearer <token>` and `X-GitHub-Api-Version: 2022-11-28`
 
 ---
 
