@@ -98,6 +98,12 @@ class InfrastructureSpec(BaseModel):
     components: list[ComponentSpec]
     dependencies: list[DependencySpec] = Field(default_factory=list)
     files_to_generate: list[str]
+    # Module/stack names already in the target repo. Generated workflows must
+    # cover plan ∪ existing: rendering them from the plan alone made each new
+    # stack's PR silently drop earlier stacks from change detection, apply
+    # routing, and PR validation (the live showcase ECS PR erased the
+    # foundation from terraform-apply.yml).
+    existing_modules: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     rendering_policy: Literal[

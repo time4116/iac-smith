@@ -1709,15 +1709,27 @@ def _build_apply_workflow(change_plan: ChangePlan) -> str:
     return build_apply_workflow(change_plan.files_to_generate, change_plan.environments)
 
 
-def build_apply_workflow(files_to_generate: list[str], environments: list[str]) -> str:
+def build_apply_workflow(
+    files_to_generate: list[str],
+    environments: list[str],
+    existing_modules: list[str] | None = None,
+) -> str:
     """Build terraform-apply.yml deterministically from the actual module paths.
 
     The run is scoped to the components whose files changed (`detect` job) and
     routed through one manual approval (`gate` job backed by a GitHub Environment)
     before any AWS mutation. Greenfield pushes apply every component in dependency
     order. Skipped upstream jobs do not cancel independent downstream applies.
+
+    ``existing_modules`` are stacks already in the target repo: the workflow is
+    regenerated whole in every PR, so it must keep covering them — otherwise
+    each new stack's PR silently drops earlier stacks from change detection
+    and apply routing.
     """
     module_names = _extract_module_names(files_to_generate)
+    for name in existing_modules or []:
+        if name not in module_names:
+            module_names.append(name)
     bootstrap_envs = _extract_bootstrap_envs(files_to_generate) or environments or ["non-prod"]
     env = bootstrap_envs[0]
     foundation_module = next((name for name in module_names if name in FOUNDATION_ALIASES), None)

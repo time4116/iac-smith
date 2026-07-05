@@ -200,6 +200,15 @@ def build_spec_from_intent(
     if _planned_module_paths(change_plan) and not resources:
         warnings.append(_STRUCTURE_ONLY_WARNING)
 
+    existing_modules = sorted(
+        {
+            path.rstrip("/").split("/")[-1]
+            for path in (repo_patterns.existing_stack_paths if repo_patterns else [])
+            if path.startswith("modules/")
+        }
+        - {change_plan.stack_name}
+    )
+
     return InfrastructureSpec(
         raw_request=intent.raw_request,
         target_repo=target_repo,
@@ -209,6 +218,7 @@ def build_spec_from_intent(
         backends=backends,
         components=components,
         dependencies=dependencies,
+        existing_modules=existing_modules,
         files_to_generate=change_plan.files_to_generate,
         assumptions=list(intent.assumptions),
         warnings=warnings,
@@ -306,12 +316,15 @@ def _render_root_readme(spec: InfrastructureSpec) -> str:
 
 
 def _render_pr_check_workflow(spec: InfrastructureSpec) -> str:
+    # Plan ∪ existing: the workflow is rewritten whole in every PR, so it must
+    # keep validating stacks that earlier PRs added.
     module_dirs = sorted(
         {
             "/".join(path.split("/")[:2])
             for path in spec.files_to_generate
             if path.startswith("modules/")
         }
+        | {f"modules/{name}" for name in spec.existing_modules}
     )
     module_steps = []
     for module_dir in module_dirs:
@@ -356,7 +369,9 @@ def _render_pr_check_workflow(spec: InfrastructureSpec) -> str:
 def _render_apply_workflow(spec: InfrastructureSpec) -> str:
     from iac_smith.dynamic_terraform import build_apply_workflow
 
-    return build_apply_workflow(spec.files_to_generate, spec.environments)
+    return build_apply_workflow(
+        spec.files_to_generate, spec.environments, existing_modules=spec.existing_modules
+    )
 
 
 def _render_backend_file(spec: InfrastructureSpec, path: str) -> str:
