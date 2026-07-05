@@ -168,3 +168,70 @@ class TestEnsureTerraformTerragrunt:
         r = subprocess.run([str(tg), "--version"], capture_output=True, text=True, env=env)
         assert r.returncode == 0
         assert "v0.68" in r.stdout or "0.68" in r.stdout
+
+
+class TestBinDirLifecycle:
+    def test_bin_dir_reused_across_calls_and_cleaned_at_exit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same version pins download once per process; exit hook removes the dir."""
+        from iac_smith import version_detection as vd
+
+        monkeypatch.setattr(vd, "_bin_dir_cache", {})
+        created: list[Path] = []
+        monkeypatch.setattr(vd, "_created_bin_dirs", created)
+
+        def fake_tf(repo: Path, bin_dir: Path) -> bool:
+            (bin_dir / "terraform").write_text("stub")
+            return True
+
+        monkeypatch.setattr(vd, "_resolve_tf_version", fake_tf)
+        monkeypatch.setattr(vd, "_resolve_tg_version", lambda repo, bin_dir: False)
+
+        repo_a = tmp_path / "a"
+        repo_a.mkdir()
+        (repo_a / ".terraform-version").write_text("1.9.0\n")
+        repo_b = tmp_path / "b"
+        repo_b.mkdir()
+        (repo_b / ".terraform-version").write_text("1.9.0\n")
+
+        env_a = vd.ensure_terraform_terragrunt(repo_a)
+        env_b = vd.ensure_terraform_terragrunt(repo_b)
+
+        assert env_a["PATH"].split(":")[0] == env_b["PATH"].split(":")[0]
+        assert len(created) == 1
+
+        vd._cleanup_created_bin_dirs()
+        assert not created[0].exists()
+
+    def test_no_install_leaves_no_directory_behind(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from iac_smith import version_detection as vd
+
+        monkeypatch.setattr(vd, "_bin_dir_cache", {})
+        monkeypatch.setattr(vd, "_created_bin_dirs", [])
+        monkeypatch.setattr(vd, "_resolve_tf_version", lambda repo, bin_dir: False)
+        monkeypatch.setattr(vd, "_resolve_tg_version", lambda repo, bin_dir: False)
+
+        scratch_dirs: list[Path] = []
+        real_mkdtemp = vd.tempfile.mkdtemp
+
+        def recording_mkdtemp(*args, **kwargs):
+            path = real_mkdtemp(*args, **kwargs)
+            scratch_dirs.append(Path(path))
+            return path
+
+        monkeypatch.setattr(vd.tempfile, "mkdtemp", recording_mkdtemp)
+
+        repo = tmp_path / "target"
+        repo.mkdir()
+        env = vd.ensure_terraform_terragrunt(repo)
+
+        assert "iac-smith-bins-" not in env["PATH"].split(":")[0]
+        assert len(scratch_dirs) == 1
+        assert not scratch_dirs[0].exists()
+
+        # Cached: a second call does not even create a scratch dir.
+        vd.ensure_terraform_terragrunt(repo)
+        assert len(scratch_dirs) == 1

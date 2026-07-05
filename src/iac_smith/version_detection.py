@@ -6,6 +6,7 @@ or `.terragrunt-version` file. Downloaded binaries go to a workspace temp
 dir and are prepended to PATH so downstream validation picks them up.
 """
 
+import atexit
 import io
 import json
 import os
@@ -225,6 +226,29 @@ def _resolve_tg_version(repo_path: Path, bin_dir: Path) -> bool:
     return True
 
 
+# Downloaded binaries are ~194MB per copy. One copy is kept per resolved
+# version-file pair per process (repeat callers like the eval harness reuse
+# it), and every created dir is removed at interpreter exit — before this,
+# each call leaked its dir until the tmpfs filled (issue #128).
+_bin_dir_cache: dict[tuple[str | None, str | None], Path | None] = {}
+_created_bin_dirs: list[Path] = []
+
+
+def _cleanup_created_bin_dirs() -> None:
+    for path in _created_bin_dirs:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+atexit.register(_cleanup_created_bin_dirs)
+
+
+def _env_with_bin_dir(bin_dir: Path | None) -> dict[str, str]:
+    env = dict(os.environ)
+    if bin_dir is not None:
+        env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+    return env
+
+
 def ensure_terraform_terragrunt(repo_path: str | Path) -> dict[str, str]:
     """Ensure terraform and terragrunt are on PATH at correct versions.
 
@@ -234,19 +258,27 @@ def ensure_terraform_terragrunt(repo_path: str | Path) -> dict[str, str]:
 
     Returns an env dict with an updated ``PATH`` to pass to subprocess calls.
     Callers should merge this into their subprocess environment before running
-    any terraform/terragrunt commands.
+    any terraform/terragrunt commands. Downloaded binaries are shared across
+    calls that resolve the same version pins and deleted at process exit.
     """
     repo_root = Path(repo_path)
+    cache_key = (
+        _read_version_file(repo_root, ".terraform-version"),
+        _read_version_file(repo_root, ".terragrunt-version"),
+    )
+    if cache_key in _bin_dir_cache:
+        return _env_with_bin_dir(_bin_dir_cache[cache_key])
+
     bin_dir = Path(tempfile.mkdtemp(prefix="iac-smith-bins-"))
     installed_any = False
 
     installed_any |= _resolve_tf_version(repo_root, bin_dir)
     installed_any |= _resolve_tg_version(repo_root, bin_dir)
 
-    env = dict(os.environ)
     if installed_any:
-        env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+        _created_bin_dirs.append(bin_dir)
+        _bin_dir_cache[cache_key] = bin_dir
     else:
         shutil.rmtree(bin_dir, ignore_errors=True)
-
-    return env
+        _bin_dir_cache[cache_key] = None
+    return _env_with_bin_dir(_bin_dir_cache[cache_key])
