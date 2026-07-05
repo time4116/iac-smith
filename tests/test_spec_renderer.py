@@ -303,3 +303,7 @@ def test_generated_workflows_keep_covering_existing_stacks():
     pr_check = files[".github/workflows/terraform-pr-check.yml"]
     assert "modules/vpc-foundation" in pr_check
     assert "modules/ecs-fargate-nginx" in pr_check
+
+    readme = files["README.md"]
+    assert "[`vpc-foundation`](modules/vpc-foundation/README.md)" in readme
+    assert "[`ecs-fargate-nginx`](modules/ecs-fargate-nginx/README.md)" in readme
