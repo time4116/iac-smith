@@ -149,16 +149,26 @@ def discover_registry_candidates(
     )
     if not query:
         return []
+    # The registry search ANDs its terms, so a multi-word class like
+    # "cloudfront distribution" matches nothing even though `cloudfront`
+    # finds the module; after the full query, fall back to its tokens.
+    queries = [query]
+    queries.extend(token for token in query.split() if len(token) >= 3 and token != query)
     candidates: list[RegistryModuleContract] = []
     seen: set[str] = set()
     for namespace in registry_namespaces():
-        for source in search_modules(query, namespace=namespace, limit=limit, timeout=timeout):
-            if source in seen or len(candidates) >= limit:
-                continue
-            seen.add(source)
-            contract = fetch_module_contract(source, timeout=timeout)
-            if contract is not None:
-                candidates.append(contract)
+        for candidate_query in queries:
+            if len(candidates) >= limit:
+                break
+            for source in search_modules(
+                candidate_query, namespace=namespace, limit=limit, timeout=timeout
+            ):
+                if source in seen or len(candidates) >= limit:
+                    continue
+                seen.add(source)
+                contract = fetch_module_contract(source, timeout=timeout)
+                if contract is not None:
+                    candidates.append(contract)
     if logger:
         if candidates:
             logger(

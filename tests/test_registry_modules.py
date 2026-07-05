@@ -100,9 +100,32 @@ def test_discover_builds_query_from_intent_and_harvests_contracts(monkeypatch):
     )
     candidates = discover_registry_candidates(_intent())
 
-    assert queries == [("cloudfront distribution", "terraform-aws-modules")]
+    # Full query first, then per-token fallback; duplicate sources are deduped.
+    assert queries == [
+        ("cloudfront distribution", "terraform-aws-modules"),
+        ("cloudfront", "terraform-aws-modules"),
+        ("distribution", "terraform-aws-modules"),
+    ]
     assert [c.source for c in candidates] == ["terraform-aws-modules/cloudfront/aws"]
     assert candidates[0].version == "5.0.1"
+
+
+def test_discover_falls_back_to_tokens_when_full_query_matches_nothing(monkeypatch):
+    # The live 2026-07-05 runs: the registry search ANDs terms, so
+    # "cloudfront distribution" (and "vpc foundation") returned nothing even
+    # though the single token finds the module.
+    def fake_search(query, *, namespace, provider="aws", limit=3, timeout=10.0):
+        if query == "cloudfront":
+            return ["terraform-aws-modules/cloudfront/aws"]
+        return []
+
+    monkeypatch.setattr("iac_smith.registry_modules.search_modules", fake_search)
+    monkeypatch.setattr(
+        "iac_smith.registry_modules._get_json", lambda url, timeout: _DETAILS_PAYLOAD
+    )
+    candidates = discover_registry_candidates(_intent())
+
+    assert [c.source for c in candidates] == ["terraform-aws-modules/cloudfront/aws"]
 
 
 def test_discover_returns_nothing_without_resource_type(monkeypatch):
