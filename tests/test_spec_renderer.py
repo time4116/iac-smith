@@ -254,3 +254,21 @@ def test_rendered_apply_workflow_recognizes_foundation_alias_stack():
     assert "environments/non-prod/vpc-foundation" in apply_workflow
     assert "modules/vpc-foundation/" in apply_workflow
     assert "apply-workloads" not in parsed["jobs"]
+
+
+def test_plural_dependency_outputs_are_typed_and_mocked_as_lists():
+    # The live showcase foundation exposes module-native list outputs
+    # (`private_subnets`, `public_subnets`) rather than `*_ids`; consumers
+    # must type and mock them as lists or their plan rejects the wiring.
+    from iac_smith.spec_renderer import _list_like_name, _mock_output_value, _variable_type
+
+    assert _variable_type("public_subnets") == "list(string)"
+    assert _variable_type("private_subnet_ids") == "list(string)"
+    assert _variable_type("azs") == "list(string)"
+    assert _variable_type("vpc_cidr_block") == "string"
+    assert _variable_type("vpc_id") == "string"
+    assert _variable_type("alb_dns") == "string"
+    assert _variable_type("bucket_address") == "string"
+    assert _mock_output_value("public_subnets") == '["mock-id"]'
+    assert _mock_output_value("vpc_id") == '"mock-id"'
+    assert not _list_like_name("status")

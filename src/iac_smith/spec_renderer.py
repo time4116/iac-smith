@@ -471,8 +471,27 @@ def _render_stack_terragrunt(spec: InfrastructureSpec, path: str) -> str:
     )
 
 
-def _mock_output_value(name: str) -> str:
+# Words that end in "s" but name scalar values; everything else ending in a
+# plural "s" is treated as a list. Linguistic only — community modules expose
+# list outputs as bare plurals (`private_subnets`, `azs`), not `*_ids`, and a
+# string-typed variable wired to one fails the consumer's plan.
+_SCALAR_S_WORDS = frozenset({"access", "address", "alias", "dns", "https", "status", "tls"})
+
+
+def _list_like_name(name: str) -> bool:
     if name.endswith("_ids"):
+        return True
+    tail = name.rsplit("_", 1)[-1]
+    return (
+        len(tail) > 1
+        and tail.endswith("s")
+        and not tail.endswith("ss")
+        and tail not in _SCALAR_S_WORDS
+    )
+
+
+def _mock_output_value(name: str) -> str:
+    if _list_like_name(name):
         return '["mock-id"]'
     if name.endswith("_id"):
         return '"mock-id"'
@@ -542,7 +561,7 @@ def _render_module_file(spec: InfrastructureSpec, path: str) -> str:
 
 
 def _variable_type(name: str) -> str:
-    return "list(string)" if name.endswith("_ids") else "string"
+    return "list(string)" if _list_like_name(name) else "string"
 
 
 def _render_module_readme(component: ComponentSpec) -> str:
