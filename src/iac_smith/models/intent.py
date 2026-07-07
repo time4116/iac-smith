@@ -19,6 +19,11 @@ class InfrastructureIntent(BaseModel):
     region: str = "us-west-2"
     requires_new_vpc: bool = False
     features: list[str] = Field(default_factory=list)
+    # Explicit, checkable requirement statements lifted from the issue text
+    # (e.g. "tasks run in public subnets", "no NAT gateway"). Request-derived
+    # only — no curated vocabulary. The adherence gate verifies the composed
+    # implementation against each of these before rendering.
+    constraints: list[str] = Field(default_factory=list)
     # Names of stacks the issue treats as already existing in the target repo
     # (e.g. "foundation" when the request says to consume existing networking
     # outputs). Feasibility is checked against the repo before generation.

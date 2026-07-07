@@ -20,7 +20,10 @@ flowchart TD
     K -- No, retries remain --> J1[Repair typed composition with exact schema findings]
     J1 --> J
     K -- No, exhausted --> N[Block run]
-    K -- Yes --> L[Render Terraform, Terragrunt envelopes, workflows, backend bootstrap, docs]
+    K -- Yes --> KA{Constraint-adherence gate: composition satisfies the issue's stated constraints?}
+    KA -- Violations within budget --> J1
+    KA -- Violations exhausted --> N
+    KA -- Satisfied or advisory only --> L[Render Terraform, Terragrunt envelopes, workflows, backend bootstrap, docs]
     L --> M[Static review: secrets, path safety, workflow safety, structural checks]
     M -->|Fails within retry budget| J2[Repair with accumulated static findings]
     J2 --> J
@@ -46,7 +49,7 @@ flowchart TD
     classDef repair fill:#3d2c00,stroke:#d29922,color:#ffffff
     classDef stop fill:#3d0d0d,stroke:#f85149,color:#ffffff
 
-    class C,D,Z,N,S,V safety
+    class C,D,Z,N,S,V,KA safety
     class J1,J2,R repair
     class Z,N stop
 ```
@@ -82,6 +85,12 @@ flowchart LR
 Runtime validation is conservative by design. New infrastructure may not have remote state or dependency outputs yet, so IaC Smith always runs formatting and backend-free module-level Terraform validation first.
 
 Optional runtime planning is enabled with `IAC_SMITH_RUNTIME_PLAN=1`. That path copies the generated tree to a scratch directory, rewrites Terragrunt remote state to local state, and runs plan-only checks with dependency mock outputs. It never applies infrastructure.
+
+## Constraint-adherence boundary
+
+Schema validity, a clean plan, and a matching resource class can all hold while the composition still violates what the issue explicitly asked for. The showcase ECS run was the canonical case: the issue required tasks in the public subnets with public IPs, the composition used private subnets with `assign_public_ip` disabled, and the schema-valid, plan-clean, apply-clean stack was dead at runtime because Fargate had no egress path to pull its image or reach CloudWatch Logs.
+
+The intent parser lifts explicit, checkable requirement statements from the issue text into `intent.constraints` (request-derived only — no curated vocabulary). After a composition passes the schema gate, one review call — preferring `BEDROCK_ESCALATION_MODEL_ID` when set, since checking is cheaper than generating and a separate pass breaks the composer's blind spot — returns `satisfied | violated | not_applicable` per constraint with evidence. Violations re-enter the bounded composition-repair loop and block when unresolved, the same fail-closed posture as every other gate. The same call answers a runtime-viability question (image pulls, log delivery, service reachability); those findings plus a deterministic unpinned-container-image lint are advisory — one repair round, then carried as PR assumptions. The gate keeps cloud semantics in the model, not in controller code, and is a no-op offline (`IAC_SMITH_ADHERENCE_GATE=0` or no model) where every existing gate still applies.
 
 ## Legitimacy boundary
 

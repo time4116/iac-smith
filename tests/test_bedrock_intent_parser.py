@@ -51,6 +51,7 @@ def _intent_text(**overrides) -> str:
         "region": "us-west-2",
         "requires_new_vpc": True,
         "features": ["private_subnets", "remote_state"],
+        "constraints": ["tasks run in public subnets"],
         "assumptions": ["No existing VPC was specified."],
         "warnings": [],
         "blocked": False,
@@ -78,6 +79,15 @@ def test_parse_bedrock_intent_text_accepts_plain_json():
     assert intent.environments == ["non-prod"]
     assert intent.region == "us-west-2"
     assert intent.requires_new_vpc is True
+    assert intent.constraints == ["tasks run in public subnets"]
+
+
+def test_intent_prompt_asks_for_checkable_constraints():
+    prompt = build_intent_prompt("Run Fargate tasks in the public subnets")
+
+    assert "constraints" in prompt
+    assert "checkable requirement" in prompt
+    assert "never invent a requirement" in prompt
 
 
 def test_parse_bedrock_intent_text_accepts_any_resource_type():
@@ -179,6 +189,7 @@ def test_bedrock_client_streams_with_structured_json_output():
         "region",
         "requires_new_vpc",
         "features",
+        "constraints",
         "depends_on_existing",
         "assumptions",
         "warnings",

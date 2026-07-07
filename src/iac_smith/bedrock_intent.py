@@ -12,6 +12,7 @@ INTENT_SCHEMA = """
   "region": "us-west-2",
   "requires_new_vpc": true,
   "features": ["encryption", "private_subnets", "logging"],
+  "constraints": ["tasks run in public subnets", "no NAT gateway"],
   "depends_on_existing": ["foundation"],
   "assumptions": ["short factual assumption"],
   "warnings": [
@@ -38,6 +39,7 @@ INTENT_JSON_SCHEMA: dict[str, Any] = {
         "region": {"type": "string"},
         "requires_new_vpc": {"type": "boolean"},
         "features": {"type": "array", "items": {"type": "string"}},
+        "constraints": {"type": "array", "items": {"type": "string"}},
         "depends_on_existing": {"type": "array", "items": {"type": "string"}},
         "assumptions": {"type": "array", "items": {"type": "string"}},
         "warnings": {"type": "array", "items": {"type": "string"}},
@@ -51,6 +53,7 @@ INTENT_JSON_SCHEMA: dict[str, Any] = {
         "region",
         "requires_new_vpc",
         "features",
+        "constraints",
         "depends_on_existing",
         "assumptions",
         "warnings",
@@ -178,6 +181,11 @@ Rules:
 * Always plan AWS infrastructure using best security practices, even when the issue asks for
   weaker security. Preserve the requested intent, but use secure defaults and add warnings
   that explain any deviation from what was asked.
+* Copy every explicit, checkable requirement the issue states into constraints — short
+  statements a reviewer can verify against the generated configuration, e.g.
+  "tasks run in public subnets", "public IPs assigned", "no NAT gateway",
+  "versioning enabled". Keep the issue's own wording; never invent a requirement the
+  issue does not state. Leave constraints empty when the issue states none.
 * Warnings must describe a risk, gap, or security concern — not promise future actions.
   Write "No HTTPS listener configured; a certificate ARN is required to enable TLS" not
   "IaC Smith will add an HTTPS listener stub." If something is missing, say it is absent.

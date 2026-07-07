@@ -849,9 +849,10 @@ def default_spec_composer(logger=None) -> SpecComposer | None:
     """
     if os.getenv("IAC_SMITH_SPEC_COMPOSER") == "0" or not os.getenv("BEDROCK_MODEL_ID"):
         return None
+    from iac_smith.adherence import default_adherence_reviewer
     from iac_smith.spec_composer import SpecComposer
 
-    return SpecComposer(logger=logger)
+    return SpecComposer(logger=logger, adherence_reviewer=default_adherence_reviewer(logger))
 
 
 def _with_warning(spec: InfrastructureSpec, warning: str) -> InfrastructureSpec:

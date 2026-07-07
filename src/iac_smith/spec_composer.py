@@ -20,7 +20,7 @@ import os
 import re
 from collections.abc import Callable, Iterator
 from difflib import get_close_matches
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field, JsonValue, ValidationError
 
@@ -37,6 +37,9 @@ from iac_smith.models.infrastructure_spec import OutputSpec, ResourceSpec
 from iac_smith.models.intent import InfrastructureIntent
 from iac_smith.models.validation import ValidationStatus
 from iac_smith.registry_modules import RegistryModuleContract
+
+if TYPE_CHECKING:
+    from iac_smith.adherence import AdherenceReviewer
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _BARE_REFERENCE_HEAD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\.[A-Za-z_]")
@@ -119,6 +122,89 @@ def normalize_composed_blocks(
 
 class SpecCompositionError(RuntimeError):
     """Composition could not produce a schema-valid typed implementation."""
+
+
+def invoke_json_document(
+    runtime: BedrockRuntime,
+    prompt: str,
+    *,
+    model_id: str,
+    max_tokens: int,
+    max_attempts: int,
+    truncation_message: str,
+    logger: Callable[[str], None] | None = None,
+    log_label: str = "model",
+) -> dict[str, Any]:
+    """One streamed Bedrock call that must yield a JSON object.
+
+    Shared by the composer and the adherence reviewer: transient/throttle
+    retries, truncation as a clear ``SpecCompositionError``, and unparseable
+    responses as ``ValueError`` carrying head/tail context (with the full
+    document in the run log).
+    """
+    from botocore.exceptions import (
+        ClientError,
+        ConnectionClosedError,
+        ConnectTimeoutError,
+        EndpointConnectionError,
+        ReadTimeoutError,
+    )
+
+    transient = (
+        ConnectionClosedError,
+        ConnectTimeoutError,
+        EndpointConnectionError,
+        ReadTimeoutError,
+    )
+    body = json.dumps(
+        {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": max_tokens,
+            "temperature": 0,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+    )
+    last_error: Exception | None = None
+    for _attempt in range(1, max_attempts + 1):
+        try:
+            response = runtime.invoke_model_with_response_stream(
+                modelId=model_id,
+                contentType="application/json",
+                accept="application/json",
+                body=body,
+            )
+            text, stop_reason = _read_stream_document(response)
+            if stop_reason == "max_tokens":
+                raise SpecCompositionError(truncation_message)
+            try:
+                return _extract_json_object(text)
+            except ValueError as exc:
+                flattened = " ".join(text.split())
+                # The extractor's error carries decode position context, but
+                # a repeated live failure needs the whole document in the run
+                # log to be diagnosable (bounded: responses are a few KB).
+                if logger:
+                    logger(
+                        f"IaC Smith: unparseable {log_label} response "
+                        f"({len(flattened)} chars): {flattened[:6000]}"
+                    )
+                detail = f"Response began: {flattened[:160]!r}"
+                if len(flattened) > 160:
+                    detail += f" and ended: {flattened[-160:]!r}"
+                raise ValueError(f"{exc} {detail}") from exc
+        except transient as exc:
+            last_error = exc
+        except BedrockStreamError as exc:
+            if not exc.transient:
+                raise
+            last_error = exc
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code not in _BEDROCK_THROTTLE_CODES:
+                raise
+            last_error = exc
+    assert last_error is not None
+    raise last_error
 
 
 def _iter_string_leaves(value) -> Iterator[str]:
@@ -546,6 +632,7 @@ class SpecComposer:
         max_tokens: int = 32768,
         max_repair_rounds: int = 2,
         logger: Callable[[str], None] | None = None,
+        adherence_reviewer: "AdherenceReviewer | None" = None,
     ) -> None:
         self.model_id = model_id or os.getenv("BEDROCK_MODEL_ID", "")
         if not self.model_id:
@@ -561,6 +648,9 @@ class SpecComposer:
         self.max_tokens = _int_env("IAC_SMITH_COMPOSER_MAX_TOKENS", max_tokens)
         self.max_repair_rounds = max_repair_rounds
         self.logger = logger
+        # Post-composition constraint-adherence review; None means no pass
+        # (offline behaviour unchanged — every deterministic gate still applies).
+        self.adherence_reviewer = adherence_reviewer
 
     def _log(self, message: str) -> None:
         if self.logger:
@@ -585,71 +675,18 @@ class SpecComposer:
         return self._bedrock_runtime
 
     def _invoke_json(self, prompt: str) -> dict[str, Any]:
-        from botocore.exceptions import (
-            ClientError,
-            ConnectionClosedError,
-            ConnectTimeoutError,
-            EndpointConnectionError,
-            ReadTimeoutError,
+        return invoke_json_document(
+            self.bedrock_runtime,
+            prompt,
+            model_id=self.model_id,
+            max_tokens=self.max_tokens,
+            max_attempts=self.max_attempts,
+            truncation_message=(
+                "Spec composition response was truncated at the output token cap; "
+                "raise IAC_SMITH_COMPOSER_MAX_TOKENS."
+            ),
+            logger=self.logger,
         )
-
-        transient = (
-            ConnectionClosedError,
-            ConnectTimeoutError,
-            EndpointConnectionError,
-            ReadTimeoutError,
-        )
-        body = json.dumps(
-            {
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": self.max_tokens,
-                "temperature": 0,
-                "messages": [{"role": "user", "content": prompt}],
-            }
-        )
-        last_error: Exception | None = None
-        for _attempt in range(1, self.max_attempts + 1):
-            try:
-                response = self.bedrock_runtime.invoke_model_with_response_stream(
-                    modelId=self.model_id,
-                    contentType="application/json",
-                    accept="application/json",
-                    body=body,
-                )
-                text, stop_reason = _read_stream_document(response)
-                if stop_reason == "max_tokens":
-                    raise SpecCompositionError(
-                        "Spec composition response was truncated at the output token cap; "
-                        "raise IAC_SMITH_COMPOSER_MAX_TOKENS."
-                    )
-                try:
-                    return _extract_json_object(text)
-                except ValueError as exc:
-                    flattened = " ".join(text.split())
-                    # The extractor's error carries decode position context, but
-                    # a repeated live failure needs the whole document in the run
-                    # log to be diagnosable (bounded: compositions are a few KB).
-                    self._log(
-                        f"IaC Smith: unparseable model response ({len(flattened)} chars): "
-                        f"{flattened[:6000]}"
-                    )
-                    detail = f"Response began: {flattened[:160]!r}"
-                    if len(flattened) > 160:
-                        detail += f" and ended: {flattened[-160:]!r}"
-                    raise ValueError(f"{exc} {detail}") from exc
-            except transient as exc:
-                last_error = exc
-            except BedrockStreamError as exc:
-                if not exc.transient:
-                    raise
-                last_error = exc
-            except ClientError as exc:
-                code = exc.response.get("Error", {}).get("Code", "")
-                if code not in _BEDROCK_THROTTLE_CODES:
-                    raise
-                last_error = exc
-        assert last_error is not None
-        raise last_error
 
     def _context_lines(
         self,
@@ -678,7 +715,39 @@ class SpecComposer:
         ]
         if intent.features:
             lines.append(f"- Requested features: {', '.join(intent.features)}")
+        if intent.constraints:
+            lines.append("- Stated constraints from the issue (every one must hold):")
+            lines.extend(f"  * {constraint}" for constraint in intent.constraints)
         return lines
+
+    def _adherence_findings(
+        self, *, intent: InfrastructureIntent, component_name: str, document: dict[str, Any]
+    ) -> tuple[list[str], list[str]]:
+        """Blocking and advisory adherence findings for a schema-valid composition.
+
+        Blocking: stated constraints the review judged violated — they re-enter
+        the repair loop and block if unresolved. Advisory: runtime-viability
+        concerns from the same review call plus the deterministic unpinned-image
+        lint — they get one repair round, then ride out as assumptions.
+        """
+        from iac_smith.adherence import unpinned_image_findings
+
+        advisory = unpinned_image_findings(document)
+        blocking: list[str] = []
+        if self.adherence_reviewer is not None:
+            review = self.adherence_reviewer.review(
+                intent=intent, component_name=component_name, document=document
+            )
+            blocking = review.violation_findings()
+            advisory.extend(review.viability_repair_findings())
+            satisfied = sum(1 for item in review.constraints if item.verdict == "satisfied")
+            self._log(
+                f"IaC Smith: adherence review for `{component_name}`: "
+                f"{satisfied}/{len(review.constraints)} constraint(s) satisfied, "
+                f"{len(blocking)} violation(s), "
+                f"{len(review.viability_findings)} viability concern(s)."
+            )
+        return blocking, advisory
 
     def _negative_pattern_lines(self, negative_patterns: list[str] | None) -> list[str]:
         if not negative_patterns:
@@ -816,17 +885,20 @@ class SpecComposer:
         negative_patterns: list[str] | None,
         previous: ComposedRegistryModule | None = None,
         initial_findings: list[str] | None = None,
-    ) -> ComposedRegistryModule | None:
+    ) -> tuple[ComposedRegistryModule | None, list[str]]:
         """Select and fill one community-module call, or None to compose raw resources.
 
-        Fresh composition treats a decline or exhausted repair rounds as "use raw
-        provider resources instead" (fail-soft). Repairing an existing module call
-        (``previous``) raises on failure: abandoning the implementation mid-repair
-        would silently change what the PR contains.
+        Returns ``(module, advisory_notes)``. Fresh composition treats a decline
+        or exhausted repair rounds as "use raw provider resources instead"
+        (fail-soft). Repairing an existing module call (``previous``) raises on
+        failure: abandoning the implementation mid-repair would silently change
+        what the PR contains.
         """
         contracts = {contract.source: contract for contract in candidates}
         findings = list(initial_findings or [])
         repairing = previous is not None
+        advisory_round_spent = False
+        pending_advisory: list[str] = []
         for round_number in range(1, self.max_repair_rounds + 2):
             previous_lines: list[str] = []
             if previous is not None:
@@ -904,7 +976,7 @@ class SpecComposer:
                         "blocking rather than silently changing what the PR contains."
                     )
                 self._log("IaC Smith: model declined community modules; composing raw resources.")
-                return None
+                return None, []
             try:
                 module = ComposedRegistryModule.model_validate(selection)
             except ValidationError as exc:
@@ -918,12 +990,27 @@ class SpecComposer:
                 module, contracts=contracts, allowed_inputs=allowed_inputs
             )
             if not findings:
+                blocking, advisory = self._adherence_findings(
+                    intent=intent,
+                    component_name=component_name,
+                    document={
+                        "registry_module": module.model_dump(
+                            include={"source", "inputs", "outputs"}
+                        )
+                    },
+                )
+                pending_advisory = advisory
+                findings = list(blocking)
+                if advisory and not advisory_round_spent:
+                    advisory_round_spent = True
+                    findings.extend(advisory)
+            if not findings:
                 contract = contracts[module.source]
                 self._log(
                     f"IaC Smith: composed community module call `{module.source}` "
                     f"(version {contract.version}) for `{component_name}`."
                 )
-                return module.model_copy(update={"version": contract.version})
+                return module.model_copy(update={"version": contract.version}), pending_advisory
             previous = module
             self._log(
                 f"IaC Smith: registry module round {round_number} failed deterministic "
@@ -938,9 +1025,11 @@ class SpecComposer:
             "IaC Smith: community-module composition did not validate; "
             "falling back to raw provider resources."
         )
-        return None
+        return None, []
 
-    def _registry_component(self, module: ComposedRegistryModule) -> ComposedComponent:
+    def _registry_component(
+        self, module: ComposedRegistryModule, advisory_notes: list[str]
+    ) -> ComposedComponent:
         return ComposedComponent(
             registry_module=module,
             outputs=[
@@ -953,7 +1042,8 @@ class SpecComposer:
             ],
             assumptions=[
                 f"Implemented via community module `{module.source}` "
-                f"pinned to version `{module.version}`."
+                f"pinned to version `{module.version}`.",
+                *(f"Advisory: {note}" for note in advisory_notes),
             ],
         )
 
@@ -1078,7 +1168,7 @@ class SpecComposer:
                     f"Cannot repair community module `{previous.registry_module.source}`: "
                     "its registry contract is no longer available."
                 )
-            module = self._compose_registry_module(
+            module, advisory_notes = self._compose_registry_module(
                 intent=intent,
                 component_name=component_name,
                 allowed_inputs=allowed_inputs,
@@ -1089,7 +1179,7 @@ class SpecComposer:
                 initial_findings=list(runtime_findings or []),
             )
             assert module is not None  # repair either converges or raises
-            return self._registry_component(module)
+            return self._registry_component(module, advisory_notes)
         if previous is not None:
             # Repairing an existing composition: keep its type universe instead
             # of re-selecting, and seed the findings with the runtime errors.
@@ -1111,7 +1201,7 @@ class SpecComposer:
                     initial_findings=list(runtime_findings or []),
                 )
         if registry_candidates:
-            module = self._compose_registry_module(
+            module, advisory_notes = self._compose_registry_module(
                 intent=intent,
                 component_name=component_name,
                 allowed_inputs=allowed_inputs,
@@ -1120,7 +1210,7 @@ class SpecComposer:
                 negative_patterns=negative_patterns,
             )
             if module is not None:
-                return self._registry_component(module)
+                return self._registry_component(module, advisory_notes)
         selected, selection_warnings = self._select_resource_types(
             intent=intent,
             component_name=component_name,
@@ -1169,6 +1259,8 @@ class SpecComposer:
         # later round, so every failed round's findings ride along as negative
         # patterns for the rest of the composition (bounded to keep the prompt sane).
         carried_negatives: list[str] = []
+        advisory_round_spent = False
+        pending_advisory: list[str] = []
         for round_number in range(1, self.max_repair_rounds + 2):
             try:
                 payload = self._compose_once(
@@ -1214,10 +1306,26 @@ class SpecComposer:
                 component_name=component_name,
             )
             if not findings:
+                # The adherence gate runs only on schema-valid compositions:
+                # constraint violations re-enter this same repair loop, while
+                # advisory findings (runtime viability, unpinned images) get
+                # exactly one repair round before riding out as assumptions.
+                blocking, advisory = self._adherence_findings(
+                    intent=intent,
+                    component_name=component_name,
+                    document=composed.model_dump(include={"resources", "outputs"}),
+                )
+                pending_advisory = advisory
+                findings = list(blocking)
+                if advisory and not advisory_round_spent:
+                    advisory_round_spent = True
+                    findings.extend(advisory)
+            if not findings:
                 self._log(
                     f"IaC Smith: composed {len(composed.resources)} provider resource(s) "
                     f"for `{component_name}`."
                 )
+                composed.assumptions.extend(f"Advisory: {note}" for note in pending_advisory)
                 composed.assumptions.extend(selection_warnings)
                 composed_types = {resource.type for resource in composed.resources}
                 return composed.model_copy(
@@ -1238,6 +1346,13 @@ class SpecComposer:
             self._log(
                 f"IaC Smith: composition round {round_number} failed deterministic "
                 f"validation with {len(findings)} finding(s); repairing."
+            )
+        from iac_smith.adherence import VIOLATION_PREFIX
+
+        if any(finding.startswith(VIOLATION_PREFIX) for finding in findings):
+            raise SpecCompositionError(
+                "Composed implementation violates the issue's stated constraints after "
+                f"{self.max_repair_rounds + 1} attempts: " + "; ".join(findings)
             )
         raise SpecCompositionError(
             "Composed resources failed deterministic schema validation after "

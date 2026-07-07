@@ -1708,6 +1708,172 @@ def test_registry_module_repair_refuses_to_abandon_module():
         )
 
 
+# --- Issue #139: constraint-adherence gate ---
+
+
+class FakeAdherenceReviewer:
+    """Replays queued AdherenceReview objects; records the documents it saw."""
+
+    def __init__(self, reviews):
+        self._reviews = list(reviews)
+        self.documents: list[dict] = []
+
+    def review(self, *, intent, component_name, document):
+        self.documents.append(document)
+        return self._reviews.pop(0)
+
+
+def _clean_review():
+    from iac_smith.adherence import AdherenceReview
+
+    return AdherenceReview(constraints=[], viability_findings=[])
+
+
+def _violation_review(constraint="tasks run in public subnets"):
+    from iac_smith.adherence import AdherenceReview, ConstraintVerdict
+
+    return AdherenceReview(
+        constraints=[
+            ConstraintVerdict(constraint=constraint, verdict="violated", evidence="private subnets")
+        ]
+    )
+
+
+def _viability_review(finding="tasks cannot reach the internet to pull the image"):
+    from iac_smith.adherence import AdherenceReview
+
+    return AdherenceReview(viability_findings=[finding])
+
+
+def _ecs_intent():
+    return _intent().model_copy(
+        update={"constraints": ["tasks run in public subnets with public IPs assigned"]}
+    )
+
+
+def test_constraint_violation_re_enters_repair_loop_and_converges():
+    reviewer = FakeAdherenceReviewer([_violation_review(), _clean_review()])
+    composer, runtime = _composer(
+        [_VALID_SELECTION, _VALID_COMPOSITION, _VALID_COMPOSITION],
+        adherence_reviewer=reviewer,
+    )
+
+    composed = composer.compose(
+        intent=_ecs_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    assert len(composed.resources) == 2
+    # The violation was fed back into a composition-repair round.
+    assert "Stated constraint violated" in runtime.prompts[2]
+    assert "tasks run in public subnets" in runtime.prompts[2]
+
+
+def test_persistent_constraint_violation_blocks_with_constraint_reason():
+    reviewer = FakeAdherenceReviewer([_violation_review(), _violation_review()])
+    composer, _ = _composer(
+        [_VALID_SELECTION, _VALID_COMPOSITION, _VALID_COMPOSITION],
+        adherence_reviewer=reviewer,
+        max_repair_rounds=1,
+    )
+
+    with pytest.raises(SpecCompositionError, match="violates the issue's stated constraints"):
+        composer.compose(
+            intent=_ecs_intent(),
+            component_name="database-platform",
+            allowed_inputs=ALLOWED_INPUTS,
+            environments=["non-prod"],
+            provider_contracts=CONTRACTS,
+        )
+
+
+def test_viability_finding_is_advisory_one_round_then_rides_as_assumption():
+    reviewer = FakeAdherenceReviewer([_viability_review(), _viability_review()])
+    composer, runtime = _composer(
+        [_VALID_SELECTION, _VALID_COMPOSITION, _VALID_COMPOSITION],
+        adherence_reviewer=reviewer,
+    )
+
+    composed = composer.compose(
+        intent=_ecs_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    # Exactly one advisory repair round: the second composition prompt carries the
+    # viability concern; it does not block when it persists.
+    assert "Runtime-viability concern" in runtime.prompts[2]
+    assert any("cannot reach the internet" in a for a in composed.assumptions)
+
+
+def test_unpinned_image_advisory_fires_without_a_model_reviewer():
+    # No adherence_reviewer: the deterministic image lint still runs. `nginx` is
+    # only flagged when the key ends in `image`, so use an explicit image
+    # argument to prove the lint path is wired.
+    image_composition = {
+        "resources": [
+            {
+                "type": "customcloud_database",
+                "name": "db",
+                "arguments": {"engine": "postgres"},
+                "nested_blocks": {"settings": [{"tier": "small", "image": "nginx"}]},
+            }
+        ],
+        "outputs": [],
+        "assumptions": [],
+    }
+    composer, runtime = _composer(
+        [{"resource_types": ["customcloud_database"]}, image_composition, image_composition]
+    )
+
+    composed = composer.compose(
+        intent=_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    assert "not pinned" in runtime.prompts[2]
+    assert any("not pinned" in a for a in composed.assumptions)
+
+
+def test_no_reviewer_and_no_images_skips_adherence_entirely():
+    composer, runtime = _composer([_VALID_SELECTION, _VALID_COMPOSITION])
+
+    composed = composer.compose(
+        intent=_ecs_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    # One selection + one composition prompt: no adherence-driven repair round.
+    assert len(runtime.prompts) == 2
+    assert len(composed.resources) == 2
+
+
+def test_compose_context_lists_stated_constraints():
+    composer, runtime = _composer([_VALID_SELECTION, _VALID_COMPOSITION])
+
+    composer.compose(
+        intent=_ecs_intent(),
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    assert "Stated constraints from the issue" in runtime.prompts[1]
+    assert "tasks run in public subnets with public IPs assigned" in runtime.prompts[1]
+
+
 def test_registry_module_renders_pinned_module_call(monkeypatch):
     _patch_resolver(monkeypatch)
     composer, _runtime = _composer([_VALID_MODULE_SELECTION])

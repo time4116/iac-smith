@@ -44,7 +44,7 @@ All configuration is via environment variables. There are no CLI flags.
 | `IAC_SMITH_SKIP_PUSH` | unset | Set to `1` to skip git push and PR creation |
 | `IAC_SMITH_RUNTIME_REPAIR_ATTEMPTS` | `3` | Max Bedrock repair attempts after runtime failures (the workflow sets `5` unless the repo var overrides it) |
 | `BEDROCK_MODEL_ID` | (required) | Primary Bedrock model/inference-profile for generation and repair |
-| `BEDROCK_ESCALATION_MODEL_ID` | unset | Stronger model used for one penultimate repair attempt (failing files only) when the primary is stuck; unset or equal to `BEDROCK_MODEL_ID` disables escalation |
+| `BEDROCK_ESCALATION_MODEL_ID` | unset | Stronger model used for one penultimate repair attempt (failing files only) when the primary is stuck; unset or equal to `BEDROCK_MODEL_ID` disables escalation. Also the preferred model for the constraint-adherence review (checking is cheaper than generating); the adherence gate falls back to `BEDROCK_MODEL_ID` when this is unset |
 | `IAC_SMITH_BEDROCK_CONCURRENCY` | `4` | Parallel file generation threads |
 | `IAC_SMITH_BEDROCK_MAX_TOKENS` | `16384` | Max output tokens for one file. Generation streams, so this can be generous enough to fit even a big module's `main.tf` in a single response without truncation; temperature 0 means the model stops at `end_turn`, so the cap bounds worst case, not typical cost |
 | `IAC_SMITH_INTENT_MAX_TOKENS` | `4096` | Max output tokens for intent parsing. Intent also streams under the structured-output contract; a verbose intent that exceeds the cap is truncated to unclosed JSON, so the run fails with an explicit "truncated at max_tokens" message telling you to raise this |
@@ -59,6 +59,8 @@ All configuration is via environment variables. There are no CLI flags.
 | `IAC_SMITH_MAX_RESOURCE_TYPES` | `12` | Reliability cap on how many provider resource types one composed component may need. A selection above the cap is rejected as too broad with a staged implementation plan (grouped by service token) in the block reason, which is posted back to the source issue. `0` disables the cap |
 | `IAC_SMITH_REGISTRY_MODULES` | enabled | Set to `0` to disable community-module composition. When enabled, `registry_modules.py` searches the Terraform Registry (query derived from the parsed intent, never a hardcoded service list), harvests candidate modules' input/output contracts, and offers them to the composer; the model may implement the component as one validated, version-pinned module call instead of raw provider resources, or decline. Discovery is fail-soft: no network or no candidates simply falls back to raw resource composition |
 | `IAC_SMITH_REGISTRY_NAMESPACES` | `terraform-aws-modules` | Comma-separated registry namespaces searched for community-module candidates |
+| `IAC_SMITH_ADHERENCE_GATE` | enabled | Set to `0` to disable the constraint-adherence gate. When enabled, a schema-valid composition is reviewed against the checkable constraints the intent parser lifted from the issue text (`intent.constraints`); violations re-enter the bounded composition-repair loop and block when unresolved. The same review call raises advisory runtime-viability findings (image pulls, log delivery, service reachability) and a deterministic unpinned-container-image lint — one advisory repair round, then carried as PR assumptions. No-op offline (no model); every other gate still applies |
+| `IAC_SMITH_ADHERENCE_MAX_TOKENS` | `4096` | Max output tokens for the constraint-adherence review call |
 
 ---
 
