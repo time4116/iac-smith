@@ -44,6 +44,10 @@ _VAR_REF_RE = re.compile(r"\bvar\.([A-Za-z_][A-Za-z0-9_]*)")
 _FORBIDDEN_ROOT_RE = re.compile(r"\b(local|data|module)\.")
 _RESOURCE_REF_RE = re.compile(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\.([a-z][a-z0-9_]*)\b")
 _NESTED_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_IMAGE_FIELD_RE = re.compile(r"(^|_)image(_|$)|container_image|image_identifier|image_uri")
+_IMAGE_LITERAL_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9._-]+)?(?:@sha256:[A-Fa-f0-9]{64})?$"
+)
 
 
 class ComposedRegistryModule(BaseModel):
@@ -185,6 +189,40 @@ def _bare_reference_errors(
                 f"`{scope}` argument value `{candidate}` is a bare Terraform reference, "
                 f"but argument strings render as literal text. Wrap it in interpolation: "
                 f'"${{{candidate}}}".'
+            )
+    return errors
+
+
+def _container_image_pin_errors(*, scope: str, field_name: str, leaves: list[str]) -> list[str]:
+    """Flag unpinned container image literals in image-shaped fields.
+
+    This is intentionally lexical rather than AWS-specific. Generated IaC that
+    uses ``nginx`` or ``nginx:latest`` can pass provider schemas and plans while
+    remaining non-repeatable at runtime. Variables, interpolations, AMI IDs, and
+    digest-pinned images are left alone because this gate cannot prove their
+    container-image semantics from a JSON leaf alone.
+    """
+    if not _IMAGE_FIELD_RE.search(field_name.lower()):
+        return []
+    errors: list[str] = []
+    for leaf in leaves:
+        image = leaf.strip()
+        if (
+            not image
+            or "${" in image
+            or image.startswith(("var.", "ami-"))
+            or "://" in image
+            or not _IMAGE_LITERAL_RE.match(image)
+        ):
+            continue
+        if "@sha256:" in image:
+            continue
+        tag = image.rsplit("/", 1)[-1].rsplit(":", 1)
+        if len(tag) == 1 or tag[1] == "latest":
+            errors.append(
+                f"`{scope}` field `{field_name}` uses unpinned container image `{image}`. "
+                "Use an immutable digest or a non-latest version tag so generated "
+                "infrastructure is reproducible at runtime."
             )
     return errors
 
@@ -334,6 +372,13 @@ def validate_composed_registry_module(
     allowed = set(allowed_inputs)
     for name, value in module.inputs.items():
         scope = f"{module.source} input `{name}`"
+        errors.extend(
+            _container_image_pin_errors(
+                scope=module.source,
+                field_name=name,
+                leaves=list(_iter_string_leaves(value)),
+            )
+        )
         for leaf in _iter_string_leaves(value):
             errors.extend(_bare_reference_errors([leaf], scope=scope, known_resource_types=set()))
             for expression in _INTERPOLATION_RE.findall(leaf):
@@ -451,6 +496,24 @@ def validate_composed_component(
         argument_leaves = [
             leaf for value in resource.arguments.values() for leaf in _iter_string_leaves(value)
         ]
+        for name, value in resource.arguments.items():
+            errors.extend(
+                _container_image_pin_errors(
+                    scope=scope,
+                    field_name=name,
+                    leaves=list(_iter_string_leaves(value)),
+                )
+            )
+        for block_name, entries in resource.nested_blocks.items():
+            for entry in entries:
+                for name, value in entry.items():
+                    errors.extend(
+                        _container_image_pin_errors(
+                            scope=f"{scope}.{block_name}",
+                            field_name=name,
+                            leaves=list(_iter_string_leaves(value)),
+                        )
+                    )
         argument_leaves.extend(
             leaf
             for entries in resource.nested_blocks.values()
