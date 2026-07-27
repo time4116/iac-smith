@@ -8,11 +8,14 @@ from iac_smith.models.change_plan import BackendResource, ChangePlan
 from iac_smith.models.infrastructure_spec import OutputSpec, ResourceSpec
 from iac_smith.models.intent import EnvironmentScope, InfrastructureIntent
 from iac_smith.models.repo_patterns import RepoPatterns
+from iac_smith.registry_modules import RegistryModuleContract, RegistryModuleInput
 from iac_smith.spec_composer import (
     ComposedComponent,
+    ComposedRegistryModule,
     SpecComposer,
     SpecCompositionError,
     validate_composed_component,
+    validate_composed_registry_module,
 )
 from iac_smith.spec_renderer import (
     SpecRendererGenerator,
@@ -252,6 +255,60 @@ def test_compose_accepts_native_json_argument_values():
     assert "Environment = var.environment" in rendered
     assert 'ManagedBy = "IaC Smith"' in rendered
     hcl2.loads(rendered)
+
+
+def test_validate_composed_component_rejects_unpinned_container_images():
+    contracts = {
+        "customcloud_task": TerraformContract(
+            kind="provider_resource",
+            name="customcloud_task",
+            allowed_arguments=["image", "name"],
+            required_arguments=["image"],
+            source="fixture schema",
+        )
+    }
+    component = ComposedComponent(
+        resources=[
+            ResourceSpec(
+                type="customcloud_task",
+                name="web",
+                arguments={"image": "nginx:latest", "name": "web"},
+            )
+        ]
+    )
+
+    errors = validate_composed_component(
+        component,
+        provider_contracts=contracts,
+        known_resource_types=set(contracts),
+        allowed_inputs=ALLOWED_INPUTS,
+        component_name="web",
+    )
+
+    assert any("unpinned container image `nginx:latest`" in error for error in errors)
+
+
+def test_validate_composed_registry_module_rejects_unpinned_container_images():
+    contract = RegistryModuleContract(
+        source="example/service/custom",
+        version="1.2.3",
+        inputs={
+            "image_uri": RegistryModuleInput(name="image_uri", type="string", required=True),
+        },
+        outputs=[],
+    )
+    module = ComposedRegistryModule(
+        source="example/service/custom",
+        inputs={"image_uri": "public.ecr.aws/nginx/nginx"},
+    )
+
+    errors = validate_composed_registry_module(
+        module,
+        contracts={contract.source: contract},
+        allowed_inputs=ALLOWED_INPUTS,
+    )
+
+    assert any("unpinned container image `public.ecr.aws/nginx/nginx`" in error for error in errors)
 
 
 def test_compose_repairs_invalid_response_shape():
