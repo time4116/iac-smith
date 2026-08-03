@@ -48,6 +48,14 @@ _IMAGE_FIELD_RE = re.compile(r"(^|_)image(_|$)|container_image|image_identifier|
 _IMAGE_LITERAL_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9._-]+)?(?:@sha256:[A-Fa-f0-9]{64})?$"
 )
+_PRIVATE_INTENT_RE = re.compile(
+    r"\b(private|internal-only|internal only|no public|not public|without public|disable public)\b",
+    re.IGNORECASE,
+)
+_PUBLIC_FIELD_RE = re.compile(
+    r"(^|_)(public|external|internet|internet_facing)(_|$)", re.IGNORECASE
+)
+_PUBLIC_CIDRS = {"0.0.0.0/0", "::/0"}
 
 
 class ComposedRegistryModule(BaseModel):
@@ -224,6 +232,57 @@ def _container_image_pin_errors(*, scope: str, field_name: str, leaves: list[str
                 "Use an immutable digest or a non-latest version tag so generated "
                 "infrastructure is reproducible at runtime."
             )
+    return errors
+
+
+def _issue_constraint_errors(*, raw_request: str | None, composed: ComposedComponent) -> list[str]:
+    """Reject compositions that contradict explicit issue-level constraints.
+
+    This gate is intentionally provider-generic. It does not try to infer every
+    possible requirement from prose. It fail-closes only on high-signal public
+    exposure contradictions: if the issue asks for private or non-public
+    infrastructure, generated resource arguments must not opt into public,
+    external, or internet-facing access, and must not allow all-world CIDRs.
+    """
+    if not raw_request or not _PRIVATE_INTENT_RE.search(raw_request):
+        return []
+
+    errors: list[str] = []
+
+    def check_value(*, scope: str, field_name: str, value: JsonValue) -> None:
+        if _PUBLIC_FIELD_RE.search(field_name) and value is True:
+            errors.append(
+                f"`{scope}` sets `{field_name}` to true, contradicting the issue's "
+                "private/non-public requirement. Disable public exposure or explain why "
+                "the issue requirement cannot be satisfied."
+            )
+        if isinstance(value, str) and value.strip() in _PUBLIC_CIDRS:
+            errors.append(
+                f"`{scope}` field `{field_name}` allows `{value.strip()}`, contradicting "
+                "the issue's private/non-public requirement. Use a narrower CIDR or an "
+                "input variable constrained by the target repo."
+            )
+        elif isinstance(value, list):
+            for entry in value:
+                check_value(scope=scope, field_name=field_name, value=entry)
+        elif isinstance(value, dict):
+            for nested_name, nested_value in value.items():
+                check_value(
+                    scope=scope,
+                    field_name=f"{field_name}.{nested_name}",
+                    value=nested_value,
+                )
+
+    for resource in composed.resources:
+        scope = f"{resource.type}.{resource.name}"
+        for name, value in resource.arguments.items():
+            check_value(scope=scope, field_name=name, value=value)
+        for block_name, entries in resource.nested_blocks.items():
+            for index, entry in enumerate(entries, start=1):
+                for name, value in entry.items():
+                    check_value(
+                        scope=f"{scope}.{block_name}[{index}]", field_name=name, value=value
+                    )
     return errors
 
 
@@ -413,6 +472,7 @@ def validate_composed_component(
     known_resource_types: set[str],
     allowed_inputs: list[str],
     component_name: str,
+    raw_request: str | None = None,
 ) -> list[str]:
     """Deterministically validate a composed implementation before rendering.
 
@@ -424,6 +484,7 @@ def validate_composed_component(
     from iac_smith.spec_renderer import render_provider_resources
 
     errors: list[str] = []
+    errors.extend(_issue_constraint_errors(raw_request=raw_request, composed=composed))
     if not composed.resources:
         return ["Composition must select at least one provider resource."]
     addresses: set[tuple[str, str]] = set()
@@ -1275,6 +1336,7 @@ class SpecComposer:
                 known_resource_types=known_resource_types,
                 allowed_inputs=allowed_inputs,
                 component_name=component_name,
+                raw_request=intent.raw_request,
             )
             if not findings:
                 self._log(
