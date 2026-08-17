@@ -288,6 +288,220 @@ def test_validate_composed_component_rejects_unpinned_container_images():
     assert any("unpinned container image `nginx:latest`" in error for error in errors)
 
 
+def test_validate_composed_component_rejects_public_exposure_when_issue_requires_private():
+    contracts = {
+        "customcloud_endpoint": TerraformContract(
+            kind="provider_resource",
+            name="customcloud_endpoint",
+            allowed_arguments=["public", "cidr_blocks", "name"],
+            required_arguments=["name"],
+            source="fixture schema",
+        )
+    }
+    component = ComposedComponent(
+        resources=[
+            ResourceSpec(
+                type="customcloud_endpoint",
+                name="api",
+                arguments={"name": "api", "public": True, "cidr_blocks": ["10.0.0.0/16"]},
+            )
+        ]
+    )
+
+    errors = validate_composed_component(
+        component,
+        provider_contracts=contracts,
+        known_resource_types=set(contracts),
+        allowed_inputs=ALLOWED_INPUTS,
+        component_name="api",
+        raw_request="Create a private API endpoint with no public access.",
+    )
+
+    assert any("private/non-public requirement" in error for error in errors)
+
+
+def test_validate_composed_component_rejects_world_cidr_when_issue_requires_private():
+    contracts = {
+        "customcloud_rule": TerraformContract(
+            kind="provider_resource",
+            name="customcloud_rule",
+            allowed_arguments=["cidr_blocks", "name"],
+            required_arguments=["name"],
+            source="fixture schema",
+        )
+    }
+    component = ComposedComponent(
+        resources=[
+            ResourceSpec(
+                type="customcloud_rule",
+                name="ingress",
+                arguments={"name": "ingress", "cidr_blocks": ["0.0.0.0/0"]},
+            )
+        ]
+    )
+
+    errors = validate_composed_component(
+        component,
+        provider_contracts=contracts,
+        known_resource_types=set(contracts),
+        allowed_inputs=ALLOWED_INPUTS,
+        component_name="api",
+        raw_request="This service must stay internal only.",
+    )
+
+    assert any("allows `0.0.0.0/0`" in error for error in errors)
+
+
+def test_compose_repairs_public_exposure_that_contradicts_issue_constraints():
+    public_composition = {
+        "resources": [
+            {
+                "type": "customcloud_database",
+                "name": "db",
+                "arguments": {"engine": "postgres", "public": True},
+            }
+        ],
+        "outputs": [],
+        "assumptions": [],
+    }
+    private_composition = {
+        "resources": [
+            {
+                "type": "customcloud_database",
+                "name": "db",
+                "arguments": {"engine": "postgres", "public": False},
+            }
+        ],
+        "outputs": [],
+        "assumptions": [],
+    }
+    intent = _intent().model_copy(
+        update={"raw_request": "Create a private managed database with no public access."}
+    )
+    composer, runtime = _composer(
+        [{"resource_types": ["customcloud_database"]}, public_composition, private_composition]
+    )
+
+    composed = composer.compose(
+        intent=intent,
+        component_name="database-platform",
+        allowed_inputs=ALLOWED_INPUTS,
+        environments=["non-prod"],
+        provider_contracts=CONTRACTS,
+    )
+
+    assert composed.resources[0].arguments["public"] is False
+    assert "private/non-public requirement" in runtime.prompts[2]
+
+
+def test_validate_composed_component_allows_protective_public_controls_for_private_requests():
+    contracts = {
+        "customcloud_bucket_guard": TerraformContract(
+            kind="provider_resource",
+            name="customcloud_bucket_guard",
+            allowed_arguments=[
+                "name",
+                "block_public_acls",
+                "block_public_policy",
+                "restrict_public_buckets",
+            ],
+            required_arguments=["name"],
+            source="fixture schema",
+        )
+    }
+    component = ComposedComponent(
+        resources=[
+            ResourceSpec(
+                type="customcloud_bucket_guard",
+                name="guard",
+                arguments={
+                    "name": "guard",
+                    "block_public_acls": True,
+                    "block_public_policy": True,
+                    "restrict_public_buckets": True,
+                },
+            )
+        ]
+    )
+
+    errors = validate_composed_component(
+        component,
+        provider_contracts=contracts,
+        known_resource_types=set(contracts),
+        allowed_inputs=ALLOWED_INPUTS,
+        component_name="bucket",
+        raw_request="Create a private storage layer with no public access.",
+    )
+
+    assert not [error for error in errors if "private/non-public requirement" in error]
+
+
+def test_validate_composed_registry_module_rejects_public_inputs_for_private_requests():
+    contract = RegistryModuleContract(
+        source="example/service/custom",
+        version="1.2.3",
+        inputs={
+            "name": RegistryModuleInput(name="name", type="string", required=True),
+            "public": RegistryModuleInput(name="public", type="bool", required=False),
+            "cidr_blocks": RegistryModuleInput(
+                name="cidr_blocks", type="list(string)", required=False
+            ),
+            "block_public_acls": RegistryModuleInput(
+                name="block_public_acls", type="bool", required=False
+            ),
+        },
+        outputs=[],
+    )
+    module = ComposedRegistryModule(
+        source="example/service/custom",
+        inputs={"name": "api", "public": True, "cidr_blocks": ["0.0.0.0/0"]},
+    )
+
+    errors = validate_composed_registry_module(
+        module,
+        contracts={contract.source: contract},
+        allowed_inputs=ALLOWED_INPUTS,
+        raw_request="Create a private API endpoint with no public access.",
+    )
+
+    assert any("private/non-public requirement" in error for error in errors)
+    assert any("allows `0.0.0.0/0`" in error for error in errors)
+
+
+def test_validate_composed_registry_module_allows_protective_public_controls_for_private_requests():
+    contract = RegistryModuleContract(
+        source="example/service/custom",
+        version="1.2.3",
+        inputs={
+            "name": RegistryModuleInput(name="name", type="string", required=True),
+            "block_public_acls": RegistryModuleInput(
+                name="block_public_acls", type="bool", required=False
+            ),
+            "restrict_public_buckets": RegistryModuleInput(
+                name="restrict_public_buckets", type="bool", required=False
+            ),
+        },
+        outputs=[],
+    )
+    module = ComposedRegistryModule(
+        source="example/service/custom",
+        inputs={
+            "name": "bucket",
+            "block_public_acls": True,
+            "restrict_public_buckets": True,
+        },
+    )
+
+    errors = validate_composed_registry_module(
+        module,
+        contracts={contract.source: contract},
+        allowed_inputs=ALLOWED_INPUTS,
+        raw_request="Create private storage with no public access.",
+    )
+
+    assert not [error for error in errors if "private/non-public requirement" in error]
+
+
 def test_validate_composed_registry_module_rejects_unpinned_container_images():
     contract = RegistryModuleContract(
         source="example/service/custom",
