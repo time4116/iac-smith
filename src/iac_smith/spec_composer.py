@@ -55,6 +55,13 @@ _PRIVATE_INTENT_RE = re.compile(
 _PUBLIC_FIELD_RE = re.compile(
     r"(^|_)(public|external|internet|internet_facing)(_|$)", re.IGNORECASE
 )
+_PROTECTIVE_PUBLIC_FIELD_RE = re.compile(
+    r"(^|_)(block|deny|disable|disallow|ignore|prevent|restrict)_.*"
+    r"(public|external|internet|internet_facing)(_|$)|"
+    r"(^|_)(public|external|internet|internet_facing).*"
+    r"_(blocked|disabled|denied|ignored|prevented|restricted)$",
+    re.IGNORECASE,
+)
 _PUBLIC_CIDRS = {"0.0.0.0/0", "::/0"}
 
 
@@ -244,13 +251,40 @@ def _issue_constraint_errors(*, raw_request: str | None, composed: ComposedCompo
     infrastructure, generated resource arguments must not opt into public,
     external, or internet-facing access, and must not allow all-world CIDRs.
     """
+    errors: list[str] = []
+    for resource in composed.resources:
+        scope = f"{resource.type}.{resource.name}"
+        errors.extend(
+            _private_constraint_value_errors(
+                raw_request=raw_request, scope=scope, values=resource.arguments
+            )
+        )
+        for block_name, entries in resource.nested_blocks.items():
+            for index, entry in enumerate(entries, start=1):
+                errors.extend(
+                    _private_constraint_value_errors(
+                        raw_request=raw_request,
+                        scope=f"{scope}.{block_name}[{index}]",
+                        values=entry,
+                    )
+                )
+    return errors
+
+
+def _private_constraint_value_errors(
+    *, raw_request: str | None, scope: str, values: dict[str, JsonValue]
+) -> list[str]:
     if not raw_request or not _PRIVATE_INTENT_RE.search(raw_request):
         return []
 
     errors: list[str] = []
 
-    def check_value(*, scope: str, field_name: str, value: JsonValue) -> None:
-        if _PUBLIC_FIELD_RE.search(field_name) and value is True:
+    def check_value(*, field_name: str, value: JsonValue) -> None:
+        if (
+            _PUBLIC_FIELD_RE.search(field_name)
+            and not _PROTECTIVE_PUBLIC_FIELD_RE.search(field_name)
+            and value is True
+        ):
             errors.append(
                 f"`{scope}` sets `{field_name}` to true, contradicting the issue's "
                 "private/non-public requirement. Disable public exposure or explain why "
@@ -264,25 +298,13 @@ def _issue_constraint_errors(*, raw_request: str | None, composed: ComposedCompo
             )
         elif isinstance(value, list):
             for entry in value:
-                check_value(scope=scope, field_name=field_name, value=entry)
+                check_value(field_name=field_name, value=entry)
         elif isinstance(value, dict):
             for nested_name, nested_value in value.items():
-                check_value(
-                    scope=scope,
-                    field_name=f"{field_name}.{nested_name}",
-                    value=nested_value,
-                )
+                check_value(field_name=f"{field_name}.{nested_name}", value=nested_value)
 
-    for resource in composed.resources:
-        scope = f"{resource.type}.{resource.name}"
-        for name, value in resource.arguments.items():
-            check_value(scope=scope, field_name=name, value=value)
-        for block_name, entries in resource.nested_blocks.items():
-            for index, entry in enumerate(entries, start=1):
-                for name, value in entry.items():
-                    check_value(
-                        scope=f"{scope}.{block_name}[{index}]", field_name=name, value=value
-                    )
+    for name, value in values.items():
+        check_value(field_name=name, value=value)
     return errors
 
 
@@ -401,6 +423,7 @@ def validate_composed_registry_module(
     *,
     contracts: dict[str, RegistryModuleContract],
     allowed_inputs: list[str],
+    raw_request: str | None = None,
 ) -> list[str]:
     """Deterministically validate a module call against its registry contract.
 
@@ -413,6 +436,11 @@ def validate_composed_registry_module(
         offered = ", ".join(f"`{source}`" for source in sorted(contracts))
         return [f"`{module.source}` is not one of the offered community modules: {offered}."]
     errors: list[str] = []
+    errors.extend(
+        _private_constraint_value_errors(
+            raw_request=raw_request, scope=f"module {module.source}", values=module.inputs
+        )
+    )
     unknown = sorted(set(module.inputs) - set(contract.inputs))
     if unknown:
         sample = ", ".join(sorted(contract.inputs)[:40])
@@ -1039,7 +1067,10 @@ class SpecComposer:
                 )
                 continue
             findings = validate_composed_registry_module(
-                module, contracts=contracts, allowed_inputs=allowed_inputs
+                module,
+                contracts=contracts,
+                allowed_inputs=allowed_inputs,
+                raw_request=intent.raw_request,
             )
             if not findings:
                 contract = contracts[module.source]
