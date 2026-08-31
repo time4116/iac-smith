@@ -49,7 +49,10 @@ _IMAGE_LITERAL_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9._-]+)?(?:@sha256:[A-Fa-f0-9]{64})?$"
 )
 _PRIVATE_INTENT_RE = re.compile(
-    r"\b(private|internal-only|internal only|no public|not public|without public|disable public)\b",
+    r"\b("
+    r"private|non-public|internal-only|internal only|no public|not public|without public|"
+    r"disable public"
+    r")\b",
     re.IGNORECASE,
 )
 _PUBLIC_FIELD_RE = re.compile(
