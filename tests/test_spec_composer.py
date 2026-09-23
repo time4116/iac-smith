@@ -352,6 +352,38 @@ def test_validate_composed_component_rejects_world_cidr_when_issue_requires_priv
     assert any("allows `0.0.0.0/0`" in error for error in errors)
 
 
+def test_validate_composed_component_rejects_public_exposure_when_issue_says_non_public():
+    contracts = {
+        "customcloud_endpoint": TerraformContract(
+            kind="provider_resource",
+            name="customcloud_endpoint",
+            allowed_arguments=["public", "name"],
+            required_arguments=["name"],
+            source="fixture schema",
+        )
+    }
+    component = ComposedComponent(
+        resources=[
+            ResourceSpec(
+                type="customcloud_endpoint",
+                name="api",
+                arguments={"name": "api", "public": True},
+            )
+        ]
+    )
+
+    errors = validate_composed_component(
+        component,
+        provider_contracts=contracts,
+        known_resource_types=set(contracts),
+        allowed_inputs=ALLOWED_INPUTS,
+        component_name="api",
+        raw_request="Create a non-public API endpoint.",
+    )
+
+    assert any("private/non-public requirement" in error for error in errors)
+
+
 def test_compose_repairs_public_exposure_that_contradicts_issue_constraints():
     public_composition = {
         "resources": [
