@@ -74,9 +74,34 @@ class GitHubPullRequestClient:
         head: str,
         base: str = "main",
     ) -> GitHubPullRequest:
-        # Idempotency check: see if a pull request already exists for this branch
+        existing_pr = self._find_open_pull_request(repo=repo, head=head, base=base)
+        if existing_pr is not None:
+            return existing_pr
+
+        response = self._http_client.post(
+            f"https://api.github.com/repos/{repo}/pulls",
+            headers={
+                "Authorization": f"Bearer {self._token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            json={"title": title, "body": body, "head": head, "base": base},
+        )
+        if response.status_code == 422:
+            existing_pr = self._find_open_pull_request(repo=repo, head=head, base=base)
+            if existing_pr is not None:
+                return existing_pr
+        response.raise_for_status()
+        payload = response.json()
+        return GitHubPullRequest(number=int(payload["number"]), url=payload["html_url"])
+
+    def _find_open_pull_request(
+        self,
+        repo: str,
+        head: str,
+        base: str,
+    ) -> GitHubPullRequest | None:
         owner = repo.split("/")[0]
-        # Query matching open pull requests
         check_response = self._http_client.get(
             f"https://api.github.com/repos/{repo}/pulls",
             headers={
@@ -91,16 +116,4 @@ class GitHubPullRequestClient:
             if existing_prs:
                 payload = existing_prs[0]
                 return GitHubPullRequest(number=int(payload["number"]), url=payload["html_url"])
-
-        response = self._http_client.post(
-            f"https://api.github.com/repos/{repo}/pulls",
-            headers={
-                "Authorization": f"Bearer {self._token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-            json={"title": title, "body": body, "head": head, "base": base},
-        )
-        response.raise_for_status()
-        payload = response.json()
-        return GitHubPullRequest(number=int(payload["number"]), url=payload["html_url"])
+        return None

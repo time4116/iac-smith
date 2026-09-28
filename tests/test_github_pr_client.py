@@ -66,3 +66,37 @@ def test_create_pull_request_returns_existing_when_present():
     assert pr.url == "https://github.com/o/r/pull/42"
     assert len(requests) == 1
     assert requests[0].method == "GET"
+
+
+def test_create_pull_request_recovers_existing_pr_after_duplicate_422():
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        get_count = sum(1 for item in requests if item.method == "GET")
+        if request.method == "GET" and get_count == 1:
+            return httpx.Response(200, json=[])
+        if request.method == "POST":
+            return httpx.Response(422, json={"message": "A pull request already exists"})
+        if request.method == "GET":
+            return httpx.Response(
+                200, json=[{"number": 42, "html_url": "https://github.com/o/r/pull/42"}]
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    client = GitHubPullRequestClient(
+        token="token",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    pr = client.create_pull_request(
+        repo="o/r",
+        title="feat: test",
+        body="body",
+        head="iac-smith/issue-1-test",
+        base="main",
+    )
+
+    assert pr.number == 42
+    assert pr.url == "https://github.com/o/r/pull/42"
+    assert [request.method for request in requests] == ["GET", "POST", "GET"]
