@@ -76,7 +76,7 @@ See [docs/SETUP.md](docs/SETUP.md) for full setup instructions including the IAM
 
 ## What IaC Smith can handle
 
-IaC Smith is designed to support more than a fixed catalog of infrastructure types. The agent reads the target repo's existing conventions, module layout, and Terragrunt stacks before generating anything, so it produces changes that fit the repo rather than starting from scratch every time.
+IaC Smith reads the target repo's module layout, version files, and Terragrunt stacks before generating changes. It can reuse existing modules or select provider resources and registry modules from their published schemas; it does not rely on a fixed list of AWS service templates.
 
 It supports both greenfield repos, where the first issue creates the backend bootstrap and repo structure, and iterative additions to existing repos, such as new modules, new stacks, or changes to existing resources.
 
@@ -91,7 +91,7 @@ Before opening a PR, IaC Smith runs:
 
 Runtime validation is intentionally conservative. IaC Smith never runs `terraform apply`. For new infrastructure where remote state or dependency outputs may not exist yet, validation focuses on formatting, backend-free initialization, and module-level Terraform validation rather than pretending every generated stack can be fully planned.
 
-IaC Smith will refuse requests that are genuinely destructive or risky rather than generating an unsafe or misleading implementation.
+Requests blocked by the input safety checks or unsupported by the current planner stop without a PR. A successful static check or scratch plan is not a guarantee that the infrastructure will work after deployment.
 
 ## Design decisions
 
@@ -134,9 +134,7 @@ IaC Smith does not bypass GitOps. It turns an infrastructure request into a boun
 
 The default public-demo workflow is intentionally narrow. The issue trigger is owner-gated, the target repository is fixed by an allowlist, AWS access is via GitHub Actions OIDC, and target-repo writes use a fine-grained PAT scoped to the target repository rather than broad account credentials.
 
-## Self-healing, not self-applying
-
-IaC Smith is designed to repair generated IaC before it reaches reviewers, not to apply infrastructure automatically.
+## Repair limits
 
 The controller uses bounded repair loops at multiple stages:
 
@@ -157,12 +155,6 @@ IaC Smith runs deterministic checks around the model-generated output before it 
 5. **Terraform safety checks**: static review *blocks* on security/safety issues that real Terraform cannot catch: hardcoded Terragrunt state keys, unsafe apply workflow triggers, and workflow privilege problems. Structural findings (duplicate declarations, undeclared references, missing required inputs) are surfaced for review and fed into the repair loop, not blocked. It also flags dangerous public ingress on sensitive ports for reviewer attention.
 6. **Terraform/Terragrunt validation**: before committing changes, IaC Smith runs Terraform formatting, Terragrunt HCL formatting, and backend-free module-level Terraform validation. With optional runtime planning enabled, it also runs plan-only Terragrunt checks against local state with mocked dependencies. This is the authoritative correctness gate: failures trigger a bounded repair loop and otherwise block PR creation.
 7. **PR disclosure**: generated PR bodies include assumptions, warnings, validation results, backend resources, and an explicit no-apply confirmation.
-
-## Why this exists
-
-Infrastructure teams receive repeatable requests through tickets, Slack, and GitHub issues: create a service, add a database, wire a queue, expose a private endpoint, update an environment, or scaffold a new stack.
-
-IaC Smith turns those requests into reviewable pull requests while preserving platform rules, repository conventions, validation, and human approval.
 
 ## Documentation
 
