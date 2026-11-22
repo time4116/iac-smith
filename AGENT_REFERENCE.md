@@ -39,7 +39,7 @@ All configuration is via environment variables. There are no CLI flags.
 |---|---|---|
 | `AWS_REGION` | `us-west-2` | AWS region for Bedrock |
 | `IAC_SMITH_TARGET_REPO_PATH` | (clones to temp dir) | Explicit local path to target repo; never removed by the runner |
-| `IAC_SMITH_WORKDIR` | System temp | Caller-owned directory to clone the target repo into; when unset, the checkout is removed after the run, including failures |
+| `IAC_SMITH_WORKDIR` | System temp | Caller-owned directory to clone the target repo into; an existing destination repo path causes the clone to fail without deleting or replacing it. When unset, the checkout is removed after the run, including failures |
 | `IAC_SMITH_SKIP_RUNTIME_VALIDATION` | unset | Set to `1` to skip terraform/terragrunt validation |
 | `IAC_SMITH_SKIP_PUSH` | unset | Set to `1` to skip git push and PR creation |
 | `IAC_SMITH_RUNTIME_REPAIR_ATTEMPTS` | `3` | Max Bedrock repair attempts after runtime failures (the workflow sets `5` unless the repo var overrides it) |
@@ -59,6 +59,8 @@ All configuration is via environment variables. There are no CLI flags.
 | `IAC_SMITH_MAX_RESOURCE_TYPES` | `12` | Reliability cap on how many provider resource types one composed component may need. A selection above the cap is rejected as too broad with a staged implementation plan (grouped by service token) in the block reason, which is posted back to the source issue. `0` disables the cap |
 | `IAC_SMITH_REGISTRY_MODULES` | enabled | Set to `0` to disable community-module composition. When enabled, `registry_modules.py` searches the Terraform Registry (query derived from the parsed intent, never a hardcoded service list), harvests candidate modules' input/output contracts, and offers them to the composer; the model may implement the component as one validated, version-pinned module call instead of raw provider resources, or decline. Discovery is fail-soft: no network or no candidates simply falls back to raw resource composition |
 | `IAC_SMITH_REGISTRY_NAMESPACES` | `terraform-aws-modules` | Comma-separated registry namespaces searched for community-module candidates |
+
+Clone authentication clears inherited generic and GitHub-scoped Git HTTP extraheaders before adding the target repository's Basic header. The token stays in the clone subprocess environment, not in its arguments or the checkout's Git config. An explicit `IAC_SMITH_TARGET_REPO_PATH` uses that existing checkout without cloning.
 
 ---
 

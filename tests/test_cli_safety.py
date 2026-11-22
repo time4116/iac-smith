@@ -1,6 +1,8 @@
 import base64
 import os
 import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -176,10 +178,16 @@ def test_clone_uses_ephemeral_basic_auth_and_does_not_store_token(tmp_path, monk
     command, child_env = captured[0]
     assert token not in " ".join(command)
     assert command[2] == "https://github.com/example/repo.git"
-    assert child_env["GIT_CONFIG_COUNT"] == "1"
-    assert child_env["GIT_CONFIG_KEY_0"] == "http.https://github.com/.extraheader"
-    assert child_env["GIT_CONFIG_VALUE_0"].startswith("AUTHORIZATION: basic ")
-    encoded = child_env["GIT_CONFIG_VALUE_0"].split(" ")[-1]
+    assert child_env["GIT_CONFIG_COUNT"] == "4"
+    assert child_env["GIT_CONFIG_KEY_0"] == "http.extraheader"
+    assert child_env["GIT_CONFIG_VALUE_0"] == ""
+    assert child_env["GIT_CONFIG_KEY_1"] == "http.https://github.com/.extraheader"
+    assert child_env["GIT_CONFIG_VALUE_1"] == ""
+    assert child_env["GIT_CONFIG_KEY_2"] == "http.https://github.com/example/repo.git.extraheader"
+    assert child_env["GIT_CONFIG_VALUE_2"] == ""
+    assert child_env["GIT_CONFIG_KEY_3"] == "http.https://github.com/example/repo.git.extraheader"
+    assert child_env["GIT_CONFIG_VALUE_3"].startswith("AUTHORIZATION: basic ")
+    encoded = child_env["GIT_CONFIG_VALUE_3"].split(" ")[-1]
     assert base64.b64decode(encoded).decode() == f"x-access-token:{token}"
     assert token not in (checkout / ".git/config").read_text()
     remote = subprocess.run(
@@ -189,6 +197,91 @@ def test_clone_uses_ephemeral_basic_auth_and_does_not_store_token(tmp_path, monk
         check=True,
     ).stdout
     assert token not in remote
+
+
+@pytest.mark.parametrize("inherited_scope", ["global", "environment"])
+@pytest.mark.parametrize("url_scoped", [False, True, "repository"])
+def test_clone_http_probe_sends_only_target_authorization(
+    tmp_path, monkeypatch, inherited_scope, url_scoped
+):
+    received = []
+
+    class Probe(BaseHTTPRequestHandler):
+        def do_GET(self):
+            received.append(self.headers.get_all("Authorization") or [])
+            self.send_response(401)
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Probe)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        config = tmp_path / "global.gitconfig"
+        inherited = "Authorization: Bearer inherited-credential"
+        probe_url = f"http://127.0.0.1:{server.server_port}/"
+        inherited_key = (
+            f"http.{probe_url}repo.git.extraheader"
+            if url_scoped == "repository"
+            else f"http.{probe_url}.extraheader"
+            if url_scoped
+            else "http.extraheader"
+        )
+        if inherited_scope == "global":
+            subprocess.run(
+                ["git", "config", "--file", str(config), "--add", inherited_key, inherited],
+                check=True,
+            )
+        else:
+            monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+            monkeypatch.setenv("GIT_CONFIG_KEY_0", inherited_key)
+            monkeypatch.setenv("GIT_CONFIG_VALUE_0", inherited)
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+        monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
+        real_run = subprocess.run
+
+        def probe_run(command, **kwargs):
+            if command[:2] != ["git", "clone"]:
+                return real_run(command, **kwargs)
+            assert command[2] == "https://github.com/example/repo.git"
+            assert "target-secret" not in " ".join(command)
+            # The local HTTP probe has a different URL. Translate the scoped key
+            # for the probe only; Git still processes inherited and appended entries.
+            env = kwargs["env"].copy()
+            for index in range(int(env["GIT_CONFIG_COUNT"])):
+                key = f"GIT_CONFIG_KEY_{index}"
+                if env[key] == "http.https://github.com/.extraheader":
+                    env[key] = f"http.{probe_url}.extraheader"
+                elif env[key] == "http.https://github.com/example/repo.git.extraheader":
+                    env[key] = f"http.{probe_url}repo.git.extraheader"
+            return real_run(
+                [*command[:2], f"http://127.0.0.1:{server.server_port}/repo.git", command[3]],
+                **{**kwargs, "env": env},
+            )
+
+        monkeypatch.setattr("iac_smith.cli.subprocess.run", probe_run)
+        with pytest.raises(subprocess.CalledProcessError):
+            clone_target_repo("example/repo", "target-secret", tmp_path / "checkout")
+        intended = "basic " + base64.b64encode(b"x-access-token:target-secret").decode()
+        assert received
+        assert received[0] == [intended]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_clone_refuses_existing_caller_owned_repo_without_deleting_it(tmp_path):
+    repo = tmp_path / "caller-owned" / "repo"
+    (repo / ".git").mkdir(parents=True)
+    sentinel = repo / "keep.txt"
+    sentinel.write_text("do not delete")
+    with pytest.raises(FileExistsError):
+        clone_target_repo("example/repo", "target-secret", repo.parent)
+    assert sentinel.read_text() == "do not delete"
+    assert (repo / ".git").is_dir()
 
 
 @pytest.mark.parametrize("raises", [False, True])
