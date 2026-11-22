@@ -105,25 +105,176 @@ def test_select_github_token_prefers_project_specific_token():
     assert token == "workflow-token"
 
 
-def test_push_branch_uses_force_flag(monkeypatch):
-    from pathlib import Path
-
-    calls = []
-
-    def fake_run(command, cwd=None):
-        calls.append((command, cwd))
-
-    monkeypatch.setattr("iac_smith.cli._run", fake_run)
+def test_push_branch_keeps_token_out_of_argv_and_uses_non_force_push(tmp_path, monkeypatch):
     from iac_smith.cli import push_branch
 
-    push_branch(Path("/dummy/repo"), "my-branch", "my-token")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/example/repo.git"],
+        check=True,
+    )
+    captured = []
+    real_run = subprocess.run
 
-    assert len(calls) == 1
-    cmd, cwd = calls[0]
-    assert "push" in cmd
-    assert "-f" in cmd or "--force" in cmd
-    assert "my-branch" in cmd
-    assert cwd == Path("/dummy/repo")
+    def inspect_run(command, **kwargs):
+        if command[:2] == ["git", "push"]:
+            captured.append((command, kwargs))
+            return subprocess.CompletedProcess(command, 0)
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr("iac_smith.cli.subprocess.run", inspect_run)
+    push_branch(repo, "my-branch", "test-secret")
+
+    assert len(captured) == 1
+    command, kwargs = captured[0]
+    assert command == ["git", "push", "-u", "origin", "my-branch"]
+    assert "test-secret" not in repr(command)
+    assert kwargs["cwd"] == repo
+    assert kwargs["check"] is True
+    env = kwargs["env"]
+    entries = [
+        (env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"])
+        for i in range(int(env["GIT_CONFIG_COUNT"]))
+    ]
+    assert entries[-4:-1] == [
+        ("http.extraheader", ""),
+        ("http.https://github.com/.extraheader", ""),
+        ("http.https://github.com/example/repo.git.extraheader", ""),
+    ]
+    assert entries[-1][0] == "http.https://github.com/example/repo.git.extraheader"
+    assert base64.b64decode(entries[-1][1].split()[-1]) == b"x-access-token:test-secret"
+
+
+def test_push_branch_rejects_non_fast_forward_without_rewriting_remote(tmp_path, monkeypatch):
+    from iac_smith.cli import push_branch
+
+    bare = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+    first = tmp_path / "first"
+    subprocess.run(["git", "init", "-q", "-b", "feature", str(first)], check=True)
+    subprocess.run(["git", "-C", str(first), "remote", "add", "origin", str(bare)], check=True)
+
+    def commit(repo, value):
+        (repo / "change.txt").write_text(value)
+        subprocess.run(["git", "-C", str(repo), "add", "change.txt"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.org",
+                "commit",
+                "-qm",
+                value,
+            ],
+            check=True,
+        )
+
+    commit(first, "base")
+    push_branch(first, "feature", "test-secret")
+    second = tmp_path / "second"
+    subprocess.run(["git", "clone", "-q", "-b", "feature", str(bare), str(second)], check=True)
+    commit(second, "remote change")
+    push_branch(second, "feature", "test-secret")
+    remote_head = subprocess.check_output(
+        ["git", "-C", str(bare), "rev-parse", "refs/heads/feature"]
+    ).strip()
+    commit(first, "local divergent change")
+    with pytest.raises(subprocess.CalledProcessError):
+        push_branch(first, "feature", "test-secret")
+    assert (
+        subprocess.check_output(["git", "-C", str(bare), "rev-parse", "refs/heads/feature"]).strip()
+        == remote_head
+    )
+    assert (
+        subprocess.check_output(["git", "-C", str(second), "rev-parse", "HEAD"]).strip()
+        == remote_head
+    )
+
+
+@pytest.mark.parametrize("inherited_scope", ["global", "environment"])
+@pytest.mark.parametrize("header_scope", ["generic", "host", "repository"])
+def test_push_http_probe_sends_only_target_authorization(
+    tmp_path, monkeypatch, inherited_scope, header_scope
+):
+    from iac_smith.cli import push_branch
+
+    received = []
+
+    class Probe(BaseHTTPRequestHandler):
+        def do_GET(self):
+            received.append(self.headers.get_all("Authorization") or [])
+            self.send_response(401)
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Probe)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        repo = tmp_path / "repo"
+        subprocess.run(["git", "init", "-q", "-b", "feature", str(repo)], check=True)
+        (repo / "README.md").write_text("fixture\n")
+        subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.org",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+            check=True,
+        )
+        url = f"http://127.0.0.1:{server.server_port}/repo.git"
+        subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", url], check=True)
+        key = {
+            "generic": "http.extraheader",
+            "host": f"http.http://127.0.0.1:{server.server_port}/.extraheader",
+            "repository": f"http.{url}.extraheader",
+        }[header_scope]
+        config = tmp_path / "global.gitconfig"
+        if inherited_scope == "global":
+            subprocess.run(
+                [
+                    "git",
+                    "config",
+                    "--file",
+                    str(config),
+                    "--add",
+                    key,
+                    "Authorization: Bearer inherited",
+                ],
+                check=True,
+            )
+        else:
+            monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+            monkeypatch.setenv("GIT_CONFIG_KEY_0", key)
+            monkeypatch.setenv("GIT_CONFIG_VALUE_0", "Authorization: Bearer inherited")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+        monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
+        with pytest.raises(subprocess.CalledProcessError):
+            push_branch(repo, "feature", "target-secret")
+        intended = "basic " + base64.b64encode(b"x-access-token:target-secret").decode()
+        assert received
+        assert received[0] == [intended]
+        assert "target-secret" not in (repo / ".git/config").read_text()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 def test_clone_uses_ephemeral_basic_auth_and_does_not_store_token(tmp_path, monkeypatch):

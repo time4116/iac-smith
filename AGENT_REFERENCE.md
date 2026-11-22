@@ -60,7 +60,7 @@ All configuration is via environment variables. There are no CLI flags.
 | `IAC_SMITH_REGISTRY_MODULES` | enabled | Set to `0` to disable community-module composition. When enabled, `registry_modules.py` searches the Terraform Registry (query derived from the parsed intent, never a hardcoded service list), harvests candidate modules' input/output contracts, and offers them to the composer; the model may implement the component as one validated, version-pinned module call instead of raw provider resources, or decline. Discovery is fail-soft: no network or no candidates simply falls back to raw resource composition |
 | `IAC_SMITH_REGISTRY_NAMESPACES` | `terraform-aws-modules` | Comma-separated registry namespaces searched for community-module candidates |
 
-Clone authentication clears inherited generic and GitHub-scoped Git HTTP extraheaders before adding the target repository's Basic header. The token stays in the clone subprocess environment, not in its arguments or the checkout's Git config. An explicit `IAC_SMITH_TARGET_REPO_PATH` uses that existing checkout without cloning.
+Clone and push authentication clear inherited generic, host-scoped, and exact-repository Git HTTP extraheaders before adding the target repository's Basic header. The token stays in each subprocess environment, not in its arguments or the checkout's Git config. Push uses a normal fast-forward-only update; a divergent remote branch rejects the push rather than losing remote commits. An explicit `IAC_SMITH_TARGET_REPO_PATH` uses that existing checkout without cloning.
 
 ---
 

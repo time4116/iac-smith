@@ -175,16 +175,11 @@ def _log(message: str) -> None:
     print(message, flush=True)
 
 
-def clone_target_repo(target_repo: str, token: str, destination: Path) -> Path:
-    repo_path = destination / target_repo.split("/")[-1]
-    if repo_path.exists() or repo_path.is_symlink():
-        raise FileExistsError(f"Refusing to clone into existing path: {repo_path}")
-
-    repo_url = f"https://github.com/{target_repo}.git"
-    # Git's environment config reaches the clone's fetch without appearing in
-    # argv or being copied into the new checkout's .git/config.
-    clone_env = os.environ.copy()
-    index = int(clone_env.get("GIT_CONFIG_COUNT", "0"))
+def _git_auth_env(repo_url: str, token: str) -> dict[str, str]:
+    # Git's environment config reaches clone and push without entering argv or
+    # being copied into the checkout's .git/config.
+    env = os.environ.copy()
+    index = int(env.get("GIT_CONFIG_COUNT", "0"))
     # extraheader is multi-valued. Empty entries reset the inherited list,
     # including generic and URL-scoped headers from global and env config.
     # Include the exact repository URL: a path-scoped inherited header can
@@ -197,26 +192,39 @@ def clone_target_repo(target_repo: str, token: str, destination: Path) -> Path:
     if token:
         entries.append((f"http.{repo_url}.extraheader", _git_auth_header(token)))
     for offset, (key, value) in enumerate(entries):
-        clone_env[f"GIT_CONFIG_KEY_{index + offset}"] = key
-        clone_env[f"GIT_CONFIG_VALUE_{index + offset}"] = value
-    clone_env["GIT_CONFIG_COUNT"] = str(index + len(entries))
-    subprocess.run(["git", "clone", repo_url, str(repo_path)], env=clone_env, check=True)
+        env[f"GIT_CONFIG_KEY_{index + offset}"] = key
+        env[f"GIT_CONFIG_VALUE_{index + offset}"] = value
+    env["GIT_CONFIG_COUNT"] = str(index + len(entries))
+    return env
+
+
+def clone_target_repo(target_repo: str, token: str, destination: Path) -> Path:
+    repo_path = destination / target_repo.split("/")[-1]
+    if repo_path.exists() or repo_path.is_symlink():
+        raise FileExistsError(f"Refusing to clone into existing path: {repo_path}")
+
+    repo_url = f"https://github.com/{target_repo}.git"
+    subprocess.run(
+        ["git", "clone", repo_url, str(repo_path)],
+        env=_git_auth_env(repo_url, token),
+        check=True,
+    )
     return repo_path
 
 
 def push_branch(repo_path: Path, branch: str, token: str) -> None:
-    _run(
-        [
-            "git",
-            "-c",
-            f"http.https://github.com/.extraheader={_git_auth_header(token)}",
-            "push",
-            "-f",
-            "-u",
-            "origin",
-            branch,
-        ],
+    repo_url = subprocess.run(
+        ["git", "remote", "get-url", "--push", "origin"],
         cwd=repo_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "push", "-u", "origin", branch],
+        cwd=repo_path,
+        env=_git_auth_env(repo_url, token),
+        check=True,
     )
 
 
