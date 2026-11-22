@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 import threading
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
@@ -175,32 +175,56 @@ def _log(message: str) -> None:
     print(message, flush=True)
 
 
+def _git_auth_env(repo_url: str, token: str) -> dict[str, str]:
+    # Git's environment config reaches clone and push without entering argv or
+    # being copied into the checkout's .git/config.
+    env = os.environ.copy()
+    index = int(env.get("GIT_CONFIG_COUNT", "0"))
+    # extraheader is multi-valued. Empty entries reset the inherited list,
+    # including generic and URL-scoped headers from global and env config.
+    # Include the exact repository URL: a path-scoped inherited header can
+    # outrank the host-scoped reset in Git's URL matching.
+    entries = [
+        ("http.extraheader", ""),
+        ("http.https://github.com/.extraheader", ""),
+        (f"http.{repo_url}.extraheader", ""),
+    ]
+    if token:
+        entries.append((f"http.{repo_url}.extraheader", _git_auth_header(token)))
+    for offset, (key, value) in enumerate(entries):
+        env[f"GIT_CONFIG_KEY_{index + offset}"] = key
+        env[f"GIT_CONFIG_VALUE_{index + offset}"] = value
+    env["GIT_CONFIG_COUNT"] = str(index + len(entries))
+    return env
+
+
 def clone_target_repo(target_repo: str, token: str, destination: Path) -> Path:
     repo_path = destination / target_repo.split("/")[-1]
-    if repo_path.exists():
-        import shutil
+    if repo_path.exists() or repo_path.is_symlink():
+        raise FileExistsError(f"Refusing to clone into existing path: {repo_path}")
 
-        shutil.rmtree(repo_path)
-
-    # Use URL-based auth for headless reliability
-    repo_url = f"https://x-access-token:{token}@github.com/{target_repo}.git"
-    _run(["git", "clone", repo_url, str(repo_path)])
+    repo_url = f"https://github.com/{target_repo}.git"
+    subprocess.run(
+        ["git", "clone", repo_url, str(repo_path)],
+        env=_git_auth_env(repo_url, token),
+        check=True,
+    )
     return repo_path
 
 
 def push_branch(repo_path: Path, branch: str, token: str) -> None:
-    _run(
-        [
-            "git",
-            "-c",
-            f"http.https://github.com/.extraheader={_git_auth_header(token)}",
-            "push",
-            "-f",
-            "-u",
-            "origin",
-            branch,
-        ],
+    repo_url = subprocess.run(
+        ["git", "remote", "get-url", "--push", "origin"],
         cwd=repo_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "push", "-u", "origin", branch],
+        cwd=repo_path,
+        env=_git_auth_env(repo_url, token),
+        check=True,
     )
 
 
@@ -208,8 +232,10 @@ def _target_repo_path(env: Mapping[str, str], target_repo: str, token: str) -> P
     explicit_path = env.get("IAC_SMITH_TARGET_REPO_PATH")
     if explicit_path:
         return Path(explicit_path)
-    workdir = Path(env.get("IAC_SMITH_WORKDIR") or tempfile.mkdtemp(prefix="iac-smith-"))
-    return clone_target_repo(target_repo, token, workdir)
+    workdir = env.get("IAC_SMITH_WORKDIR")
+    if not workdir:
+        raise ValueError("A checkout workdir must be provided by run_iac_smith")
+    return clone_target_repo(target_repo, token, Path(workdir))
 
 
 def _runtime_repair_attempts(env: Mapping[str, str]) -> int:
@@ -487,10 +513,18 @@ def run_iac_smith(
     summarizer: Callable[[str], str] | None = None,
 ) -> IaCSmithRunResult:
     timeout = _run_timeout(env)
+    # Caller-supplied checkouts belong to the caller. Only implicit clones are
+    # disposable, including blocked runs, exceptions, and deadline failures.
+    temporary = (
+        tempfile.TemporaryDirectory(prefix="iac-smith-")
+        if not (env.get("IAC_SMITH_WORKDIR") or env.get("IAC_SMITH_TARGET_REPO_PATH"))
+        else nullcontext(None)
+    )
     try:
-        with _run_deadline(timeout):
+        with temporary as workdir, _run_deadline(timeout):
+            run_env = {**env, "IAC_SMITH_WORKDIR": workdir} if workdir else env
             result = _run_iac_smith_core(
-                env,
+                run_env,
                 issue_client=issue_client,
                 pr_client=pr_client,
                 intent_parser_fn=intent_parser_fn,
