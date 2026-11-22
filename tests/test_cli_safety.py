@@ -1,8 +1,18 @@
+import base64
 import os
+import subprocess
+from pathlib import Path
 
 import pytest
 
-from iac_smith.cli import build_initial_state, select_github_token, validate_allowed_target_repo
+from iac_smith.cli import (
+    IaCSmithRunResult,
+    build_initial_state,
+    clone_target_repo,
+    run_iac_smith,
+    select_github_token,
+    validate_allowed_target_repo,
+)
 from iac_smith.services.github import GitHubIssue
 
 
@@ -112,3 +122,104 @@ def test_push_branch_uses_force_flag(monkeypatch):
     assert "-f" in cmd or "--force" in cmd
     assert "my-branch" in cmd
     assert cwd == Path("/dummy/repo")
+
+
+def test_clone_uses_ephemeral_basic_auth_and_does_not_store_token(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    (source / "README.md").write_text("fixture\n")
+    subprocess.run(["git", "-C", str(source), "add", "README.md"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.org",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    # Rewrite only the test URL locally so git clone executes without network access.
+    config = tmp_path / "global.gitconfig"
+    subprocess.run(
+        [
+            "git",
+            "config",
+            "--file",
+            str(config),
+            f"url.file://{source}.insteadOf",
+            "https://github.com/example/repo.git",
+        ],
+        check=True,
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
+    token = "test-secret-do-not-persist"
+    real_run = subprocess.run
+    captured = []
+
+    def inspect_run(command, **kwargs):
+        if command[:2] == ["git", "clone"]:
+            captured.append((command, kwargs.get("env")))
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr("iac_smith.cli.subprocess.run", inspect_run)
+    checkout = clone_target_repo("example/repo", token, tmp_path / "checkout")
+    assert (checkout / "README.md").read_text() == "fixture\n"
+    assert len(captured) == 1
+    command, child_env = captured[0]
+    assert token not in " ".join(command)
+    assert command[2] == "https://github.com/example/repo.git"
+    assert child_env["GIT_CONFIG_COUNT"] == "1"
+    assert child_env["GIT_CONFIG_KEY_0"] == "http.https://github.com/.extraheader"
+    assert child_env["GIT_CONFIG_VALUE_0"].startswith("AUTHORIZATION: basic ")
+    encoded = child_env["GIT_CONFIG_VALUE_0"].split(" ")[-1]
+    assert base64.b64decode(encoded).decode() == f"x-access-token:{token}"
+    assert token not in (checkout / ".git/config").read_text()
+    remote = subprocess.run(
+        ["git", "-C", str(checkout), "remote", "get-url", "origin"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert token not in remote
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_implicit_checkout_is_removed_after_run(tmp_path, monkeypatch, raises):
+    monkeypatch.setattr("iac_smith.cli.tempfile.tempdir", str(tmp_path))
+    paths = []
+
+    def fake_core(env, **kwargs):
+        path = Path(env["IAC_SMITH_WORKDIR"])
+        paths.append(path)
+        assert path.is_dir()
+        if raises:
+            raise RuntimeError("failed run")
+        return IaCSmithRunResult(status="ignored")
+
+    monkeypatch.setattr("iac_smith.cli._run_iac_smith_core", fake_core)
+    if raises:
+        with pytest.raises(RuntimeError, match="failed run"):
+            run_iac_smith({}, FakeIssueClient(), None)
+    else:
+        run_iac_smith({}, FakeIssueClient(), None)
+    assert len(paths) == 1
+    assert not paths[0].exists()
+
+
+def test_explicit_checkout_is_not_removed(tmp_path, monkeypatch):
+    workdir = tmp_path / "caller-owned"
+    workdir.mkdir()
+    monkeypatch.setattr(
+        "iac_smith.cli._run_iac_smith_core",
+        lambda env, **kwargs: IaCSmithRunResult(status="ignored"),
+    )
+    run_iac_smith({"IAC_SMITH_WORKDIR": str(workdir)}, FakeIssueClient(), None)
+    assert workdir.is_dir()

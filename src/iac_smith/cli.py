@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 import threading
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
@@ -182,9 +182,16 @@ def clone_target_repo(target_repo: str, token: str, destination: Path) -> Path:
 
         shutil.rmtree(repo_path)
 
-    # Use URL-based auth for headless reliability
-    repo_url = f"https://x-access-token:{token}@github.com/{target_repo}.git"
-    _run(["git", "clone", repo_url, str(repo_path)])
+    repo_url = f"https://github.com/{target_repo}.git"
+    # Git's environment config reaches the clone's fetch without appearing in
+    # argv or being copied into the new checkout's .git/config.
+    clone_env = os.environ.copy()
+    if token:
+        index = int(clone_env.get("GIT_CONFIG_COUNT", "0"))
+        clone_env["GIT_CONFIG_COUNT"] = str(index + 1)
+        clone_env[f"GIT_CONFIG_KEY_{index}"] = "http.https://github.com/.extraheader"
+        clone_env[f"GIT_CONFIG_VALUE_{index}"] = _git_auth_header(token)
+    subprocess.run(["git", "clone", repo_url, str(repo_path)], env=clone_env, check=True)
     return repo_path
 
 
@@ -208,8 +215,10 @@ def _target_repo_path(env: Mapping[str, str], target_repo: str, token: str) -> P
     explicit_path = env.get("IAC_SMITH_TARGET_REPO_PATH")
     if explicit_path:
         return Path(explicit_path)
-    workdir = Path(env.get("IAC_SMITH_WORKDIR") or tempfile.mkdtemp(prefix="iac-smith-"))
-    return clone_target_repo(target_repo, token, workdir)
+    workdir = env.get("IAC_SMITH_WORKDIR")
+    if not workdir:
+        raise ValueError("A checkout workdir must be provided by run_iac_smith")
+    return clone_target_repo(target_repo, token, Path(workdir))
 
 
 def _runtime_repair_attempts(env: Mapping[str, str]) -> int:
@@ -487,10 +496,18 @@ def run_iac_smith(
     summarizer: Callable[[str], str] | None = None,
 ) -> IaCSmithRunResult:
     timeout = _run_timeout(env)
+    # Caller-supplied checkouts belong to the caller. Only implicit clones are
+    # disposable, including blocked runs, exceptions, and deadline failures.
+    temporary = (
+        tempfile.TemporaryDirectory(prefix="iac-smith-")
+        if not (env.get("IAC_SMITH_WORKDIR") or env.get("IAC_SMITH_TARGET_REPO_PATH"))
+        else nullcontext(None)
+    )
     try:
-        with _run_deadline(timeout):
+        with temporary as workdir, _run_deadline(timeout):
+            run_env = {**env, "IAC_SMITH_WORKDIR": workdir} if workdir else env
             result = _run_iac_smith_core(
-                env,
+                run_env,
                 issue_client=issue_client,
                 pr_client=pr_client,
                 intent_parser_fn=intent_parser_fn,

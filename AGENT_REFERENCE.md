@@ -38,8 +38,8 @@ All configuration is via environment variables. There are no CLI flags.
 | Variable | Default | Description |
 |---|---|---|
 | `AWS_REGION` | `us-west-2` | AWS region for Bedrock |
-| `IAC_SMITH_TARGET_REPO_PATH` | (clones to temp dir) | Explicit local path to target repo |
-| `IAC_SMITH_WORKDIR` | System temp | Dir to clone target repo into |
+| `IAC_SMITH_TARGET_REPO_PATH` | (clones to temp dir) | Explicit local path to target repo; never removed by the runner |
+| `IAC_SMITH_WORKDIR` | System temp | Caller-owned directory to clone the target repo into; when unset, the checkout is removed after the run, including failures |
 | `IAC_SMITH_SKIP_RUNTIME_VALIDATION` | unset | Set to `1` to skip terraform/terragrunt validation |
 | `IAC_SMITH_SKIP_PUSH` | unset | Set to `1` to skip git push and PR creation |
 | `IAC_SMITH_RUNTIME_REPAIR_ATTEMPTS` | `3` | Max Bedrock repair attempts after runtime failures (the workflow sets `5` unless the repo var overrides it) |
