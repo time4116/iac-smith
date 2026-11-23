@@ -13,18 +13,25 @@ def _run_git(repo_path: Path, args: list[str]) -> subprocess.CompletedProcess[st
 
 
 def _safe_path(repo_path: Path, relative_path: str) -> Path:
-    destination = (repo_path / relative_path).resolve()
+    candidate = Path(relative_path)
+    if candidate.is_absolute() or ".git" in candidate.parts or not relative_path:
+        raise ValueError(f"Generated file path `{relative_path}` is not a safe repository file")
+    destination = (repo_path / candidate).resolve()
     root = repo_path.resolve()
-    if destination != root and root not in destination.parents:
+    if destination == root or root not in destination.parents:
         raise ValueError(f"Generated file path `{relative_path}` resolves outside repository")
+    # A symlink can point into the repository's metadata even when its name does not.
+    if ".git" in destination.relative_to(root).parts:
+        raise ValueError(f"Generated file path `{relative_path}` targets git metadata")
     return destination
 
 
 def apply_generated_files(repo_path: str | Path, generated_files: dict[str, str]) -> list[Path]:
     root = Path(repo_path)
+    # Reject the entire batch before any generated file is written.
+    destinations = [(_safe_path(root, path), content) for path, content in generated_files.items()]
     written: list[Path] = []
-    for relative_path, content in generated_files.items():
-        destination = _safe_path(root, relative_path)
+    for destination, content in destinations:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(content, encoding="utf-8")
         written.append(destination)

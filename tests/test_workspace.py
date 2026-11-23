@@ -1,6 +1,8 @@
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from iac_smith.workspace import apply_generated_files, commit_generated_files
 
 
@@ -15,6 +17,27 @@ def test_apply_generated_files_writes_inside_repo_and_rejects_escape(tmp_path: P
         assert "outside repository" in str(exc)
     else:
         raise AssertionError("path traversal should fail")
+
+
+@pytest.mark.parametrize(
+    "unsafe", [".git/config", "nested/.git/hooks/pre-commit", "../escape.tf", "/tmp/escape.tf", "."]
+)
+def test_apply_generated_files_rejects_unsafe_batch_before_writing(tmp_path: Path, unsafe: str):
+    (tmp_path / ".git").mkdir()
+    config = tmp_path / ".git" / "config"
+    config.write_text("original", encoding="utf-8")
+    with pytest.raises(ValueError):
+        apply_generated_files(tmp_path, {"safe.tf": "safe", unsafe: "unsafe"})
+    assert not (tmp_path / "safe.tf").exists()
+    assert config.read_text(encoding="utf-8") == "original"
+
+
+def test_apply_generated_files_rejects_symlink_into_git_metadata(tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / ".git", target_is_directory=True)
+    with pytest.raises(ValueError, match="git metadata"):
+        apply_generated_files(tmp_path, {"link/config": "unsafe"})
+    assert not (tmp_path / ".git" / "config").exists()
 
 
 def test_commit_generated_files_creates_commit_when_changes_exist(tmp_path: Path):
